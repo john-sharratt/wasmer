@@ -1,5 +1,7 @@
 use crate::address_map::get_function_address_map;
-use crate::{common_decl::*, config::Singlepass, emitter_x64::*, machine_x64::Machine, x64_decl::*};
+use crate::{
+    common_decl::*, config::Singlepass, emitter_x64::*, machine_x64::Machine, x64_decl::*,
+};
 use dynasmrt::{x64::Assembler, DynamicLabel};
 use smallvec::{smallvec, SmallVec};
 use std::collections::BTreeMap;
@@ -634,7 +636,8 @@ impl<'a> FuncGen<'a> {
             }
             Location::Memory(_, _) | Location::GPR(_) => {
                 op(self, src1, src2, tmp3);
-                self.assembler.emit_mov(Size::S64, Location::SIMD(tmp3), dst);
+                self.assembler
+                    .emit_mov(Size::S64, Location::SIMD(tmp3), dst);
             }
             _ => {
                 return Err(CodegenError {
@@ -2845,7 +2848,8 @@ impl<'a> FuncGen<'a> {
                                 .emit_vmovaps(XMMOrMemory::XMM(src1), XMMOrMemory::XMM(x));
                         }
                         Location::Memory(_, _) | Location::GPR(_) => {
-                            self.assembler.emit_mov(Size::S64, Location::SIMD(src1), ret);
+                            self.assembler
+                                .emit_mov(Size::S64, Location::SIMD(src1), ret);
                         }
                         _ => {
                             return Err(CodegenError {
@@ -2998,7 +3002,8 @@ impl<'a> FuncGen<'a> {
                                 .emit_vmovaps(XMMOrMemory::XMM(src1), XMMOrMemory::XMM(x));
                         }
                         Location::Memory(_, _) | Location::GPR(_) => {
-                            self.assembler.emit_mov(Size::S64, Location::SIMD(src1), ret);
+                            self.assembler
+                                .emit_mov(Size::S64, Location::SIMD(src1), ret);
                         }
                         _ => {
                             return Err(CodegenError {
@@ -3335,7 +3340,8 @@ impl<'a> FuncGen<'a> {
                                 .emit_vmovapd(XMMOrMemory::XMM(src1), XMMOrMemory::XMM(x));
                         }
                         Location::Memory(_, _) | Location::GPR(_) => {
-                            self.assembler.emit_mov(Size::S64, Location::SIMD(src1), ret);
+                            self.assembler
+                                .emit_mov(Size::S64, Location::SIMD(src1), ret);
                         }
                         _ => {
                             return Err(CodegenError {
@@ -3489,7 +3495,8 @@ impl<'a> FuncGen<'a> {
                                 .emit_vmovaps(XMMOrMemory::XMM(src1), XMMOrMemory::XMM(x));
                         }
                         Location::Memory(_, _) | Location::GPR(_) => {
-                            self.assembler.emit_mov(Size::S64, Location::SIMD(src1), ret);
+                            self.assembler
+                                .emit_mov(Size::S64, Location::SIMD(src1), ret);
                         }
                         _ => {
                             return Err(CodegenError {
@@ -3826,7 +3833,12 @@ impl<'a> FuncGen<'a> {
 
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
-                self.emit_relaxed_binop(Assembler::emit_mov, Size::S32, loc, Location::SIMD(tmp_in));
+                self.emit_relaxed_binop(
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::SIMD(tmp_in),
+                );
                 self.emit_f32_int_conv_check_sat(
                     tmp_in,
                     GEF32_LT_U32_MIN,
@@ -3924,7 +3936,12 @@ impl<'a> FuncGen<'a> {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                self.emit_relaxed_binop(Assembler::emit_mov, Size::S32, loc, Location::SIMD(tmp_in));
+                self.emit_relaxed_binop(
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::SIMD(tmp_in),
+                );
                 self.emit_f32_int_conv_check_sat(
                     tmp_in,
                     GEF32_LT_I32_MIN,
@@ -4028,7 +4045,12 @@ impl<'a> FuncGen<'a> {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                self.emit_relaxed_binop(Assembler::emit_mov, Size::S32, loc, Location::SIMD(tmp_in));
+                self.emit_relaxed_binop(
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::SIMD(tmp_in),
+                );
                 self.emit_f32_int_conv_check_sat(
                     tmp_in,
                     GEF32_LT_I64_MIN,
@@ -4165,7 +4187,12 @@ impl<'a> FuncGen<'a> {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                self.emit_relaxed_binop(Assembler::emit_mov, Size::S32, loc, Location::SIMD(tmp_in));
+                self.emit_relaxed_binop(
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::SIMD(tmp_in),
+                );
                 self.emit_f32_int_conv_check_sat(
                     tmp_in,
                     GEF32_LT_U64_MIN,
@@ -4304,7 +4331,12 @@ impl<'a> FuncGen<'a> {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                self.emit_relaxed_binop(Assembler::emit_mov, Size::S64, loc, Location::SIMD(tmp_in));
+                self.emit_relaxed_binop(
+                    Assembler::emit_mov,
+                    Size::S64,
+                    loc,
+                    Location::SIMD(tmp_in),
+                );
                 self.emit_f64_int_conv_check_sat(
                     tmp_in,
                     GEF64_LT_U32_MIN,
@@ -4539,7 +4571,12 @@ impl<'a> FuncGen<'a> {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                self.emit_relaxed_binop(Assembler::emit_mov, Size::S64, loc, Location::SIMD(tmp_in));
+                self.emit_relaxed_binop(
+                    Assembler::emit_mov,
+                    Size::S64,
+                    loc,
+                    Location::SIMD(tmp_in),
+                );
                 self.emit_f64_int_conv_check_sat(
                     tmp_in,
                     GEF64_LT_I64_MIN,
@@ -4677,7 +4714,12 @@ impl<'a> FuncGen<'a> {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                self.emit_relaxed_binop(Assembler::emit_mov, Size::S64, loc, Location::SIMD(tmp_in));
+                self.emit_relaxed_binop(
+                    Assembler::emit_mov,
+                    Size::S64,
+                    loc,
+                    Location::SIMD(tmp_in),
+                );
                 self.emit_f64_int_conv_check_sat(
                     tmp_in,
                     GEF64_LT_U64_MIN,
