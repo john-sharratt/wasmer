@@ -664,7 +664,7 @@
 <span class="kw">use</span> <span class="ident">wasmer_vfs</span>::{<span class="ident">host_fs</span>, <span class="ident">mem_fs</span>, <span class="ident">FileSystem</span>};
 <span class="kw">use</span> <span class="ident">wasmer_wasi::types</span>::{<span class="ident">__wasi_filesize_t</span>, <span class="ident">__wasi_timestamp_t</span>};
 <span class="kw">use</span> <span class="ident">wasmer_wasi</span>::{
-    <span class="ident">generate_import_object_from_env</span>, <span class="ident">get_wasi_version</span>, <span class="ident">FsError</span>, <span class="ident">Pipe</span>, <span class="ident">VirtualFile</span>, <span class="ident">WasiEnv</span>,
+    <span class="ident">generate_import_object_from_thread</span>, <span class="ident">get_wasi_version</span>, <span class="ident">FsError</span>, <span class="ident">Pipe</span>, <span class="ident">VirtualFile</span>, <span class="ident">WasiEnv</span>,
     <span class="ident">WasiState</span>, <span class="ident">WasiVersion</span>,
 };
 <span class="kw">use</span> <span class="ident">wast::parser</span>::{<span class="self">self</span>, <span class="ident">Parse</span>, <span class="ident">ParseBuffer</span>, <span class="ident">Parser</span>};
@@ -902,7 +902,7 @@
     ) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">anyhow::Result</span><span class="op">&lt;</span><span class="ident">ImportObject</span><span class="op">&gt;</span> {
         <span class="kw">let</span> <span class="ident">thread</span> <span class="op">=</span> <span class="ident">env</span>.<span class="ident">new_thread</span>();
         <span class="kw">let</span> <span class="ident">version</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">get_version</span>(<span class="ident">module</span>)<span class="question-mark">?</span>;
-        <span class="prelude-val">Ok</span>(<span class="ident">generate_import_object_from_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>, <span class="ident">version</span>))
+        <span class="prelude-val">Ok</span>(<span class="ident">generate_import_object_from_thread</span>(<span class="ident">store</span>, <span class="ident">thread</span>, <span class="ident">version</span>))
     }
 }
 
