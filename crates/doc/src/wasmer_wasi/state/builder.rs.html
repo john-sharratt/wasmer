@@ -652,6 +652,7 @@
 <span id="652">652</span>
 <span id="653">653</span>
 <span id="654">654</span>
+<span id="655">655</span>
 </pre><pre class="rust"><code><span class="doccomment">//! Builder system for configuring a [`WasiState`] and creating it.</span>
 
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::state</span>::{<span class="ident">default_fs_backing</span>, <span class="ident">WasiFs</span>, <span class="ident">WasiState</span>};
@@ -967,12 +968,13 @@
     }
 
     <span class="doccomment">/// Sets a callback that will be invoked whenever the process yields execution.</span>
-    <span class="doccomment">/// </span>
+    <span class="doccomment">///</span>
     <span class="doccomment">/// This is useful if the background tasks and/or callbacks are to be</span>
     <span class="doccomment">/// executed whenever the WASM process goes idle</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">on_yield</span><span class="op">&lt;</span><span class="ident">F</span><span class="op">&gt;</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>, <span class="ident">callback</span>: <span class="ident">F</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">Self</span>
-    <span class="kw">where</span> <span class="ident">F</span>: <span class="ident">Fn</span>(<span class="kw-2">&amp;</span><span class="ident">WasiThread</span>),
-          <span class="ident">F</span>: <span class="ident">Send</span> <span class="op">+</span> <span class="ident">Sync</span> <span class="op">+</span> <span class="lifetime">&#39;static</span>
+    <span class="kw">where</span>
+        <span class="ident">F</span>: <span class="ident">Fn</span>(<span class="kw-2">&amp;</span><span class="ident">WasiThread</span>),
+        <span class="ident">F</span>: <span class="ident">Send</span> <span class="op">+</span> <span class="ident">Sync</span> <span class="op">+</span> <span class="lifetime">&#39;static</span>,
     {
         <span class="self">self</span>.<span class="ident">on_yield</span> <span class="op">=</span> <span class="prelude-val">Some</span>(<span class="ident">Arc::new</span>(<span class="ident">callback</span>));
 
@@ -1134,7 +1136,7 @@
     <span class="doccomment">/// [Self::build]&#39;s documentation to learn more.</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">finalize</span>(<span class="kw-2">&amp;</span><span class="kw-2">mut</span> <span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="ident">WasiEnv</span>, <span class="ident">WasiStateCreationError</span><span class="op">&gt;</span> {
         <span class="kw">let</span> <span class="ident">state</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">build</span>()<span class="question-mark">?</span>;
-    
+
         <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">env</span> <span class="op">=</span> <span class="ident">WasiEnv::new</span>(<span class="ident">state</span>);
         <span class="ident">env</span>.<span class="ident">on_yield</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">on_yield</span>.<span class="ident">clone</span>();
         <span class="prelude-val">Ok</span>(<span class="ident">env</span>)
