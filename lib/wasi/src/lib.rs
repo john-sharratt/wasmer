@@ -43,7 +43,7 @@ mod utils;
 use crate::syscalls::*;
 
 pub use crate::state::{
-    Fd, Pipe, Stderr, Stdin, Stdout, WasiFs, WasiState, WasiStateBuilder, WasiStateCreationError,
+    Fd, Pipe, Stderr, Stdin, Stdout, WasiFs, WasiState, WasiStateBuilder, WasiStateCreationError, WasiInodes,
     ALL_RIGHTS, VIRTUAL_ROOT_FD,
 };
 pub use crate::syscalls::types;
@@ -59,10 +59,10 @@ pub use wasmer_vfs::{FsError, VirtualFile};
 use thiserror::Error;
 use wasmer::{
     imports, ChainableNamedResolver, Function, ImportObject, LazyInit, Memory, Module,
-    NamedResolver, Store, WasmerEnv,
+    NamedResolver, Store, WasmerEnv
 };
 
-use std::sync::{atomic::AtomicU32, atomic::Ordering, Arc, Mutex, MutexGuard};
+use std::sync::{atomic::AtomicU32, atomic::Ordering, Arc, RwLockReadGuard, RwLockWriteGuard};
 
 /// This is returned in `RuntimeError`.
 /// Use `downcast` or `downcast_ref` to retrieve the `ExitCode`.
@@ -171,10 +171,30 @@ impl WasiThread {
     pub(crate) fn get_memory_and_wasi_state(
         &self,
         _mem_index: u32,
-    ) -> (&Memory, MutexGuard<WasiState>) {
+    ) -> (&Memory, &WasiState) {
         let memory = self.memory();
-        let state = self.state.lock().unwrap();
+        let state = self.state.deref();
         (memory, state)
+    }
+
+    pub(crate) fn get_memory_and_wasi_state_and_inodes(
+        &self,
+        _mem_index: u32,
+    ) -> (&Memory, &WasiState, RwLockReadGuard<WasiInodes>) {
+        let memory = self.memory();
+        let state = self.state.deref();
+        let inodes = state.inodes.read().unwrap();
+        (memory, state, inodes)
+    }
+
+    pub(crate) fn get_memory_and_wasi_state_and_inodes_mut(
+        &self,
+        _mem_index: u32,
+    ) -> (&Memory, &WasiState, RwLockWriteGuard<WasiInodes>) {
+        let memory = self.memory();
+        let state = self.state.deref();
+        let inodes = state.inodes.write().unwrap();
+        (memory, state, inodes)
     }
 }
 
@@ -190,7 +210,9 @@ pub struct WasiEnv {
     /// Be careful when using this in host functions that call into Wasm:
     /// if the lock is held and the Wasm calls into a host function that tries
     /// to lock this mutex, the program will deadlock.
-    pub state: Arc<Mutex<WasiState>>,
+    /// 
+    /// Holding a read lock across WASM calls is allowed
+    pub state: Arc<WasiState>,
     /// Optional callback thats invoked whenever a syscall is made
     /// which is used to make callbacks to the process without breaking
     /// the single threaded WASM modules
@@ -206,7 +228,7 @@ impl WasiEnv {
     pub fn new(state: WasiState) -> Self {
         Self {
             memory: LazyInit::new(),
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(state),
             on_yield: None,
             thread_id_seed: Arc::new(AtomicU32::new(1u32)),
         }
@@ -221,13 +243,9 @@ impl WasiEnv {
         }
     }
 
-    /// Get the WASI state
-    ///
-    /// Be careful when using this in host functions that call into Wasm:
-    /// if the lock is held and the Wasm calls into a host function that tries
-    /// to lock this mutex, the program will deadlock.
-    pub fn state(&self) -> MutexGuard<WasiState> {
-        self.state.lock().unwrap()
+    /// Get the WASI state (for reading)
+    pub fn state(&self) -> &WasiState {
+        self.state.deref()
     }
 
     /// Get a reference to the memory

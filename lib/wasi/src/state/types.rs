@@ -188,7 +188,7 @@ impl PollEventBuilder {
 
 #[cfg(all(unix, feature = "sys-poll"))]
 pub(crate) fn poll(
-    selfs: &[&dyn VirtualFile],
+    selfs: &[&(dyn VirtualFile + Sync)],
     events: &[PollEventSet],
     seen_events: &mut [PollEventSet],
 ) -> Result<u32, FsError> {
@@ -221,7 +221,7 @@ pub(crate) fn poll(
 
 #[cfg(any(not(unix), not(feature = "sys-poll")))]
 pub(crate) fn poll(
-    files: &[&dyn VirtualFile],
+    files: &[&(dyn VirtualFile + Sync)],
     events: &[PollEventSet],
     seen_events: &mut [PollEventSet],
 ) -> Result<u32, FsError> {
