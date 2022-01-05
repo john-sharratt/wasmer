@@ -2,8 +2,8 @@ use crate::ptr::{Array, WasmPtr};
 use crate::syscalls;
 use crate::syscalls::types::{self, snapshot0};
 use crate::WasiEnv;
-use crate::WasiThread;
 use crate::WasiError;
+use crate::WasiThread;
 
 /// Wrapper around `syscalls::fd_filestat_get` with extra logic to handle the size
 /// difference of `wasi_filestat_t`

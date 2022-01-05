@@ -43,8 +43,8 @@ mod utils;
 use crate::syscalls::*;
 
 pub use crate::state::{
-    Fd, Pipe, Stderr, Stdin, Stdout, WasiFs, WasiState, WasiStateBuilder, WasiStateCreationError, WasiInodes,
-    ALL_RIGHTS, VIRTUAL_ROOT_FD,
+    Fd, Pipe, Stderr, Stdin, Stdout, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
+    WasiStateCreationError, ALL_RIGHTS, VIRTUAL_ROOT_FD,
 };
 pub use crate::syscalls::types;
 pub use crate::utils::{get_wasi_version, get_wasi_versions, is_wasi_module, WasiVersion};
@@ -59,7 +59,7 @@ pub use wasmer_vfs::{FsError, VirtualFile};
 use thiserror::Error;
 use wasmer::{
     imports, ChainableNamedResolver, Function, ImportObject, LazyInit, Memory, Module,
-    NamedResolver, Store, WasmerEnv
+    NamedResolver, Store, WasmerEnv,
 };
 
 use std::sync::{atomic::AtomicU32, atomic::Ordering, Arc, RwLockReadGuard, RwLockWriteGuard};
@@ -175,10 +175,7 @@ impl WasiThread {
         self.memory.clone()
     }
 
-    pub(crate) fn get_memory_and_wasi_state(
-        &self,
-        _mem_index: u32,
-    ) -> (&Memory, &WasiState) {
+    pub(crate) fn get_memory_and_wasi_state(&self, _mem_index: u32) -> (&Memory, &WasiState) {
         let memory = self.memory();
         let state = self.state.deref();
         (memory, state)
@@ -217,14 +214,15 @@ pub struct WasiEnv {
     /// Be careful when using this in host functions that call into Wasm:
     /// if the lock is held and the Wasm calls into a host function that tries
     /// to lock this mutex, the program will deadlock.
-    /// 
+    ///
     /// Holding a read lock across WASM calls is allowed
     pub state: Arc<WasiState>,
     /// Optional callback thats invoked whenever a syscall is made
     /// which is used to make callbacks to the process without breaking
     /// the single threaded WASM modules
     #[derivative(Debug = "ignore")]
-    pub(crate) on_yield: Option<Arc<dyn Fn(&WasiThread) -> Result<(), WasiError> + Send + Sync + 'static>>,
+    pub(crate) on_yield:
+        Option<Arc<dyn Fn(&WasiThread) -> Result<(), WasiError> + Send + Sync + 'static>>,
     /// The thread ID seed is used to generate unique thread identifiers
     /// for each WasiThread. These are needed for multithreading code that needs
     /// this information in the syscalls

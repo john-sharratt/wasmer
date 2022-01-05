@@ -29,10 +29,10 @@ use crate::{
     },
     WasiEnv, WasiError, WasiThread,
 };
-use std::ops::{Deref, DerefMut};
 use std::borrow::Borrow;
 use std::convert::{Infallible, TryInto};
 use std::io::{self, Read, Seek, Write};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 use tracing::{debug, trace};
 use wasmer::{Memory, RuntimeError, Value, WasmCell};
@@ -690,9 +690,13 @@ pub fn fd_pread(
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = match fd {
         __WASI_STDIN_FILENO => {
-            let mut guard = wasi_try_ok!(inodes.stdin_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
-            if let Some(ref mut stdin) = guard.deref_mut()
-            {
+            let mut guard = wasi_try_ok!(
+                inodes
+                    .stdin_mut(&state.fs.fd_map)
+                    .map_err(fs_error_into_wasi_err),
+                thread
+            );
+            if let Some(ref mut stdin) = guard.deref_mut() {
                 wasi_try_ok!(read_bytes(stdin, memory, &iov_cells), thread)
             } else {
                 return Ok(__WASI_EBADF);
@@ -716,9 +720,11 @@ pub fn fd_pread(
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(h) = handle {
-                        wasi_try_ok!(h
-                            .seek(std::io::SeekFrom::Start(offset as u64))
-                            .map_err(map_io_err), thread);
+                        wasi_try_ok!(
+                            h.seek(std::io::SeekFrom::Start(offset as u64))
+                                .map_err(map_io_err),
+                            thread
+                        );
                         wasi_try_ok!(read_bytes(h, memory, &iov_cells), thread)
                     } else {
                         return Ok(__WASI_EINVAL);
@@ -727,7 +733,10 @@ pub fn fd_pread(
                 Kind::Dir { .. } | Kind::Root { .. } => return Ok(__WASI_EISDIR),
                 Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_pread"),
                 Kind::Buffer { buffer } => {
-                    wasi_try_ok!(read_bytes(&buffer[(offset as usize)..], memory, &iov_cells), thread)
+                    wasi_try_ok!(
+                        read_bytes(&buffer[(offset as usize)..], memory, &iov_cells),
+                        thread
+                    )
                 }
             }
         }
@@ -840,18 +849,26 @@ pub fn fd_pwrite(
     let bytes_written = match fd {
         __WASI_STDIN_FILENO => return Ok(__WASI_EINVAL),
         __WASI_STDOUT_FILENO => {
-            let mut guard = wasi_try_ok!(inodes.stdout_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
-            if let Some(ref mut stdout) = guard.deref_mut()
-            {
+            let mut guard = wasi_try_ok!(
+                inodes
+                    .stdout_mut(&state.fs.fd_map)
+                    .map_err(fs_error_into_wasi_err),
+                thread
+            );
+            if let Some(ref mut stdout) = guard.deref_mut() {
                 wasi_try_ok!(write_bytes(stdout, memory, &iovs_arr_cell), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
         }
         __WASI_STDERR_FILENO => {
-            let mut guard = wasi_try_ok!(inodes.stderr_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
-            if let Some(ref mut stderr) = guard.deref_mut()
-            {
+            let mut guard = wasi_try_ok!(
+                inodes
+                    .stderr_mut(&state.fs.fd_map)
+                    .map_err(fs_error_into_wasi_err),
+                thread
+            );
+            if let Some(ref mut stderr) = guard.deref_mut() {
                 wasi_try_ok!(write_bytes(stderr, memory, &iovs_arr_cell), thread)
             } else {
                 return Ok(__WASI_EBADF);
@@ -871,7 +888,12 @@ pub fn fd_pwrite(
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(handle) = handle {
-                        wasi_try_ok!(handle.seek(std::io::SeekFrom::Start(offset as u64)).map_err(map_io_err), thread);
+                        wasi_try_ok!(
+                            handle
+                                .seek(std::io::SeekFrom::Start(offset as u64))
+                                .map_err(map_io_err),
+                            thread
+                        );
                         wasi_try_ok!(write_bytes(handle, memory, &iovs_arr_cell), thread)
                     } else {
                         return Ok(__WASI_EINVAL);
@@ -883,11 +905,10 @@ pub fn fd_pwrite(
                 }
                 Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_pwrite"),
                 Kind::Buffer { buffer } => {
-                    wasi_try_ok!(write_bytes(
-                        &mut buffer[(offset as usize)..],
-                        memory,
-                        &iovs_arr_cell
-                    ), thread)
+                    wasi_try_ok!(
+                        write_bytes(&mut buffer[(offset as usize)..], memory, &iovs_arr_cell),
+                        thread
+                    )
                 }
             }
         }
@@ -926,9 +947,13 @@ pub fn fd_read(
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = match fd {
         __WASI_STDIN_FILENO => {
-            let mut guard = wasi_try_ok!(inodes.stdin_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
-            if let Some(ref mut stdin) = guard.deref_mut()
-            {
+            let mut guard = wasi_try_ok!(
+                inodes
+                    .stdin_mut(&state.fs.fd_map)
+                    .map_err(fs_error_into_wasi_err),
+                thread
+            );
+            if let Some(ref mut stdin) = guard.deref_mut() {
                 wasi_try_ok!(read_bytes(stdin, memory, &iovs_arr_cell), thread)
             } else {
                 return Ok(__WASI_EBADF);
@@ -950,7 +975,12 @@ pub fn fd_read(
                 match guard.deref_mut() {
                     Kind::File { handle, .. } => {
                         if let Some(handle) = handle {
-                            wasi_try_ok!(handle.seek(std::io::SeekFrom::Start(offset as u64)).map_err(map_io_err), thread);
+                            wasi_try_ok!(
+                                handle
+                                    .seek(std::io::SeekFrom::Start(offset as u64))
+                                    .map_err(map_io_err),
+                                thread
+                            );
                             wasi_try_ok!(read_bytes(handle, memory, &iovs_arr_cell), thread)
                         } else {
                             return Ok(__WASI_EINVAL);
@@ -962,7 +992,10 @@ pub fn fd_read(
                     }
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
                     Kind::Buffer { buffer } => {
-                        wasi_try_ok!(read_bytes(&buffer[offset..], memory, &iovs_arr_cell), thread)
+                        wasi_try_ok!(
+                            read_bytes(&buffer[offset..], memory, &iovs_arr_cell),
+                            thread
+                        )
                     }
                 }
             };
@@ -1047,11 +1080,7 @@ pub fn fd_readdir(
                         .map(|(name, inode)| {
                             let entry = &inodes.arena[*inode];
                             let stat = entry.stat.read().unwrap();
-                            (
-                                entry.name.to_string(),
-                                stat.st_filetype,
-                                stat.st_ino,
-                            )
+                            (entry.name.to_string(), stat.st_filetype, stat.st_ino)
                         }),
                 );
                 entry_vec.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1070,15 +1099,13 @@ pub fn fd_readdir(
                     .map(|(name, inode)| {
                         let entry = &inodes.arena[inode];
                         let stat = entry.stat.read().unwrap();
-                        (
-                            format!("/{}", entry.name),
-                            stat.st_filetype,
-                            stat.st_ino,
-                        )
+                        (format!("/{}", entry.name), stat.st_filetype, stat.st_ino)
                     })
                     .collect()
             }
-            Kind::File { .. } | Kind::Symlink { .. } | Kind::Buffer { .. } => return __WASI_ENOTDIR,
+            Kind::File { .. } | Kind::Symlink { .. } | Kind::Buffer { .. } => {
+                return __WASI_ENOTDIR
+            }
         }
     };
 
@@ -1128,7 +1155,7 @@ pub fn fd_readdir(
 pub fn fd_renumber(thread: &WasiThread, from: __wasi_fd_t, to: __wasi_fd_t) -> __wasi_errno_t {
     debug!("wasi::fd_renumber: from={}, to={}", from, to);
     let (memory, state) = thread.get_memory_and_wasi_state(0);
-    
+
     let mut fd_map = state.fs.fd_map.write().unwrap();
     let fd_entry = wasi_try!(fd_map.get_mut(&from).ok_or(__WASI_EBADF));
 
@@ -1177,7 +1204,7 @@ pub fn fd_seek(
             let mut fd_map = state.fs.fd_map.write().unwrap();
             let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
             fd_entry.offset = (fd_entry.offset as i64 + offset) as u64
-        },
+        }
         __WASI_WHENCE_END => {
             use std::io::SeekFrom;
             let inode_idx = fd_entry.inode;
@@ -1185,8 +1212,9 @@ pub fn fd_seek(
             match guard.deref_mut() {
                 Kind::File { ref mut handle, .. } => {
                     if let Some(handle) = handle {
-                        let end = wasi_try_ok!(handle.seek(SeekFrom::End(0)).map_err(map_io_err), thread);
-                        
+                        let end =
+                            wasi_try_ok!(handle.seek(SeekFrom::End(0)).map_err(map_io_err), thread);
+
                         // TODO: handle case if fd_entry.offset uses 64 bits of a u64
                         drop(guard);
                         let mut fd_map = state.fs.fd_map.write().unwrap();
@@ -1214,7 +1242,7 @@ pub fn fd_seek(
             let mut fd_map = state.fs.fd_map.write().unwrap();
             let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
             fd_entry.offset = offset as u64
-        },
+        }
         _ => return Ok(__WASI_EINVAL),
     }
     // reborrow
@@ -1320,18 +1348,26 @@ pub fn fd_write(
     let bytes_written = match fd {
         __WASI_STDIN_FILENO => return Ok(__WASI_EINVAL),
         __WASI_STDOUT_FILENO => {
-            let mut guard = wasi_try_ok!(inodes.stdout_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
-            if let Some(ref mut stdout) = guard.deref_mut()
-            {
+            let mut guard = wasi_try_ok!(
+                inodes
+                    .stdout_mut(&state.fs.fd_map)
+                    .map_err(fs_error_into_wasi_err),
+                thread
+            );
+            if let Some(ref mut stdout) = guard.deref_mut() {
                 wasi_try_ok!(write_bytes(stdout, memory, &iovs_arr_cell), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
         }
         __WASI_STDERR_FILENO => {
-            let mut guard = wasi_try_ok!(inodes.stderr_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
-            if let Some(ref mut stderr) = guard.deref_mut()
-            {
+            let mut guard = wasi_try_ok!(
+                inodes
+                    .stderr_mut(&state.fs.fd_map)
+                    .map_err(fs_error_into_wasi_err),
+                thread
+            );
+            if let Some(ref mut stderr) = guard.deref_mut() {
                 wasi_try_ok!(write_bytes(stderr, memory, &iovs_arr_cell), thread)
             } else {
                 return Ok(__WASI_EBADF);
@@ -1351,7 +1387,12 @@ pub fn fd_write(
                 match guard.deref_mut() {
                     Kind::File { handle, .. } => {
                         if let Some(handle) = handle {
-                            wasi_try_ok!(handle.seek(std::io::SeekFrom::Start(offset as u64)).map_err(map_io_err), thread);
+                            wasi_try_ok!(
+                                handle
+                                    .seek(std::io::SeekFrom::Start(offset as u64))
+                                    .map_err(map_io_err),
+                                thread
+                            );
                             wasi_try_ok!(write_bytes(handle, memory, &iovs_arr_cell), thread)
                         } else {
                             return Ok(__WASI_EINVAL);
@@ -1363,7 +1404,10 @@ pub fn fd_write(
                     }
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_write"),
                     Kind::Buffer { buffer } => {
-                        wasi_try_ok!(write_bytes(&mut buffer[offset..], memory, &iovs_arr_cell), thread)
+                        wasi_try_ok!(
+                            write_bytes(&mut buffer[offset..], memory, &iovs_arr_cell),
+                            thread
+                        )
                     }
                 }
             };
@@ -1473,8 +1517,13 @@ pub fn path_create_directory(
                         entries: Default::default(),
                     };
                     drop(guard);
-                    let new_inode = wasi_try!(state.fs.create_inode(inodes.deref_mut(), kind, false, comp.to_string()));
-                    
+                    let new_inode = wasi_try!(state.fs.create_inode(
+                        inodes.deref_mut(),
+                        kind,
+                        false,
+                        comp.to_string()
+                    ));
+
                     // reborrow to insert
                     {
                         let mut guard = inodes.arena[cur_dir_inode].write();
@@ -1537,12 +1586,15 @@ pub fn path_filestat_get(
         flags & __WASI_LOOKUP_SYMLINK_FOLLOW != 0,
     ));
     let stat = if inodes.arena[file_inode].is_preopened {
-        inodes.arena[file_inode].stat.read().unwrap().deref().clone()
+        inodes.arena[file_inode]
+            .stat
+            .read()
+            .unwrap()
+            .deref()
+            .clone()
     } else {
         let guard = inodes.arena[file_inode].read();
-        wasi_try!(state
-            .fs
-            .get_stat_for_kind(inodes.deref(), guard.deref()))
+        wasi_try!(state.fs.get_stat_for_kind(inodes.deref(), guard.deref()))
     };
 
     let buf_cell = wasi_try!(buf.deref(memory));
@@ -1603,9 +1655,7 @@ pub fn path_filestat_set_times(
     ));
     let stat = {
         let guard = inodes.arena[file_inode].read();
-        wasi_try!(state
-            .fs
-            .get_stat_for_kind(inodes.deref(), guard.deref()))
+        wasi_try!(state.fs.get_stat_for_kind(inodes.deref(), guard.deref()))
     };
 
     let inode = &inodes.arena[fd_inode];
@@ -1684,12 +1734,15 @@ pub fn path_link(
         old_flags & __WASI_LOOKUP_SYMLINK_FOLLOW != 0,
     ));
     let target_path_arg = std::path::PathBuf::from(&new_path_str);
-    let (target_parent_inode, new_entry_name) =
-        wasi_try!(state
-            .fs
-            .get_parent_inode_at_path(inodes.deref_mut(), new_fd, &target_path_arg, false));
+    let (target_parent_inode, new_entry_name) = wasi_try!(state.fs.get_parent_inode_at_path(
+        inodes.deref_mut(),
+        new_fd,
+        &target_path_arg,
+        false
+    ));
 
-    if inodes.arena[source_inode].stat.write().unwrap().st_nlink == __wasi_linkcount_t::max_value() {
+    if inodes.arena[source_inode].stat.write().unwrap().st_nlink == __wasi_linkcount_t::max_value()
+    {
         return __WASI_EMLINK;
     }
     {
@@ -1702,7 +1755,9 @@ pub fn path_link(
                 entries.insert(new_entry_name, source_inode);
             }
             Kind::Root { .. } => return __WASI_EINVAL,
-            Kind::File { .. } | Kind::Symlink { .. } | Kind::Buffer { .. } => return __WASI_ENOTDIR,
+            Kind::File { .. } | Kind::Symlink { .. } | Kind::Buffer { .. } => {
+                return __WASI_ENOTDIR
+            }
         }
     }
     inodes.arena[source_inode].stat.write().unwrap().st_nlink += 1;
@@ -1915,7 +1970,12 @@ pub fn path_open(
                     path: new_file_host_path,
                     fd: None,
                 };
-                wasi_try!(state.fs.create_inode(inodes.deref_mut(), kind, false, new_entity_name.clone()))
+                wasi_try!(state.fs.create_inode(
+                    inodes.deref_mut(),
+                    kind,
+                    false,
+                    new_entity_name.clone()
+                ))
             };
 
             {
@@ -1935,10 +1995,7 @@ pub fn path_open(
     };
 
     {
-        debug!(
-            "inode {:?} value {:#?} found!",
-            inode, inodes.arena[inode]
-        );
+        debug!("inode {:?} value {:#?} found!", inode, inodes.arena[inode]);
     }
 
     // TODO: check and reduce these
@@ -1990,7 +2047,9 @@ pub fn path_readlink(
         return __WASI_EACCES;
     }
     let path_str = unsafe { get_input_str!(memory, path, path_len) };
-    let inode = wasi_try!(state.fs.get_inode_at_path(inodes.deref_mut(), dir_fd, &path_str, false));
+    let inode = wasi_try!(state
+        .fs
+        .get_inode_at_path(inodes.deref_mut(), dir_fd, &path_str, false));
 
     {
         let guard = inodes.arena[inode].read();
@@ -2034,11 +2093,15 @@ pub fn path_remove_directory(
     let base_dir = wasi_try!(state.fs.get_fd(fd));
     let path_str = unsafe { get_input_str!(memory, path, path_len) };
 
-    let inode = wasi_try!(state.fs.get_inode_at_path(inodes.deref_mut(), fd, &path_str, false));
-    let (parent_inode, childs_name) =
-        wasi_try!(state
-            .fs
-            .get_parent_inode_at_path(inodes.deref_mut(), fd, std::path::Path::new(&path_str), false));
+    let inode = wasi_try!(state
+        .fs
+        .get_inode_at_path(inodes.deref_mut(), fd, &path_str, false));
+    let (parent_inode, childs_name) = wasi_try!(state.fs.get_parent_inode_at_path(
+        inodes.deref_mut(),
+        fd,
+        std::path::Path::new(&path_str),
+        false
+    ));
 
     let host_path_to_remove = {
         let guard = inodes.arena[inode].read();
@@ -2133,9 +2196,13 @@ pub fn path_rename(
     }
 
     let (source_parent_inode, source_entry_name) =
-        wasi_try!(state.fs.get_parent_inode_at_path(inodes.deref_mut(), old_fd, source_path, true));
+        wasi_try!(state
+            .fs
+            .get_parent_inode_at_path(inodes.deref_mut(), old_fd, source_path, true));
     let (target_parent_inode, target_entry_name) =
-        wasi_try!(state.fs.get_parent_inode_at_path(inodes.deref_mut(), new_fd, target_path, true));
+        wasi_try!(state
+            .fs
+            .get_parent_inode_at_path(inodes.deref_mut(), new_fd, target_path, true));
 
     let host_adjusted_target_path = {
         let guard = inodes.arena[target_parent_inode].read();
@@ -2169,7 +2236,7 @@ pub fn path_rename(
     };
 
     {
-        let mut guard = inodes.arena[source_entry].write(); 
+        let mut guard = inodes.arena[source_entry].write();
         match guard.deref_mut() {
             Kind::File {
                 handle, ref path, ..
@@ -2270,12 +2337,20 @@ pub fn path_symlink(
 
     // get the depth of the parent + 1 (UNDER INVESTIGATION HMMMMMMMM THINK FISH ^ THINK FISH)
     let old_path_path = std::path::Path::new(&old_path_str);
-    let (source_inode, _) = wasi_try!(state.fs.get_parent_inode_at_path(inodes.deref_mut(), fd, old_path_path, true));
-    let depth = wasi_try!(state.fs.path_depth_from_fd(inodes.deref(), fd, source_inode)) - 1;
+    let (source_inode, _) =
+        wasi_try!(state
+            .fs
+            .get_parent_inode_at_path(inodes.deref_mut(), fd, old_path_path, true));
+    let depth = wasi_try!(state
+        .fs
+        .path_depth_from_fd(inodes.deref(), fd, source_inode))
+        - 1;
 
     let new_path_path = std::path::Path::new(&new_path_str);
     let (target_parent_inode, entry_name) =
-        wasi_try!(state.fs.get_parent_inode_at_path(inodes.deref_mut(), fd, new_path_path, true));
+        wasi_try!(state
+            .fs
+            .get_parent_inode_at_path(inodes.deref_mut(), fd, new_path_path, true));
 
     // short circuit if anything is wrong, before we create an inode
     {
@@ -2310,9 +2385,12 @@ pub fn path_symlink(
         path_to_symlink: std::path::PathBuf::from(new_path_str),
         relative_path,
     };
-    let new_inode = state
-        .fs
-        .create_inode_with_default_stat(inodes.deref_mut(), kind, false, entry_name.clone());
+    let new_inode = state.fs.create_inode_with_default_stat(
+        inodes.deref_mut(),
+        kind,
+        false,
+        entry_name.clone(),
+    );
 
     {
         let mut guard = inodes.arena[target_parent_inode].write();
@@ -2352,11 +2430,15 @@ pub fn path_unlink_file(
     let path_str = unsafe { get_input_str!(memory, path, path_len) };
     debug!("Requested file: {}", path_str);
 
-    let inode = wasi_try!(state.fs.get_inode_at_path(inodes.deref_mut(), fd, &path_str, false));
-    let (parent_inode, childs_name) =
-        wasi_try!(state
-            .fs
-            .get_parent_inode_at_path(inodes.deref_mut(), fd, std::path::Path::new(&path_str), false));
+    let inode = wasi_try!(state
+        .fs
+        .get_inode_at_path(inodes.deref_mut(), fd, &path_str, false));
+    let (parent_inode, childs_name) = wasi_try!(state.fs.get_parent_inode_at_path(
+        inodes.deref_mut(),
+        fd,
+        std::path::Path::new(&path_str),
+        false
+    ));
 
     let removed_inode = {
         let mut guard = inodes.arena[parent_inode].write();
@@ -2408,8 +2490,7 @@ pub fn path_unlink_file(
         // make the file an orphan fd if the fd is still open
         let fd_is_orphaned = {
             let guard = inodes.arena[removed_inode].read();
-            if let Kind::File { handle, .. } = guard.deref()
-            {
+            if let Kind::File { handle, .. } = guard.deref() {
                 handle.is_some()
             } else {
                 false
@@ -2422,7 +2503,8 @@ pub fn path_unlink_file(
         );
 
         if fd_is_orphaned {
-            inodes.orphan_fds
+            inodes
+                .orphan_fds
                 .insert(removed_inode, removed_inode_val.unwrap());
         }
     }
@@ -2511,13 +2593,28 @@ pub fn poll_oneoff(
         if let Some(fd) = fd {
             let wasi_file_ref = match fd {
                 __WASI_STDERR_FILENO => {
-                    wasi_try_ok!(inodes.stderr(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread)
+                    wasi_try_ok!(
+                        inodes
+                            .stderr(&state.fs.fd_map)
+                            .map_err(fs_error_into_wasi_err),
+                        thread
+                    )
                 }
                 __WASI_STDIN_FILENO => {
-                    wasi_try_ok!(inodes.stdin(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread)
+                    wasi_try_ok!(
+                        inodes
+                            .stdin(&state.fs.fd_map)
+                            .map_err(fs_error_into_wasi_err),
+                        thread
+                    )
                 }
                 __WASI_STDOUT_FILENO => {
-                    wasi_try_ok!(inodes.stdout(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread)
+                    wasi_try_ok!(
+                        inodes
+                            .stdout(&state.fs.fd_map)
+                            .map_err(fs_error_into_wasi_err),
+                        thread
+                    )
                 }
                 _ => {
                     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
@@ -2531,9 +2628,7 @@ pub fn poll_oneoff(
                         match guard.deref() {
                             Kind::File { handle, .. } => {
                                 if let Some(h) = handle {
-                                    crate::state::InodeValFileReadGuard {
-                                        guard
-                                    }
+                                    crate::state::InodeValFileReadGuard { guard }
                                 } else {
                                     return Ok(__WASI_EBADF);
                                 }
@@ -2569,12 +2664,15 @@ pub fn poll_oneoff(
     };
 
     let mut seen_events = vec![Default::default(); in_events.len()];
-    wasi_try_ok!(poll(
-        fds.as_slice(),
-        in_events.as_slice(),
-        seen_events.as_mut_slice()
-    )
-    .map_err(fs_error_into_wasi_err), thread);
+    wasi_try_ok!(
+        poll(
+            fds.as_slice(),
+            in_events.as_slice(),
+            seen_events.as_mut_slice()
+        )
+        .map_err(fs_error_into_wasi_err),
+        thread
+    );
 
     for (i, seen_event) in seen_events.into_iter().enumerate() {
         let mut flags = 0;
@@ -2587,16 +2685,22 @@ pub fn poll_oneoff(
                 PollEvent::PollHangUp => flags = __WASI_EVENT_FD_READWRITE_HANGUP,
                 PollEvent::PollInvalid => error = __WASI_EINVAL,
                 PollEvent::PollIn => {
-                    bytes_available = wasi_try_ok!(fds[i]
-                        .bytes_available_read()
-                        .map_err(fs_error_into_wasi_err), thread)
+                    bytes_available = wasi_try_ok!(
+                        fds[i]
+                            .bytes_available_read()
+                            .map_err(fs_error_into_wasi_err),
+                        thread
+                    )
                     .unwrap_or(0usize);
                     error = __WASI_ESUCCESS;
                 }
                 PollEvent::PollOut => {
-                    bytes_available = wasi_try_ok!(fds[i]
-                        .bytes_available_write()
-                        .map_err(fs_error_into_wasi_err), thread)
+                    bytes_available = wasi_try_ok!(
+                        fds[i]
+                            .bytes_available_write()
+                            .map_err(fs_error_into_wasi_err),
+                        thread
+                    )
                     .unwrap_or(0usize);
                     error = __WASI_ESUCCESS;
                 }

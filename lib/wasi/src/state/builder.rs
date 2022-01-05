@@ -3,16 +3,16 @@
 use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::WasiEnv;
-use crate::WasiThread;
 use crate::WasiError;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::ops::{Deref, DerefMut};
-use thiserror::Error;
-use wasmer_vfs::{FsError, VirtualFile};
-use std::sync::RwLock;
+use crate::WasiThread;
 use generational_arena::Arena;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::RwLock;
+use thiserror::Error;
+use wasmer_vfs::{FsError, VirtualFile};
 
 /// Creates an empty [`WasiStateBuilder`].
 ///
@@ -437,8 +437,13 @@ impl WasiStateBuilder {
             let mut inodes = inodes.write().unwrap();
 
             // self.preopens are checked in [`PreopenDirBuilder::build`]
-            let mut wasi_fs = WasiFs::new_with_preopen(inodes.deref_mut(), &self.preopens, &self.vfs_preopens, fs_backing)
-                .map_err(WasiStateCreationError::WasiFsCreationError)?;
+            let mut wasi_fs = WasiFs::new_with_preopen(
+                inodes.deref_mut(),
+                &self.preopens,
+                &self.vfs_preopens,
+                fs_backing,
+            )
+            .map_err(WasiStateCreationError::WasiFsCreationError)?;
 
             // set up the file system, overriding base files and calling the setup function
             if let Some(stdin_override) = self.stdin_override.take() {
