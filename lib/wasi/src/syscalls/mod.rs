@@ -680,26 +680,26 @@ pub fn fd_pread(
     iovs_len: u32,
     offset: __wasi_filesize_t,
     nread: WasmPtr<u32>,
-) -> __wasi_errno_t {
+) -> Result<__wasi_errno_t, WasiError> {
     debug!("wasi::fd_pread: fd={}, offset={}", fd, offset);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
-    let iov_cells = wasi_try!(iovs.deref(memory, 0, iovs_len));
-    let nread_cell = wasi_try!(nread.deref(memory));
+    let iov_cells = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
+    let nread_cell = wasi_try_ok!(nread.deref(memory));
 
-    let fd_entry = wasi_try!(state.fs.get_fd(fd));
+    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = match fd {
         __WASI_STDIN_FILENO => {
-            let mut guard = wasi_try!(inodes.stdin_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err));
+            let mut guard = wasi_try_ok!(inodes.stdin_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
             if let Some(ref mut stdin) = guard.deref_mut()
             {
-                wasi_try!(read_bytes(stdin, memory, &iov_cells))
+                wasi_try_ok!(read_bytes(stdin, memory, &iov_cells), thread)
             } else {
-                return __WASI_EBADF;
+                return Ok(__WASI_EBADF);
             }
         }
-        __WASI_STDOUT_FILENO => return __WASI_EINVAL,
-        __WASI_STDERR_FILENO => return __WASI_EINVAL,
+        __WASI_STDOUT_FILENO => return Ok(__WASI_EINVAL),
+        __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
         _ => {
             let inode = fd_entry.inode;
 
@@ -710,24 +710,24 @@ pub fn fd_pread(
                     "Invalid rights on {:X}: expected READ and SEEK",
                     fd_entry.rights
                 );
-                return __WASI_EACCES;
+                return Ok(__WASI_EACCES);
             }
             let mut guard = inodes.arena[inode].write();
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(h) = handle {
-                        wasi_try!(h
+                        wasi_try_ok!(h
                             .seek(std::io::SeekFrom::Start(offset as u64))
-                            .map_err(map_io_err));
-                        wasi_try!(read_bytes(h, memory, &iov_cells))
+                            .map_err(map_io_err), thread);
+                        wasi_try_ok!(read_bytes(h, memory, &iov_cells), thread)
                     } else {
-                        return __WASI_EINVAL;
+                        return Ok(__WASI_EINVAL);
                     }
                 }
-                Kind::Dir { .. } | Kind::Root { .. } => return __WASI_EISDIR,
+                Kind::Dir { .. } | Kind::Root { .. } => return Ok(__WASI_EISDIR),
                 Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_pread"),
                 Kind::Buffer { buffer } => {
-                    wasi_try!(read_bytes(&buffer[(offset as usize)..], memory, &iov_cells))
+                    wasi_try_ok!(read_bytes(&buffer[(offset as usize)..], memory, &iov_cells), thread)
                 }
             }
         }
@@ -735,7 +735,7 @@ pub fn fd_pread(
 
     nread_cell.set(bytes_read);
     debug!("Success: {} bytes read", bytes_read);
-    __WASI_ESUCCESS
+    Ok(__WASI_ESUCCESS)
 }
 
 /// ### `fd_prestat_get()`
@@ -829,39 +829,39 @@ pub fn fd_pwrite(
     iovs_len: u32,
     offset: __wasi_filesize_t,
     nwritten: WasmPtr<u32>,
-) -> __wasi_errno_t {
+) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::fd_pwrite");
     // TODO: refactor, this is just copied from `fd_write`...
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
-    let iovs_arr_cell = wasi_try!(iovs.deref(memory, 0, iovs_len));
-    let nwritten_cell = wasi_try!(nwritten.deref(memory));
+    let iovs_arr_cell = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
+    let nwritten_cell = wasi_try_ok!(nwritten.deref(memory));
 
-    let fd_entry = wasi_try!(state.fs.get_fd(fd));
+    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_written = match fd {
-        __WASI_STDIN_FILENO => return __WASI_EINVAL,
+        __WASI_STDIN_FILENO => return Ok(__WASI_EINVAL),
         __WASI_STDOUT_FILENO => {
-            let mut guard = wasi_try!(inodes.stdout_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err));
+            let mut guard = wasi_try_ok!(inodes.stdout_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
             if let Some(ref mut stdout) = guard.deref_mut()
             {
-                wasi_try!(write_bytes(stdout, memory, &iovs_arr_cell))
+                wasi_try_ok!(write_bytes(stdout, memory, &iovs_arr_cell), thread)
             } else {
-                return __WASI_EBADF;
+                return Ok(__WASI_EBADF);
             }
         }
         __WASI_STDERR_FILENO => {
-            let mut guard = wasi_try!(inodes.stderr_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err));
+            let mut guard = wasi_try_ok!(inodes.stderr_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
             if let Some(ref mut stderr) = guard.deref_mut()
             {
-                wasi_try!(write_bytes(stderr, memory, &iovs_arr_cell))
+                wasi_try_ok!(write_bytes(stderr, memory, &iovs_arr_cell), thread)
             } else {
-                return __WASI_EBADF;
+                return Ok(__WASI_EBADF);
             }
         }
         _ => {
             if !(has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE)
                 && has_rights(fd_entry.rights, __WASI_RIGHT_FD_SEEK))
             {
-                return __WASI_EACCES;
+                return Ok(__WASI_EACCES);
             }
 
             let inode_idx = fd_entry.inode;
@@ -871,23 +871,23 @@ pub fn fd_pwrite(
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(handle) = handle {
-                        handle.seek(std::io::SeekFrom::Start(offset as u64));
-                        wasi_try!(write_bytes(handle, memory, &iovs_arr_cell))
+                        wasi_try_ok!(handle.seek(std::io::SeekFrom::Start(offset as u64)).map_err(map_io_err), thread);
+                        wasi_try_ok!(write_bytes(handle, memory, &iovs_arr_cell), thread)
                     } else {
-                        return __WASI_EINVAL;
+                        return Ok(__WASI_EINVAL);
                     }
                 }
                 Kind::Dir { .. } | Kind::Root { .. } => {
                     // TODO: verify
-                    return __WASI_EISDIR;
+                    return Ok(__WASI_EISDIR);
                 }
                 Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_pwrite"),
                 Kind::Buffer { buffer } => {
-                    wasi_try!(write_bytes(
+                    wasi_try_ok!(write_bytes(
                         &mut buffer[(offset as usize)..],
                         memory,
                         &iovs_arr_cell
-                    ))
+                    ), thread)
                 }
             }
         }
@@ -895,7 +895,7 @@ pub fn fd_pwrite(
 
     nwritten_cell.set(bytes_written);
 
-    __WASI_ESUCCESS
+    Ok(__WASI_ESUCCESS)
 }
 
 /// ### `fd_read()`
@@ -916,29 +916,29 @@ pub fn fd_read(
     iovs: WasmPtr<__wasi_iovec_t, Array>,
     iovs_len: u32,
     nread: WasmPtr<u32>,
-) -> __wasi_errno_t {
+) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::fd_read: fd={}", fd);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
-    let iovs_arr_cell = wasi_try!(iovs.deref(memory, 0, iovs_len));
-    let nread_cell = wasi_try!(nread.deref(memory));
+    let iovs_arr_cell = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
+    let nread_cell = wasi_try_ok!(nread.deref(memory));
 
-    let fd_entry = wasi_try!(state.fs.get_fd(fd));
+    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = match fd {
         __WASI_STDIN_FILENO => {
-            let mut guard = wasi_try!(inodes.stdin_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err));
+            let mut guard = wasi_try_ok!(inodes.stdin_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
             if let Some(ref mut stdin) = guard.deref_mut()
             {
-                wasi_try!(read_bytes(stdin, memory, &iovs_arr_cell))
+                wasi_try_ok!(read_bytes(stdin, memory, &iovs_arr_cell), thread)
             } else {
-                return __WASI_EBADF;
+                return Ok(__WASI_EBADF);
             }
         }
-        __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => return __WASI_EINVAL,
+        __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
         _ => {
             if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
                 // TODO: figure out the error to return when lacking rights
-                return __WASI_EACCES;
+                return Ok(__WASI_EACCES);
             }
 
             let offset = fd_entry.offset as usize;
@@ -950,26 +950,26 @@ pub fn fd_read(
                 match guard.deref_mut() {
                     Kind::File { handle, .. } => {
                         if let Some(handle) = handle {
-                            handle.seek(std::io::SeekFrom::Start(offset as u64));
-                            wasi_try!(read_bytes(handle, memory, &iovs_arr_cell))
+                            wasi_try_ok!(handle.seek(std::io::SeekFrom::Start(offset as u64)).map_err(map_io_err), thread);
+                            wasi_try_ok!(read_bytes(handle, memory, &iovs_arr_cell), thread)
                         } else {
-                            return __WASI_EINVAL;
+                            return Ok(__WASI_EINVAL);
                         }
                     }
                     Kind::Dir { .. } | Kind::Root { .. } => {
                         // TODO: verify
-                        return __WASI_EISDIR;
+                        return Ok(__WASI_EISDIR);
                     }
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
                     Kind::Buffer { buffer } => {
-                        wasi_try!(read_bytes(&buffer[offset..], memory, &iovs_arr_cell))
+                        wasi_try_ok!(read_bytes(&buffer[offset..], memory, &iovs_arr_cell), thread)
                     }
                 }
             };
 
             // reborrow
             let mut fd_map = state.fs.fd_map.write().unwrap();
-            let fd_entry = wasi_try!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
+            let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
             fd_entry.offset += bytes_read as u64;
 
             bytes_read
@@ -978,7 +978,7 @@ pub fn fd_read(
 
     nread_cell.set(bytes_read);
 
-    __WASI_ESUCCESS
+    Ok(__WASI_ESUCCESS)
 }
 
 /// ### `fd_readdir()`
@@ -1161,21 +1161,21 @@ pub fn fd_seek(
     offset: __wasi_filedelta_t,
     whence: __wasi_whence_t,
     newoffset: WasmPtr<__wasi_filesize_t>,
-) -> __wasi_errno_t {
+) -> Result<__wasi_errno_t, WasiError> {
     debug!("wasi::fd_seek: fd={}, offset={}", fd, offset);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
-    let new_offset_cell = wasi_try!(newoffset.deref(memory));
-    let fd_entry = wasi_try!(state.fs.get_fd(fd));
+    let new_offset_cell = wasi_try_ok!(newoffset.deref(memory));
+    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
 
     if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_SEEK) {
-        return __WASI_EACCES;
+        return Ok(__WASI_EACCES);
     }
 
     // TODO: handle case if fd is a dir?
     match whence {
         __WASI_WHENCE_CUR => {
             let mut fd_map = state.fs.fd_map.write().unwrap();
-            let fd_entry = wasi_try!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
+            let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
             fd_entry.offset = (fd_entry.offset as i64 + offset) as u64
         },
         __WASI_WHENCE_END => {
@@ -1185,15 +1185,15 @@ pub fn fd_seek(
             match guard.deref_mut() {
                 Kind::File { ref mut handle, .. } => {
                     if let Some(handle) = handle {
-                        let end = wasi_try!(handle.seek(SeekFrom::End(0)).map_err(map_io_err));
+                        let end = wasi_try_ok!(handle.seek(SeekFrom::End(0)).map_err(map_io_err), thread);
                         
                         // TODO: handle case if fd_entry.offset uses 64 bits of a u64
                         drop(guard);
                         let mut fd_map = state.fs.fd_map.write().unwrap();
-                        let fd_entry = wasi_try!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
+                        let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
                         fd_entry.offset = (end as i64 + offset) as u64;
                     } else {
-                        return __WASI_EINVAL;
+                        return Ok(__WASI_EINVAL);
                     }
                 }
                 Kind::Symlink { .. } => {
@@ -1201,27 +1201,27 @@ pub fn fd_seek(
                 }
                 Kind::Dir { .. } | Kind::Root { .. } => {
                     // TODO: check this
-                    return __WASI_EINVAL;
+                    return Ok(__WASI_EINVAL);
                 }
                 Kind::Buffer { .. } => {
                     // seeking buffers probably makes sense
                     // TODO: implement this
-                    return __WASI_EINVAL;
+                    return Ok(__WASI_EINVAL);
                 }
             }
         }
         __WASI_WHENCE_SET => {
             let mut fd_map = state.fs.fd_map.write().unwrap();
-            let fd_entry = wasi_try!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
+            let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
             fd_entry.offset = offset as u64
         },
-        _ => return __WASI_EINVAL,
+        _ => return Ok(__WASI_EINVAL),
     }
     // reborrow
-    let fd_entry = wasi_try!(state.fs.get_fd(fd));
+    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     new_offset_cell.set(fd_entry.offset);
 
-    __WASI_ESUCCESS
+    Ok(__WASI_ESUCCESS)
 }
 
 /// ### `fd_sync()`
@@ -1310,36 +1310,36 @@ pub fn fd_write(
     iovs: WasmPtr<__wasi_ciovec_t, Array>,
     iovs_len: u32,
     nwritten: WasmPtr<u32>,
-) -> __wasi_errno_t {
+) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::fd_write: fd={}", fd);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
-    let iovs_arr_cell = wasi_try!(iovs.deref(memory, 0, iovs_len));
-    let nwritten_cell = wasi_try!(nwritten.deref(memory));
+    let iovs_arr_cell = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
+    let nwritten_cell = wasi_try_ok!(nwritten.deref(memory));
 
-    let fd_entry = wasi_try!(state.fs.get_fd(fd));
+    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_written = match fd {
-        __WASI_STDIN_FILENO => return __WASI_EINVAL,
+        __WASI_STDIN_FILENO => return Ok(__WASI_EINVAL),
         __WASI_STDOUT_FILENO => {
-            let mut guard = wasi_try!(inodes.stdout_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err));
+            let mut guard = wasi_try_ok!(inodes.stdout_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
             if let Some(ref mut stdout) = guard.deref_mut()
             {
-                wasi_try!(write_bytes(stdout, memory, &iovs_arr_cell))
+                wasi_try_ok!(write_bytes(stdout, memory, &iovs_arr_cell), thread)
             } else {
-                return __WASI_EBADF;
+                return Ok(__WASI_EBADF);
             }
         }
         __WASI_STDERR_FILENO => {
-            let mut guard = wasi_try!(inodes.stderr_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err));
+            let mut guard = wasi_try_ok!(inodes.stderr_mut(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread);
             if let Some(ref mut stderr) = guard.deref_mut()
             {
-                wasi_try!(write_bytes(stderr, memory, &iovs_arr_cell))
+                wasi_try_ok!(write_bytes(stderr, memory, &iovs_arr_cell), thread)
             } else {
-                return __WASI_EBADF;
+                return Ok(__WASI_EBADF);
             }
         }
         _ => {
             if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE) {
-                return __WASI_EACCES;
+                return Ok(__WASI_EACCES);
             }
 
             let offset = fd_entry.offset as usize;
@@ -1351,19 +1351,19 @@ pub fn fd_write(
                 match guard.deref_mut() {
                     Kind::File { handle, .. } => {
                         if let Some(handle) = handle {
-                            handle.seek(std::io::SeekFrom::Start(offset as u64));
-                            wasi_try!(write_bytes(handle, memory, &iovs_arr_cell))
+                            wasi_try_ok!(handle.seek(std::io::SeekFrom::Start(offset as u64)).map_err(map_io_err), thread);
+                            wasi_try_ok!(write_bytes(handle, memory, &iovs_arr_cell), thread)
                         } else {
-                            return __WASI_EINVAL;
+                            return Ok(__WASI_EINVAL);
                         }
                     }
                     Kind::Dir { .. } | Kind::Root { .. } => {
                         // TODO: verify
-                        return __WASI_EISDIR;
+                        return Ok(__WASI_EISDIR);
                     }
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_write"),
                     Kind::Buffer { buffer } => {
-                        wasi_try!(write_bytes(&mut buffer[offset..], memory, &iovs_arr_cell))
+                        wasi_try_ok!(write_bytes(&mut buffer[offset..], memory, &iovs_arr_cell), thread)
                     }
                 }
             };
@@ -1371,10 +1371,10 @@ pub fn fd_write(
             // reborrow
             {
                 let mut fd_map = state.fs.fd_map.write().unwrap();
-                let fd_entry = wasi_try!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
+                let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
                 fd_entry.offset += bytes_written as u64;
             }
-            wasi_try!(state.fs.filestat_resync_size(inodes.deref(), fd));
+            wasi_try_ok!(state.fs.filestat_resync_size(inodes.deref(), fd), thread);
 
             bytes_written
         }
@@ -1382,7 +1382,7 @@ pub fn fd_write(
 
     nwritten_cell.set(bytes_written);
 
-    __WASI_ESUCCESS
+    Ok(__WASI_ESUCCESS)
 }
 
 /// ### `path_create_directory()`
@@ -2448,15 +2448,15 @@ pub fn poll_oneoff(
     out_: WasmPtr<__wasi_event_t, Array>,
     nsubscriptions: u32,
     nevents: WasmPtr<u32>,
-) -> __wasi_errno_t {
+) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::poll_oneoff");
     trace!("  => nsubscriptions = {}", nsubscriptions);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
-    let subscription_array = wasi_try!(in_.deref(memory, 0, nsubscriptions));
-    let event_array = wasi_try!(out_.deref(memory, 0, nsubscriptions));
+    let subscription_array = wasi_try_ok!(in_.deref(memory, 0, nsubscriptions));
+    let event_array = wasi_try_ok!(out_.deref(memory, 0, nsubscriptions));
     let mut events_seen = 0;
-    let out_ptr = wasi_try!(nevents.deref(memory));
+    let out_ptr = wasi_try_ok!(nevents.deref(memory));
 
     let mut fd_guards = vec![];
     let mut clock_subs = vec![];
@@ -2464,7 +2464,7 @@ pub fn poll_oneoff(
     let mut total_ns_slept = 0;
 
     for sub in subscription_array.iter() {
-        let s: WasiSubscription = wasi_try!(sub.get().try_into());
+        let s: WasiSubscription = wasi_try_ok!(sub.get().try_into());
         let mut peb = PollEventBuilder::new();
         let mut ns_to_sleep = 0;
 
@@ -2473,9 +2473,9 @@ pub fn poll_oneoff(
                 match fd {
                     __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
                     _ => {
-                        let fd_entry = wasi_try!(state.fs.get_fd(fd));
+                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
                         if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
-                            return __WASI_EACCES;
+                            return Ok(__WASI_EACCES);
                         }
                     }
                 }
@@ -2486,9 +2486,9 @@ pub fn poll_oneoff(
                 match fd {
                     __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
                     _ => {
-                        let fd_entry = wasi_try!(state.fs.get_fd(fd));
+                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
                         if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE) {
-                            return __WASI_EACCES;
+                            return Ok(__WASI_EACCES);
                         }
                     }
                 }
@@ -2511,19 +2511,19 @@ pub fn poll_oneoff(
         if let Some(fd) = fd {
             let wasi_file_ref = match fd {
                 __WASI_STDERR_FILENO => {
-                    wasi_try!(inodes.stderr(&state.fs.fd_map).map_err(fs_error_into_wasi_err))
+                    wasi_try_ok!(inodes.stderr(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread)
                 }
                 __WASI_STDIN_FILENO => {
-                    wasi_try!(inodes.stdin(&state.fs.fd_map).map_err(fs_error_into_wasi_err))
+                    wasi_try_ok!(inodes.stdin(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread)
                 }
                 __WASI_STDOUT_FILENO => {
-                    wasi_try!(inodes.stdout(&state.fs.fd_map).map_err(fs_error_into_wasi_err))
+                    wasi_try_ok!(inodes.stdout(&state.fs.fd_map).map_err(fs_error_into_wasi_err), thread)
                 }
                 _ => {
-                    let fd_entry = wasi_try!(state.fs.get_fd(fd));
+                    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
                     let inode = fd_entry.inode;
                     if !has_rights(fd_entry.rights, __WASI_RIGHT_POLL_FD_READWRITE) {
-                        return __WASI_EACCES;
+                        return Ok(__WASI_EACCES);
                     }
 
                     {
@@ -2535,7 +2535,7 @@ pub fn poll_oneoff(
                                         guard
                                     }
                                 } else {
-                                    return __WASI_EBADF;
+                                    return Ok(__WASI_EBADF);
                                 }
                             }
                             Kind::Dir { .. }
@@ -2554,7 +2554,7 @@ pub fn poll_oneoff(
             if remaining_ns > 0 {
                 debug!("Sleeping for {} nanoseconds", remaining_ns);
                 let duration = std::time::Duration::from_nanos(remaining_ns as u64);
-                thread.sleep(duration);
+                thread.sleep(duration)?;
                 total_ns_slept += remaining_ns;
             }
         }
@@ -2563,18 +2563,18 @@ pub fn poll_oneoff(
     let fds = {
         let mut f = vec![];
         for fd in fd_guards.iter() {
-            f.push(wasi_try!(fd.as_ref().ok_or(__WASI_EBADF)).deref());
+            f.push(wasi_try_ok!(fd.as_ref().ok_or(__WASI_EBADF)).deref());
         }
         f
     };
 
     let mut seen_events = vec![Default::default(); in_events.len()];
-    wasi_try!(poll(
+    wasi_try_ok!(poll(
         fds.as_slice(),
         in_events.as_slice(),
         seen_events.as_mut_slice()
     )
-    .map_err(fs_error_into_wasi_err));
+    .map_err(fs_error_into_wasi_err), thread);
 
     for (i, seen_event) in seen_events.into_iter().enumerate() {
         let mut flags = 0;
@@ -2587,16 +2587,16 @@ pub fn poll_oneoff(
                 PollEvent::PollHangUp => flags = __WASI_EVENT_FD_READWRITE_HANGUP,
                 PollEvent::PollInvalid => error = __WASI_EINVAL,
                 PollEvent::PollIn => {
-                    bytes_available = wasi_try!(fds[i]
+                    bytes_available = wasi_try_ok!(fds[i]
                         .bytes_available_read()
-                        .map_err(fs_error_into_wasi_err))
+                        .map_err(fs_error_into_wasi_err), thread)
                     .unwrap_or(0usize);
                     error = __WASI_ESUCCESS;
                 }
                 PollEvent::PollOut => {
-                    bytes_available = wasi_try!(fds[i]
+                    bytes_available = wasi_try_ok!(fds[i]
                         .bytes_available_write()
-                        .map_err(fs_error_into_wasi_err))
+                        .map_err(fs_error_into_wasi_err), thread)
                     .unwrap_or(0usize);
                     error = __WASI_ESUCCESS;
                 }
@@ -2637,7 +2637,7 @@ pub fn poll_oneoff(
         events_seen += 1;
     }
     out_ptr.set(events_seen as u32);
-    __WASI_ESUCCESS
+    Ok(__WASI_ESUCCESS)
 }
 
 pub fn proc_exit(thread: &WasiThread, code: __wasi_exitcode_t) -> Result<(), WasiError> {
@@ -2678,10 +2678,10 @@ pub fn random_get(thread: &WasiThread, buf: u32, buf_len: u32) -> __wasi_errno_t
 
 /// ### `sched_yield()`
 /// Yields execution of the thread
-pub fn sched_yield(thread: &WasiThread) -> __wasi_errno_t {
+pub fn sched_yield(thread: &WasiThread) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::sched_yield");
-    thread.yield_now();
-    __WASI_ESUCCESS
+    thread.yield_now()?;
+    Ok(__WASI_ESUCCESS)
 }
 
 pub fn sock_recv(

@@ -3,6 +3,7 @@ use crate::syscalls;
 use crate::syscalls::types::{self, snapshot0};
 use crate::WasiEnv;
 use crate::WasiThread;
+use crate::WasiError;
 
 /// Wrapper around `syscalls::fd_filestat_get` with extra logic to handle the size
 /// difference of `wasi_filestat_t`
@@ -106,7 +107,7 @@ pub fn fd_seek(
     offset: types::__wasi_filedelta_t,
     whence: snapshot0::__wasi_whence_t,
     newoffset: WasmPtr<types::__wasi_filesize_t>,
-) -> types::__wasi_errno_t {
+) -> Result<types::__wasi_errno_t, WasiError> {
     let new_whence = match whence {
         snapshot0::__WASI_WHENCE_CUR => types::__WASI_WHENCE_CUR,
         snapshot0::__WASI_WHENCE_END => types::__WASI_WHENCE_END,
@@ -125,14 +126,14 @@ pub fn poll_oneoff(
     out_: WasmPtr<types::__wasi_event_t, Array>,
     nsubscriptions: u32,
     nevents: WasmPtr<u32>,
-) -> types::__wasi_errno_t {
+) -> Result<types::__wasi_errno_t, WasiError> {
     // in this case the new type is smaller than the old type, so it all fits into memory,
     // we just need to readjust and copy it
 
     // we start by adjusting `in_` into a format that the new code can understand
     let memory = thread.memory();
     let mut in_origs: Vec<snapshot0::__wasi_subscription_t> = vec![];
-    for in_sub in wasi_try!(in_.deref(memory, 0, nsubscriptions)) {
+    for in_sub in wasi_try_ok!(in_.deref(memory, 0, nsubscriptions)) {
         in_origs.push(in_sub.get());
     }
 
@@ -140,7 +141,7 @@ pub fn poll_oneoff(
     let in_new_type_ptr: WasmPtr<types::__wasi_subscription_t, Array> =
         unsafe { std::mem::transmute(in_) };
 
-    for (in_sub_new, orig) in wasi_try!(in_new_type_ptr.deref(memory, 0, nsubscriptions))
+    for (in_sub_new, orig) in wasi_try_ok!(in_new_type_ptr.deref(memory, 0, nsubscriptions))
         .iter()
         .zip(in_origs.iter())
     {
@@ -170,7 +171,7 @@ pub fn poll_oneoff(
     // replace the old values of in, in case the calling code reuses the memory
     let memory = thread.memory();
 
-    for (in_sub, orig) in wasi_try!(in_.deref(memory, 0, nsubscriptions))
+    for (in_sub, orig) in wasi_try_ok!(in_.deref(memory, 0, nsubscriptions))
         .iter()
         .zip(in_origs.into_iter())
     {

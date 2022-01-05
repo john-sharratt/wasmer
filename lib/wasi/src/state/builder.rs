@@ -4,6 +4,7 @@ use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::WasiEnv;
 use crate::WasiThread;
+use crate::WasiError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::ops::{Deref, DerefMut};
@@ -51,7 +52,7 @@ pub struct WasiStateBuilder {
     stderr_override: Option<Box<dyn VirtualFile + Sync>>,
     stdin_override: Option<Box<dyn VirtualFile + Sync>>,
     fs_override: Option<Box<dyn wasmer_vfs::FileSystem>>,
-    on_yield: Option<Arc<dyn Fn(&WasiThread) + Send + Sync + 'static>>,
+    on_yield: Option<Arc<dyn Fn(&WasiThread) -> Result<(), WasiError> + Send + Sync + 'static>>,
 }
 
 impl std::fmt::Debug for WasiStateBuilder {
@@ -322,7 +323,7 @@ impl WasiStateBuilder {
     /// executed whenever the WASM process goes idle
     pub fn on_yield<F>(&mut self, callback: F) -> &mut Self
     where
-        F: Fn(&WasiThread),
+        F: Fn(&WasiThread) -> Result<(), WasiError>,
         F: Send + Sync + 'static,
     {
         self.on_yield = Some(Arc::new(callback));

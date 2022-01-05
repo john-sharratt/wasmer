@@ -18,6 +18,41 @@ macro_rules! wasi_try {
     }};
 }
 
+/// Like the `try!` macro or `?` syntax: returns the value if the computation
+/// succeeded or returns the error value. Results are wrapped in an Ok
+macro_rules! wasi_try_ok {
+    ($expr:expr) => {{
+        let res: Result<_, crate::syscalls::types::__wasi_errno_t> = $expr;
+        match res {
+            Ok(val) => {
+                tracing::trace!("wasi::wasi_try::val: {:?}", val);
+                val
+            }
+            Err(err) => {
+                tracing::trace!("wasi::wasi_try::err: {:?}", err);
+                return Ok(err);
+            }
+        }
+    }};
+
+    ($expr:expr, $thread:expr) => {{
+        let res: Result<_, crate::syscalls::types::__wasi_errno_t> = $expr;
+        match res {
+            Ok(val) => {
+                tracing::trace!("wasi::wasi_try::val: {:?}", val);
+                val
+            }
+            Err(err) => {
+                tracing::trace!("wasi::wasi_try::err: {:?}", err);
+                if err == __WASI_EINTR {
+                    $thread.yield_callback()?;
+                }
+                return Ok(err);
+            }
+        }
+    }};
+}
+
 /// Reads a string from Wasm memory and returns the invalid argument error
 /// code if it fails.
 ///

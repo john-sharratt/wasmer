@@ -103,18 +103,24 @@ impl WasiThread {
     }
 
     // Yields execution
-    pub fn yield_now(&self) {
+    pub fn yield_callback(&self) -> Result<(), WasiError> {
         if let Some(callback) = self.on_yield.as_ref() {
-            callback(self);
+            callback(self)?;
         }
-        std::thread::yield_now();
+        Ok(())
+    }
+
+    // Yields execution
+    pub fn yield_now(&self) -> Result<(), WasiError> {
+        self.yield_callback()?;
+        Ok(())
     }
 
     // Sleeps for a period of time
-    pub fn sleep(&self, duration: std::time::Duration) {
+    pub fn sleep(&self, duration: std::time::Duration) -> Result<(), WasiError> {
         let start = std::time::Instant::now();
         loop {
-            self.yield_now();
+            self.yield_now()?;
             let delta = std::time::Instant::now() - start;
             if delta > duration {
                 break;
@@ -125,6 +131,7 @@ impl WasiThread {
                 break;
             }
         }
+        Ok(())
     }
 
     /// Get an `ImportObject` for a specific version of WASI detected in the module.
@@ -217,7 +224,7 @@ pub struct WasiEnv {
     /// which is used to make callbacks to the process without breaking
     /// the single threaded WASM modules
     #[derivative(Debug = "ignore")]
-    pub(crate) on_yield: Option<Arc<dyn Fn(&WasiThread) + Send + Sync + 'static>>,
+    pub(crate) on_yield: Option<Arc<dyn Fn(&WasiThread) -> Result<(), WasiError> + Send + Sync + 'static>>,
     /// The thread ID seed is used to generate unique thread identifiers
     /// for each WasiThread. These are needed for multithreading code that needs
     /// this information in the syscalls
