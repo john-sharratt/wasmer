@@ -1504,11 +1504,15 @@ pub fn path_create_directory(
                     cur_dir_inode = *child;
                 } else {
                     let mut adjusted_path = path.clone();
+                    drop(guard);
+
                     // TODO: double check this doesn't risk breaking the sandbox
                     adjusted_path.push(comp);
-                    if adjusted_path.exists() && !adjusted_path.is_dir() {
-                        return __WASI_ENOTDIR;
-                    } else if !adjusted_path.exists() {
+                    if let Ok(adjusted_path_stat) = path_filestat_get_internal(memory, state, inodes.deref_mut(), fd, 0, &adjusted_path.to_string_lossy()) {
+                        if adjusted_path_stat.st_filetype != __WASI_FILETYPE_DIRECTORY {
+                            return __WASI_ENOTDIR;
+                        }
+                    } else {
                         wasi_try!(state.fs_create_dir(&adjusted_path));
                     }
                     let kind = Kind::Dir {
@@ -1516,7 +1520,6 @@ pub fn path_create_directory(
                         path: adjusted_path,
                         entries: Default::default(),
                     };
-                    drop(guard);
                     let new_inode = wasi_try!(state.fs.create_inode(
                         inodes.deref_mut(),
                         kind,
@@ -1570,37 +1573,62 @@ pub fn path_filestat_get(
     debug!("wasi::path_filestat_get");
     let (memory, state, mut inodes) = thread.get_memory_and_wasi_state_and_inodes_mut(0);
 
-    let root_dir = wasi_try!(state.fs.get_fd(fd));
-
-    if !has_rights(root_dir.rights, __WASI_RIGHT_PATH_FILESTAT_GET) {
-        return __WASI_EACCES;
-    }
     let path_string = unsafe { get_input_str!(memory, path, path_len) };
 
-    debug!("=> base_fd: {}, path: {}", fd, &path_string);
+    let stat = wasi_try!(path_filestat_get_internal(memory, state, inodes.deref_mut(), fd, flags, &path_string));
 
-    let file_inode = wasi_try!(state.fs.get_inode_at_path(
-        inodes.deref_mut(),
+    let buf_cell = wasi_try!(buf.deref(memory));
+    buf_cell.set(stat);
+    __WASI_ESUCCESS
+
+}
+
+/// ### `path_filestat_get()`
+/// Access metadata about a file or directory
+/// Inputs:
+/// - `__wasi_fd_t fd`
+///     The directory that `path` is relative to
+/// - `__wasi_lookupflags_t flags`
+///     Flags to control how `path` is understood
+/// - `const char *path`
+///     String containing the file path
+/// - `u32 path_len`
+///     The length of the `path` string
+/// Output:
+/// - `__wasi_file_stat_t *buf`
+///     The location where the metadata will be stored
+pub fn path_filestat_get_internal(
+    memory: &Memory,
+    state: &WasiState,
+    inodes: &mut crate::WasiInodes,
+    fd: __wasi_fd_t,
+    flags: __wasi_lookupflags_t,
+    path_string: &str,
+) -> Result<__wasi_filestat_t, __wasi_errno_t> {
+    let root_dir = state.fs.get_fd(fd)?;
+
+    if !has_rights(root_dir.rights, __WASI_RIGHT_PATH_FILESTAT_GET) {
+        return Err(__WASI_EACCES);
+    }
+    debug!("=> base_fd: {}, path: {}", fd, path_string);
+
+    let file_inode = state.fs.get_inode_at_path(
+        inodes,
         fd,
-        &path_string,
+        path_string,
         flags & __WASI_LOOKUP_SYMLINK_FOLLOW != 0,
-    ));
-    let stat = if inodes.arena[file_inode].is_preopened {
-        inodes.arena[file_inode]
+    )?;
+    if inodes.arena[file_inode].is_preopened {
+        Ok(inodes.arena[file_inode]
             .stat
             .read()
             .unwrap()
             .deref()
-            .clone()
+            .clone())
     } else {
         let guard = inodes.arena[file_inode].read();
-        wasi_try!(state.fs.get_stat_for_kind(inodes.deref(), guard.deref()))
-    };
-
-    let buf_cell = wasi_try!(buf.deref(memory));
-    buf_cell.set(stat);
-
-    __WASI_ESUCCESS
+        state.fs.get_stat_for_kind(inodes.deref(), guard.deref())
+    }
 }
 
 /// ### `path_filestat_set_times()`
@@ -1861,10 +1889,11 @@ pub fn path_open(
                 }
                 if o_flags & __WASI_O_DIRECTORY != 0 {
                     return __WASI_ENOTDIR;
-                }
-                if o_flags & __WASI_O_EXCL != 0 && path.exists() {
+                }                
+                if o_flags & __WASI_O_EXCL != 0 {
                     return __WASI_EEXIST;
                 }
+
                 let write_permission = adjusted_rights & __WASI_RIGHT_FD_WRITE != 0;
                 // append, truncate, and create all require the permission to write
                 let (append_permission, truncate_permission, create_permission) =
@@ -1900,10 +1929,6 @@ pub fn path_open(
             }
             Kind::Buffer { .. } => unimplemented!("wasi::path_open for Buffer type files"),
             Kind::Dir { .. } | Kind::Root { .. } => {
-                // TODO: adjust these to be correct
-                if o_flags & __WASI_O_EXCL != 0 && path_arg.exists() {
-                    return __WASI_EEXIST;
-                }
             }
             Kind::Symlink {
                 base_po_dir,
