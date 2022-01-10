@@ -37,7 +37,7 @@ use std::{
         RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 use wasmer_vfs::{FileSystem, FsError, OpenOptions, VirtualFile};
 
@@ -1321,7 +1321,7 @@ impl WasiFs {
         fd: __wasi_fd_t,
     ) -> Result<__wasi_prestat_t, __wasi_errno_t> {
         let inode = self.get_fd_inode(fd)?;
-        debug!("in prestat_fd {:?}", self.get_fd(fd)?);
+        trace!("in prestat_fd {:?}", self.get_fd(fd)?);
 
         let inode_val = &inodes.arena[inode];
 

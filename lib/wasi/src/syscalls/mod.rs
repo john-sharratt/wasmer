@@ -315,7 +315,7 @@ pub fn environ_sizes_get(
     environ_count: WasmPtr<u32>,
     environ_buf_size: WasmPtr<u32>,
 ) -> __wasi_errno_t {
-    debug!("wasi::environ_sizes_get");
+    trace!("wasi::environ_sizes_get");
     let (memory, state) = thread.get_memory_and_wasi_state(0);
 
     let environ_count = wasi_try!(environ_count.deref(memory));
@@ -326,7 +326,7 @@ pub fn environ_sizes_get(
     environ_count.set(env_var_count);
     environ_buf_size.set(env_buf_size);
 
-    debug!(
+    trace!(
         "env_var_count: {}, env_buf_size: {}",
         env_var_count, env_buf_size
     );
@@ -760,7 +760,7 @@ pub fn fd_prestat_get(
     fd: __wasi_fd_t,
     buf: WasmPtr<__wasi_prestat_t>,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_prestat_get: fd={}", fd);
+    trace!("wasi::fd_prestat_get: fd={}", fd);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
     let prestat_ptr = wasi_try!(buf.deref(memory));
@@ -776,7 +776,7 @@ pub fn fd_prestat_dir_name(
     path: WasmPtr<u8, Array>,
     path_len: u32,
 ) -> __wasi_errno_t {
-    debug!(
+    trace!(
         "wasi::fd_prestat_dir_name: fd={}, path_len={}",
         fd, path_len
     );
@@ -788,7 +788,7 @@ pub fn fd_prestat_dir_name(
 
     // check inode-val.is_preopened?
 
-    debug!("=> inode: {:?}", inode_val);
+    trace!("=> inode: {:?}", inode_val);
     let guard = inode_val.read();
     match guard.deref() {
         Kind::Dir { .. } | Kind::Root { .. } => {
@@ -801,7 +801,7 @@ pub fn fd_prestat_dir_name(
                 }
                 path_chars[i].set(0);
 
-                debug!(
+                trace!(
                     "=> result: \"{}\" (written: {}, {})",
                     unsafe { path.get_utf8_str(memory, path_len).unwrap() },
                     i,
