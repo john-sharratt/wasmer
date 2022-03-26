@@ -19,5 +19,5 @@ pub fn platform_clock_time_get(
     precision: __wasi_timestamp_t,
 ) -> Result<i64, __wasi_errno_t> {
     let new_time: DateTime<Local> = Local::now();
-    Ok(new_time.timestamp_nanos() as __wasi_timestamp_t)
+    Ok(new_time.timestamp_nanos() as i64)
 }
