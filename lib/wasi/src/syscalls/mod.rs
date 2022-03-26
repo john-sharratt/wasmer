@@ -271,7 +271,13 @@ pub fn clock_time_get(
     let memory = thread.memory();
 
     let out_addr = wasi_try!(time.deref(memory));
-    let result = platform_clock_time_get(clock_id, precision, out_addr);
+
+    let t_out = wasi_try!(platform_clock_time_get(clock_id, precision));
+    out_addr.set(t_out as __wasi_timestamp_t);
+
+    // TODO: map output of clock_gettime to __wasi_errno_t
+    let result = __WASI_ESUCCESS;
+
     trace!(
         "time: {} => {}",
         wasi_try!(time.deref(memory)).get(),

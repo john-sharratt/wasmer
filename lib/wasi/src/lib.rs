@@ -55,6 +55,7 @@ pub use wasmer_vfs::FsError as WasiFsError;
 #[deprecated(since = "2.1.0", note = "Please use `wasmer_vfs::VirtualFile`")]
 pub use wasmer_vfs::VirtualFile as WasiFile;
 pub use wasmer_vfs::{FsError, VirtualFile};
+use wasmer_wasi_types::__WASI_CLOCK_MONOTONIC;
 
 use thiserror::Error;
 use wasmer::{
@@ -118,16 +119,21 @@ impl WasiThread {
 
     // Sleeps for a period of time
     pub fn sleep(&self, duration: std::time::Duration) -> Result<(), WasiError> {
-        let start = std::time::Instant::now();
+        let duration = duration.as_nanos();
+        let start = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 0).unwrap() as u128;
         loop {
             self.yield_now()?;
-            let delta = std::time::Instant::now() - start;
+            let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 0).unwrap() as u128;
+            let delta = now - start;
             if delta > duration {
                 break;
             }
             let remaining = duration - delta;
+            let remaining = std::time::Duration::from_nanos(remaining as u64);
             std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
-            if std::time::Instant::now() - start >= duration {
+            
+            let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 0).unwrap() as u128;
+            if now - start >= duration {
                 break;
             }
         }
