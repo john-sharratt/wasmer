@@ -2603,7 +2603,8 @@ pub fn poll_oneoff(
                 Some(fd)
             }
             EventType::Clock(clock_info) => {
-                if clock_info.clock_id == __WASI_CLOCK_REALTIME {
+                if clock_info.clock_id == __WASI_CLOCK_REALTIME ||
+                   clock_info.clock_id == __WASI_CLOCK_MONOTONIC {
                     // this is a hack
                     // TODO: do this properly
                     ns_to_sleep = clock_info.timeout;
