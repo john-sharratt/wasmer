@@ -2580,7 +2580,7 @@ pub fn poll_oneoff(
         let s: WasiSubscription = wasi_try_ok!(sub.get().try_into());
         let mut peb = PollEventBuilder::new();
         let mut ns_to_sleep = 0;
-
+        
         let fd = match s.event_type {
             EventType::Read(__wasi_subscription_fs_readwrite_t { fd }) => {
                 match fd {
@@ -2614,7 +2614,7 @@ pub fn poll_oneoff(
                     // this is a hack
                     // TODO: do this properly
                     ns_to_sleep = clock_info.timeout;
-                    clock_subs.push(clock_info);
+                    clock_subs.push((clock_info, s.user_data));
                     None
                 } else {
                     unimplemented!("Polling not implemented for clocks yet");
@@ -2679,7 +2679,7 @@ pub fn poll_oneoff(
         } else {
             let remaining_ns = ns_to_sleep as i64 - total_ns_slept as i64;
             if remaining_ns > 0 {
-                debug!("Sleeping for {} nanoseconds", remaining_ns);
+                trace!("Sleeping for {} nanoseconds", remaining_ns);
                 let duration = std::time::Duration::from_nanos(remaining_ns as u64);
                 thread.sleep(duration)?;
                 total_ns_slept += remaining_ns;
@@ -2754,10 +2754,9 @@ pub fn poll_oneoff(
         event_array[events_seen].set(event);
         events_seen += 1;
     }
-    for clock_info in clock_subs {
+    for (clock_info, userdata) in clock_subs {
         let event = __wasi_event_t {
-            // TOOD: review userdata value
-            userdata: 0,
+            userdata,
             error: __WASI_ESUCCESS,
             type_: __WASI_EVENTTYPE_CLOCK,
             u: unsafe {
