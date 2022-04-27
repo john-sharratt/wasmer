@@ -62,6 +62,7 @@ use wasmer::{
     Module, NamedResolver, Store, WasmerEnv,
 };
 
+use std::time::Duration;
 use std::sync::{atomic::AtomicU32, atomic::Ordering, Arc, RwLockReadGuard, RwLockWriteGuard};
 
 /// This is returned in `RuntimeError`.
@@ -87,7 +88,7 @@ pub struct WasiThread {
     memory: LazyInit<Memory>,
 }
 
-/// The wasi thread dereferences into the wasi environment
+/// The WASI thread dereferences into the WASI environment
 impl Deref for WasiThread {
     type Target = WasiEnv;
 
@@ -97,12 +98,12 @@ impl Deref for WasiThread {
 }
 
 impl WasiThread {
-    // Returns the unique ID of this thread
+    /// Returns the unique ID of this thread
     pub fn thread_id(&self) -> u32 {
         self.id
     }
 
-    // Yields execution
+    /// Yields execution
     pub fn yield_callback(&self) -> Result<(), WasiError> {
         if let Some(callback) = self.on_yield.as_ref() {
             callback(self)?;
@@ -117,24 +118,25 @@ impl WasiThread {
     }
 
     // Sleeps for a period of time
-    pub fn sleep(&self, duration: std::time::Duration) -> Result<(), WasiError> {
+    pub fn sleep(&self, duration: Duration) -> Result<(), WasiError> {
         let duration = duration.as_nanos();
-        let start = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 0).unwrap() as u128;
+        let start = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
+        self.yield_now()?;
         loop {
+            let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
+            let delta = match now.checked_sub(start) {
+                Some(a) => a,
+                None => { break; }
+            };
+            if delta >= duration {
+                break;
+            }
+            let remaining = match duration.checked_sub(delta) {
+                Some(a) => Duration::from_nanos(a as u64),
+                None => { break; }
+            };
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
             self.yield_now()?;
-            let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 0).unwrap() as u128;
-            let delta = now - start;
-            if delta > duration {
-                break;
-            }
-            let remaining = duration - delta;
-            let remaining = std::time::Duration::from_nanos(remaining as u64);
-            std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
-
-            let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 0).unwrap() as u128;
-            if now - start >= duration {
-                break;
-            }
         }
         Ok(())
     }
@@ -265,8 +267,8 @@ impl WasiEnv {
             .expect("Memory should be set on `WasiEnv` first")
     }
 
-    // Copy the lazy reference so that when its initialized during the
-    // export phase that all the other references get a copy of it
+    /// Copy the lazy reference so that when it's initialized during the
+    /// export phase, all the other references get a copy of it
     pub fn memory_clone(&self) -> LazyInit<Memory> {
         self.memory.clone()
     }

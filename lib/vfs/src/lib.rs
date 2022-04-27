@@ -116,7 +116,7 @@ impl OpenOptions {
         }
     }
 
-    pub fn set_options(&mut self, options: OpenOptionsConfig) -> &mut Self {
+    pub fn options(&mut self, options: OpenOptionsConfig) -> &mut Self {
         self.conf = options;
         self
     }
@@ -203,8 +203,8 @@ pub trait VirtualFile: fmt::Debug + Send + Write + Read + Seek + 'static + Upcas
         Ok(None)
     }
 
-    // Indicates if the file has been open or close. This function must not block
-    // Defaults to a status of constantly open
+    /// Indicates if the file is opened or closed. This function must not block
+    /// Defaults to a status of being constantly open
     fn is_open(&self) -> bool {
         true
     }
