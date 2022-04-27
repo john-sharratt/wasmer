@@ -613,8 +613,8 @@
             .<span class="ident">expect</span>(<span class="string">&quot;Memory should be set on `WasiEnv` first&quot;</span>)
     }
 
-    <span class="comment">// Copy the lazy reference so that when its initialized during the</span>
-    <span class="comment">// export phase that all the other references get a copy of it</span>
+    <span class="doccomment">/// Copy the lazy reference so that when it&#39;s initialized during the</span>
+    <span class="doccomment">/// export phase, all the other references get a copy of it</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">memory_clone</span>(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="ident">LazyInit</span><span class="op">&lt;</span><span class="ident">Memory</span><span class="op">&gt;</span> {
         <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">clone</span>()
     }
