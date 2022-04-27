@@ -8,6 +8,7 @@ use std::{
     collections::VecDeque,
     io::{self, Read, Seek, Write},
 };
+use tracing::debug;
 
 #[cfg(feature = "host-fs")]
 pub use wasmer_vfs::host_fs::{Stderr, Stdin, Stdout};
