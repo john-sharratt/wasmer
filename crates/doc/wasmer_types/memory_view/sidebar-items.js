@@ -1,1 +1,0 @@
-initSidebarItems({"fn":[["align_pointer",""],["is_aligned_and_not_null",""]],"macro":[["atomic",""]],"struct":[["Atomically","Atomically."],["MemoryView","A view into a memory."],["NonAtomically","Non-atomically."]],"trait":[["Atomic",""],["Atomicity","A trait that represants an atomic type."]]});
