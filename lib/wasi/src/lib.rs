@@ -130,7 +130,7 @@ impl WasiThread {
             let remaining = duration - delta;
             let remaining = std::time::Duration::from_nanos(remaining as u64);
             std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
-            
+
             let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 0).unwrap() as u128;
             if now - start >= duration {
                 break;

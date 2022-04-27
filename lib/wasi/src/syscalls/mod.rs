@@ -313,7 +313,8 @@ pub fn environ_sizes_get(
 
     trace!(
         "env_var_count: {}, env_buf_size: {}",
-        env_var_count, env_buf_size
+        env_var_count,
+        env_buf_size
     );
 
     __WASI_ESUCCESS
@@ -763,7 +764,8 @@ pub fn fd_prestat_dir_name(
 ) -> __wasi_errno_t {
     trace!(
         "wasi::fd_prestat_dir_name: fd={}, path_len={}",
-        fd, path_len
+        fd,
+        path_len
     );
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
     let path_chars = wasi_try_mem!(path.slice(memory, path_len));
@@ -883,9 +885,8 @@ pub fn fd_pwrite(
                 }
                 Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_pwrite"),
                 Kind::Buffer { buffer } => {
-                    wasi_try_ok!(write_bytes(&mut buffer[(offset as usize)..],
-                        memory,
-                        iovs_arr),
+                    wasi_try_ok!(
+                        write_bytes(&mut buffer[(offset as usize)..], memory, iovs_arr),
                         thread
                     )
                 }
@@ -971,10 +972,7 @@ pub fn fd_read(
                     }
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
                     Kind::Buffer { buffer } => {
-                        wasi_try_ok!(
-                            read_bytes(&buffer[offset..], memory, iovs_arr),
-                            thread
-                        )
+                        wasi_try_ok!(read_bytes(&buffer[offset..], memory, iovs_arr), thread)
                     }
                 }
             };
@@ -1383,10 +1381,7 @@ pub fn fd_write(
                     }
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_write"),
                     Kind::Buffer { buffer } => {
-                        wasi_try_ok!(
-                            write_bytes(&mut buffer[offset..], memory, iovs_arr),
-                            thread
-                        )
+                        wasi_try_ok!(write_bytes(&mut buffer[offset..], memory, iovs_arr), thread)
                     }
                 }
             };
@@ -1487,7 +1482,14 @@ pub fn path_create_directory(
 
                     // TODO: double check this doesn't risk breaking the sandbox
                     adjusted_path.push(comp);
-                    if let Ok(adjusted_path_stat) = path_filestat_get_internal(memory, state, inodes.deref_mut(), fd, 0, &adjusted_path.to_string_lossy()) {
+                    if let Ok(adjusted_path_stat) = path_filestat_get_internal(
+                        memory,
+                        state,
+                        inodes.deref_mut(),
+                        fd,
+                        0,
+                        &adjusted_path.to_string_lossy(),
+                    ) {
                         if adjusted_path_stat.st_filetype != __WASI_FILETYPE_DIRECTORY {
                             return __WASI_ENOTDIR;
                         }
@@ -1554,12 +1556,18 @@ pub fn path_filestat_get(
 
     let path_string = unsafe { get_input_str!(memory, path, path_len) };
 
-    let stat = wasi_try!(path_filestat_get_internal(memory, state, inodes.deref_mut(), fd, flags, &path_string));
+    let stat = wasi_try!(path_filestat_get_internal(
+        memory,
+        state,
+        inodes.deref_mut(),
+        fd,
+        flags,
+        &path_string
+    ));
 
     wasi_try_mem!(buf.deref(memory).write(stat));
 
     __WASI_ESUCCESS
-
 }
 
 /// ### `path_filestat_get()`
@@ -1868,7 +1876,7 @@ pub fn path_open(
                 }
                 if o_flags & __WASI_O_DIRECTORY != 0 {
                     return __WASI_ENOTDIR;
-                }                
+                }
                 if o_flags & __WASI_O_EXCL != 0 {
                     return __WASI_EEXIST;
                 }
@@ -1907,8 +1915,7 @@ pub fn path_open(
                     .map_err(fs_error_into_wasi_err)));
             }
             Kind::Buffer { .. } => unimplemented!("wasi::path_open for Buffer type files"),
-            Kind::Dir { .. } | Kind::Root { .. } => {
-            }
+            Kind::Dir { .. } | Kind::Root { .. } => {}
             Kind::Symlink {
                 base_po_dir,
                 path_to_symlink,
@@ -2549,7 +2556,7 @@ pub fn poll_oneoff(
         let s: WasiSubscription = wasi_try_ok!(wasi_try_mem_ok!(sub.read()).try_into());
         let mut peb = PollEventBuilder::new();
         let mut ns_to_sleep = 0;
-        
+
         let fd = match s.event_type {
             EventType::Read(__wasi_subscription_fs_readwrite_t { fd }) => {
                 match fd {
@@ -2578,8 +2585,9 @@ pub fn poll_oneoff(
                 Some(fd)
             }
             EventType::Clock(clock_info) => {
-                if clock_info.clock_id == __WASI_CLOCK_REALTIME ||
-                   clock_info.clock_id == __WASI_CLOCK_MONOTONIC {
+                if clock_info.clock_id == __WASI_CLOCK_REALTIME
+                    || clock_info.clock_id == __WASI_CLOCK_MONOTONIC
+                {
                     // this is a hack
                     // TODO: do this properly
                     ns_to_sleep = clock_info.timeout;

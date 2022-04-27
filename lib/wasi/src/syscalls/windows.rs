@@ -49,7 +49,7 @@ pub fn platform_clock_time_get(
         __WASI_CLOCK_THREAD_CPUTIME_ID => {
             unimplemented!("wasi::platform_clock_time_get(__WASI_CLOCK_THREAD_CPUTIME_ID, ..)")
         }
-        _ => return Err(__WASI_EINVAL,)
+        _ => return Err(__WASI_EINVAL),
     };
     Ok(nanos as i64)
 }
