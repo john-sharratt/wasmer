@@ -375,6 +375,11 @@
 <span id="373">373</span>
 <span id="374">374</span>
 <span id="375">375</span>
+<span id="376">376</span>
+<span id="377">377</span>
+<span id="378">378</span>
+<span id="379">379</span>
+<span id="380">380</span>
 </pre><pre class="rust"><code><span class="attribute">#![<span class="ident">deny</span>(<span class="ident">unused_mut</span>)]</span>
 <span class="attribute">#![<span class="ident">doc</span>(<span class="ident">html_favicon_url</span> <span class="op">=</span> <span class="string">&quot;https://wasmer.io/images/icons/favicon-32x32.png&quot;</span>)]</span>
 <span class="attribute">#![<span class="ident">doc</span>(<span class="ident">html_logo_url</span> <span class="op">=</span> <span class="string">&quot;https://github.com/wasmerio.png?size=200&quot;</span>)]</span>
@@ -438,6 +443,7 @@
     <span class="ident">Module</span>, <span class="ident">NamedResolver</span>, <span class="ident">Store</span>, <span class="ident">WasmerEnv</span>,
 };
 
+<span class="kw">use</span> <span class="ident">std::time</span>::{<span class="ident">Instant</span>, <span class="ident">Duration</span>};
 <span class="kw">use</span> <span class="ident">std::sync</span>::{<span class="ident">atomic::AtomicU32</span>, <span class="ident">atomic::Ordering</span>, <span class="ident">Arc</span>, <span class="ident">Mutex</span>, <span class="ident">MutexGuard</span>};
 
 <span class="doccomment">/// This is returned in `RuntimeError`.</span>
@@ -487,19 +493,23 @@
     }
 
     <span class="doccomment">/// Sleeps for a period of time</span>
-    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">sleep</span>(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="ident">duration</span>: <span class="ident">std::time::Duration</span>) {
-        <span class="kw">let</span> <span class="ident">start</span> <span class="op">=</span> <span class="ident">std::time::Instant::now</span>();
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">sleep</span>(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="ident">duration</span>: <span class="ident">Duration</span>) {
+        <span class="kw">let</span> <span class="ident">start</span> <span class="op">=</span> <span class="ident">Instant::now</span>();
+        <span class="self">self</span>.<span class="ident">yield_now</span>();
         <span class="kw">loop</span> {
-            <span class="self">self</span>.<span class="ident">yield_now</span>();
-            <span class="kw">let</span> <span class="ident">delta</span> <span class="op">=</span> <span class="ident">std::time::Instant::now</span>() <span class="op">-</span> <span class="ident">start</span>;
+            <span class="kw">let</span> <span class="ident">delta</span> <span class="op">=</span> <span class="kw">match</span> <span class="ident">Instant::now</span>().<span class="ident">checked_duration_since</span>(<span class="ident">start</span>) {
+                <span class="prelude-val">Some</span>(<span class="ident">a</span>) =&gt; <span class="ident">a</span>,
+                <span class="prelude-val">None</span> =&gt; { <span class="kw">break</span>; }
+            };            
             <span class="kw">if</span> <span class="ident">delta</span> <span class="op">&gt;</span> <span class="ident">duration</span> {
                 <span class="kw">break</span>;
             }
-            <span class="kw">let</span> <span class="ident">remaining</span> <span class="op">=</span> <span class="ident">duration</span> <span class="op">-</span> <span class="ident">delta</span>;
-            <span class="ident">std::thread::sleep</span>(<span class="ident">remaining</span>.<span class="ident">min</span>(<span class="ident">std::time::Duration::from_millis</span>(<span class="number">10</span>)));
-            <span class="kw">if</span> <span class="ident">std::time::Instant::now</span>() <span class="op">-</span> <span class="ident">start</span> <span class="op">&gt;</span><span class="op">=</span> <span class="ident">duration</span> {
-                <span class="kw">break</span>;
-            }
+            <span class="kw">let</span> <span class="ident">remaining</span> <span class="op">=</span> <span class="kw">match</span> <span class="ident">duration</span>.<span class="ident">checked_sub</span>(<span class="ident">delta</span>) {
+                <span class="prelude-val">Some</span>(<span class="ident">a</span>) =&gt; <span class="ident">a</span>.<span class="ident">min</span>(<span class="ident">Duration::from_millis</span>(<span class="number">10</span>)),
+                <span class="prelude-val">None</span> =&gt; { <span class="kw">break</span>; }
+            };
+            <span class="self">self</span>.<span class="ident">yield_now</span>();
+            <span class="ident">std::thread::sleep</span>(<span class="ident">remaining</span>);
         }
     }
 
