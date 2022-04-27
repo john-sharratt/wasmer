@@ -122,7 +122,7 @@ fn write_buffer_array(
 
     let mut current_buffer_offset = 0;
     for ((i, sub_buffer), ptr) in from.iter().enumerate().zip(ptrs.iter()) {
-        debug!("ptr: {:?}, subbuffer: {:?}", ptr, sub_buffer);
+        trace!("ptr: {:?}, subbuffer: {:?}", ptr, sub_buffer);
         let new_ptr = WasmPtr::new(buffer.offset() + current_buffer_offset);
         wasi_try_mem!(ptr.write(new_ptr));
 
@@ -283,7 +283,7 @@ pub fn environ_get(
         environ, environ_buf
     );
     let (memory, state) = thread.get_memory_and_wasi_state(0);
-    debug!(" -> State envs: {:?}", state.envs);
+    trace!(" -> State envs: {:?}", state.envs);
 
     write_buffer_array(memory, &*state.envs, environ, environ_buf)
 }
