@@ -548,8 +548,8 @@
             .<span class="ident">expect</span>(<span class="string">&quot;Memory should be set on `WasiThread` first&quot;</span>)
     }
 
-    <span class="doccomment">/// Copy the lazy reference so that when its initialized during the</span>
-    <span class="doccomment">/// export phase that all the other references get a copy of it</span>
+    <span class="comment">// Copy the lazy reference so that when its initialized during the</span>
+    <span class="comment">// export phase that all the other references get a copy of it</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">memory_clone</span>(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="ident">LazyInit</span><span class="op">&lt;</span><span class="ident">Memory</span><span class="op">&gt;</span> {
         <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">clone</span>()
     }
@@ -694,7 +694,7 @@
             <span class="string">&quot;sched_yield&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sched_yield</span>),
             <span class="string">&quot;sock_recv&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sock_recv</span>),
             <span class="string">&quot;sock_send&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sock_send</span>),
-            <span class="string">&quot;sock_shutdown&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>, <span class="ident">sock_shutdown</span>),
+            <span class="string">&quot;sock_shutdown&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sock_shutdown</span>),
         },
     }
 }
@@ -747,7 +747,7 @@
             <span class="string">&quot;sched_yield&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sched_yield</span>),
             <span class="string">&quot;sock_recv&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sock_recv</span>),
             <span class="string">&quot;sock_send&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sock_send</span>),
-            <span class="string">&quot;sock_shutdown&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>, <span class="ident">sock_shutdown</span>),
+            <span class="string">&quot;sock_shutdown&quot;</span> =&gt; <span class="ident">Function::new_native_with_env</span>(<span class="ident">store</span>, <span class="ident">thread</span>.<span class="ident">clone</span>(), <span class="ident">sock_shutdown</span>),
         }
     }
 }
