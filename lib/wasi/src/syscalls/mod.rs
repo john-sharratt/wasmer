@@ -21,7 +21,7 @@ pub mod legacy;
 use self::types::*;
 use crate::utils::map_io_err;
 use crate::{
-    ptr::{Array, WasmPtr},
+    mem_error_to_wasi,
     state::{
         self, fs_error_into_wasi_err, iterate_poll_events, poll,
         virtual_file_type_to_wasi_file_type, Fd, Inode, InodeVal, Kind, PollEvent,
@@ -35,7 +35,7 @@ use std::io::{self, Read, Seek, Write};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 use tracing::{debug, trace};
-use wasmer::{Memory, RuntimeError, Value, WasmCell};
+use wasmer::{Memory, RuntimeError, Value, WasmPtr, WasmSlice};
 use wasmer_vfs::{FsError, VirtualFile};
 
 #[cfg(any(
@@ -55,29 +55,16 @@ pub use wasm32::*;
 fn write_bytes_inner<T: Write>(
     mut write_loc: T,
     memory: &Memory,
-    iovs_arr_cell: &[WasmCell<__wasi_ciovec_t>],
+    iovs_arr_cell: WasmSlice<__wasi_ciovec_t>,
 ) -> Result<u32, __wasi_errno_t> {
     let mut bytes_written = 0;
-
-    // We allocate the raw_bytes first once instead of
-    // N times in the loop.
-    let mut raw_bytes: Vec<u8> = vec![0; 4096];
-
-    for iov in iovs_arr_cell {
-        let iov_inner = iov.get();
-        raw_bytes.clear();
-        raw_bytes.resize(iov_inner.buf_len as usize, 0);
-        unsafe {
-            let src = &memory
-                .uint8view()
-                .subarray(
-                    iov_inner.buf as u32,
-                    iov_inner.buf as u32 + iov_inner.buf_len as u32,
-                )
-                .copy_to(&mut raw_bytes);
-        }
-
-        write_loc.write_all(&raw_bytes).map_err(|e| map_io_err(e))?;
+    for iov in iovs_arr_cell.iter() {
+        let iov_inner = iov.read().map_err(mem_error_to_wasi)?;
+        let bytes = WasmPtr::<u8>::new(iov_inner.buf)
+            .slice(memory, iov_inner.buf_len)
+            .map_err(mem_error_to_wasi)?;
+        let bytes = bytes.read_to_vec().map_err(mem_error_to_wasi)?;
+        write_loc.write_all(&bytes).map_err(map_io_err)?;
 
         bytes_written += iov_inner.buf_len;
     }
@@ -87,9 +74,9 @@ fn write_bytes_inner<T: Write>(
 fn write_bytes<T: Write>(
     mut write_loc: T,
     memory: &Memory,
-    iovs_arr_cell: &[WasmCell<__wasi_ciovec_t>],
+    iovs_arr: WasmSlice<__wasi_ciovec_t>,
 ) -> Result<u32, __wasi_errno_t> {
-    let result = write_bytes_inner(&mut write_loc, memory, iovs_arr_cell);
+    let result = write_bytes_inner(&mut write_loc, memory, iovs_arr);
     write_loc.flush();
     result
 }
@@ -97,7 +84,7 @@ fn write_bytes<T: Write>(
 fn read_bytes<T: Read>(
     mut reader: T,
     memory: &Memory,
-    iovs_arr_cell: &[WasmCell<__wasi_iovec_t>],
+    iovs_arr: WasmSlice<__wasi_iovec_t>,
 ) -> Result<u32, __wasi_errno_t> {
     let mut bytes_read = 0;
 
@@ -105,20 +92,16 @@ fn read_bytes<T: Read>(
     // N times in the loop.
     let mut raw_bytes: Vec<u8> = vec![0; 1024];
 
-    for iov in iovs_arr_cell {
-        let iov_inner = iov.get();
+    for iov in iovs_arr.iter() {
+        let iov_inner = iov.read().map_err(mem_error_to_wasi)?;
         raw_bytes.clear();
         raw_bytes.resize(iov_inner.buf_len as usize, 0);
-        bytes_read += reader.read(&mut raw_bytes).map_err(|e| map_io_err(e))? as u32;
-        unsafe {
-            memory
-                .uint8view()
-                .subarray(
-                    iov_inner.buf as u32,
-                    iov_inner.buf as u32 + iov_inner.buf_len as u32,
-                )
-                .copy_from(&raw_bytes);
-        }
+        bytes_read += reader.read(&mut raw_bytes).map_err(map_io_err)? as u32;
+
+        let buf = WasmPtr::<u8>::new(iov_inner.buf)
+            .slice(memory, iov_inner.buf_len)
+            .map_err(mem_error_to_wasi)?;
+        buf.write_slice(&raw_bytes).map_err(mem_error_to_wasi)?;
     }
     Ok(bytes_read)
 }
@@ -132,22 +115,21 @@ fn has_rights(rights_set: __wasi_rights_t, rights_check_set: __wasi_rights_t) ->
 fn write_buffer_array(
     memory: &Memory,
     from: &[Vec<u8>],
-    ptr_buffer: WasmPtr<WasmPtr<u8, Array>, Array>,
-    buffer: WasmPtr<u8, Array>,
+    ptr_buffer: WasmPtr<WasmPtr<u8>>,
+    buffer: WasmPtr<u8>,
 ) -> __wasi_errno_t {
-    let ptrs = wasi_try!(ptr_buffer.deref(memory, 0, from.len() as u32));
+    let ptrs = wasi_try_mem!(ptr_buffer.slice(memory, from.len() as u32));
 
     let mut current_buffer_offset = 0;
     for ((i, sub_buffer), ptr) in from.iter().enumerate().zip(ptrs.iter()) {
         debug!("ptr: {:?}, subbuffer: {:?}", ptr, sub_buffer);
         let new_ptr = WasmPtr::new(buffer.offset() + current_buffer_offset);
-        ptr.set(new_ptr);
+        wasi_try_mem!(ptr.write(new_ptr));
 
-        let cells = wasi_try!(new_ptr.deref(memory, 0, sub_buffer.len() as u32 + 1));
+        let data = wasi_try_mem!(new_ptr.slice(memory, sub_buffer.len() as u32));
+        wasi_try_mem!(data.write_slice(sub_buffer));
+        wasi_try_mem!(wasi_try_mem!(new_ptr.add(sub_buffer.len() as u32)).write(memory, 0));
 
-        for (cell, &byte) in cells.iter().zip(sub_buffer.iter().chain([0].iter())) {
-            cell.set(byte);
-        }
         current_buffer_offset += sub_buffer.len() as u32 + 1;
     }
 
@@ -173,8 +155,8 @@ fn get_current_time_in_nanos() -> Result<__wasi_timestamp_t, __wasi_errno_t> {
 ///
 pub fn args_get(
     thread: &WasiThread,
-    argv: WasmPtr<WasmPtr<u8, Array>, Array>,
-    argv_buf: WasmPtr<u8, Array>,
+    argv: WasmPtr<WasmPtr<u8>>,
+    argv_buf: WasmPtr<u8>,
 ) -> __wasi_errno_t {
     debug!("wasi::args_get");
     let (memory, state) = thread.get_memory_and_wasi_state(0);
@@ -214,13 +196,13 @@ pub fn args_sizes_get(
     debug!("wasi::args_sizes_get");
     let (memory, state) = thread.get_memory_and_wasi_state(0);
 
-    let argc = wasi_try!(argc.deref(memory));
-    let argv_buf_size = wasi_try!(argv_buf_size.deref(memory));
+    let argc = argc.deref(memory);
+    let argv_buf_size = argv_buf_size.deref(memory);
 
     let argc_val = state.args.len() as u32;
     let argv_buf_size_val = state.args.iter().map(|v| v.len() as u32 + 1).sum();
-    argc.set(argc_val);
-    argv_buf_size.set(argv_buf_size_val);
+    wasi_try_mem!(argc.write(argc_val));
+    wasi_try_mem!(argv_buf_size.write(argv_buf_size_val));
 
     debug!("=> argc={}, argv_buf_size={}", argc_val, argv_buf_size_val);
 
@@ -243,7 +225,7 @@ pub fn clock_res_get(
     trace!("wasi::clock_res_get");
     let memory = thread.memory();
 
-    let out_addr = wasi_try!(resolution.deref(memory));
+    let out_addr = resolution.deref(memory);
     platform_clock_res_get(clock_id, out_addr)
 }
 
@@ -270,17 +252,14 @@ pub fn clock_time_get(
     );
     let memory = thread.memory();
 
-    let out_addr = wasi_try!(time.deref(memory));
-
+    let out_addr = time.deref(memory);
     let t_out = wasi_try!(platform_clock_time_get(clock_id, precision));
-    out_addr.set(t_out as __wasi_timestamp_t);
+    wasi_try_mem!(out_addr.write(t_out as __wasi_timestamp_t));
 
-    // TODO: map output of clock_gettime to __wasi_errno_t
     let result = __WASI_ESUCCESS;
-
     trace!(
         "time: {} => {}",
-        wasi_try!(time.deref(memory)).get(),
+        wasi_try_mem!(time.deref(memory).read()),
         result
     );
     result
@@ -296,8 +275,8 @@ pub fn clock_time_get(
 ///     A pointer to a buffer to write the environment variable string data.
 pub fn environ_get(
     thread: &WasiThread,
-    environ: WasmPtr<WasmPtr<u8, Array>, Array>,
-    environ_buf: WasmPtr<u8, Array>,
+    environ: WasmPtr<WasmPtr<u8>>,
+    environ_buf: WasmPtr<u8>,
 ) -> __wasi_errno_t {
     debug!(
         "wasi::environ_get. Environ: {:?}, environ_buf: {:?}",
@@ -324,13 +303,13 @@ pub fn environ_sizes_get(
     trace!("wasi::environ_sizes_get");
     let (memory, state) = thread.get_memory_and_wasi_state(0);
 
-    let environ_count = wasi_try!(environ_count.deref(memory));
-    let environ_buf_size = wasi_try!(environ_buf_size.deref(memory));
+    let environ_count = environ_count.deref(memory);
+    let environ_buf_size = environ_buf_size.deref(memory);
 
     let env_var_count = state.envs.len() as u32;
     let env_buf_size = state.envs.iter().map(|v| v.len() as u32 + 1).sum();
-    environ_count.set(env_var_count);
-    environ_buf_size.set(env_buf_size);
+    wasi_try_mem!(environ_count.write(env_var_count));
+    wasi_try_mem!(environ_buf_size.write(env_buf_size));
 
     trace!(
         "env_var_count: {}, env_buf_size: {}",
@@ -473,9 +452,9 @@ pub fn fd_fdstat_get(
     );
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
     let stat = wasi_try!(state.fs.fdstat(inodes.deref(), fd));
-    let buf = wasi_try!(buf_ptr.deref(memory));
+    let buf = buf_ptr.deref(memory);
 
-    buf.set(stat);
+    wasi_try_mem!(buf.write(stat));
 
     __WASI_ESUCCESS
 }
@@ -560,8 +539,8 @@ pub fn fd_filestat_get(
 
     let stat = wasi_try!(state.fs.filestat_fd(inodes.deref(), fd));
 
-    let buf = wasi_try!(buf.deref(memory));
-    buf.set(stat);
+    let buf = buf.deref(memory);
+    wasi_try_mem!(buf.write(stat));
 
     __WASI_ESUCCESS
 }
@@ -682,7 +661,7 @@ pub fn fd_filestat_set_times(
 pub fn fd_pread(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    iovs: WasmPtr<__wasi_iovec_t, Array>,
+    iovs: WasmPtr<__wasi_iovec_t>,
     iovs_len: u32,
     offset: __wasi_filesize_t,
     nread: WasmPtr<u32>,
@@ -690,8 +669,8 @@ pub fn fd_pread(
     debug!("wasi::fd_pread: fd={}, offset={}", fd, offset);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
-    let iov_cells = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
-    let nread_cell = wasi_try_ok!(nread.deref(memory));
+    let iovs = wasi_try_mem_ok!(iovs.slice(memory, iovs_len));
+    let nread_ref = nread.deref(memory);
 
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = match fd {
@@ -703,7 +682,7 @@ pub fn fd_pread(
                 thread
             );
             if let Some(ref mut stdin) = guard.deref_mut() {
-                wasi_try_ok!(read_bytes(stdin, memory, &iov_cells), thread)
+                wasi_try_ok!(read_bytes(stdin, memory, iovs), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
@@ -731,7 +710,7 @@ pub fn fd_pread(
                                 .map_err(map_io_err),
                             thread
                         );
-                        wasi_try_ok!(read_bytes(h, memory, &iov_cells), thread)
+                        wasi_try_ok!(read_bytes(h, memory, iovs), thread)
                     } else {
                         return Ok(__WASI_EINVAL);
                     }
@@ -740,7 +719,7 @@ pub fn fd_pread(
                 Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_pread"),
                 Kind::Buffer { buffer } => {
                     wasi_try_ok!(
-                        read_bytes(&buffer[(offset as usize)..], memory, &iov_cells),
+                        read_bytes(&buffer[(offset as usize)..], memory, iovs),
                         thread
                     )
                 }
@@ -748,7 +727,7 @@ pub fn fd_pread(
         }
     };
 
-    nread_cell.set(bytes_read);
+    wasi_try_mem_ok!(nread_ref.write(bytes_read));
     debug!("Success: {} bytes read", bytes_read);
     Ok(__WASI_ESUCCESS)
 }
@@ -769,9 +748,9 @@ pub fn fd_prestat_get(
     trace!("wasi::fd_prestat_get: fd={}", fd);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
-    let prestat_ptr = wasi_try!(buf.deref(memory));
+    let prestat_ptr = buf.deref(memory);
 
-    prestat_ptr.set(wasi_try!(state.fs.prestat_fd(inodes.deref(), fd)));
+    wasi_try_mem!(prestat_ptr.write(wasi_try!(state.fs.prestat_fd(inodes.deref(), fd))));
 
     __WASI_ESUCCESS
 }
@@ -779,7 +758,7 @@ pub fn fd_prestat_get(
 pub fn fd_prestat_dir_name(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
 ) -> __wasi_errno_t {
     trace!(
@@ -787,7 +766,7 @@ pub fn fd_prestat_dir_name(
         fd, path_len
     );
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
-    let path_chars = wasi_try!(path.deref(memory, 0, path_len));
+    let path_chars = wasi_try_mem!(path.slice(memory, path_len));
 
     let real_inode = wasi_try!(state.fs.get_fd_inode(fd));
     let inode_val = &inodes.arena[real_inode];
@@ -799,20 +778,13 @@ pub fn fd_prestat_dir_name(
     match guard.deref() {
         Kind::Dir { .. } | Kind::Root { .. } => {
             // TODO: verify this: null termination, etc
-            if inode_val.name.len() <= path_len as usize {
-                let mut i = 0;
-                for c in inode_val.name.bytes() {
-                    path_chars[i].set(c);
-                    i += 1
-                }
-                path_chars[i].set(0);
+            if inode_val.name.len() < path_len as usize {
+                wasi_try_mem!(path_chars
+                    .subslice(0..inode_val.name.len() as u64)
+                    .write_slice(inode_val.name.as_bytes()));
+                wasi_try_mem!(path_chars.index(inode_val.name.len() as u64).write(0));
 
-                trace!(
-                    "=> result: \"{}\" (written: {}, {})",
-                    unsafe { path.get_utf8_str(memory, path_len).unwrap() },
-                    i,
-                    path_chars[0].get(),
-                );
+                trace!("=> result: \"{}\"", inode_val.name);
 
                 __WASI_ESUCCESS
             } else {
@@ -840,7 +812,7 @@ pub fn fd_prestat_dir_name(
 pub fn fd_pwrite(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    iovs: WasmPtr<__wasi_ciovec_t, Array>,
+    iovs: WasmPtr<__wasi_ciovec_t>,
     iovs_len: u32,
     offset: __wasi_filesize_t,
     nwritten: WasmPtr<u32>,
@@ -848,8 +820,8 @@ pub fn fd_pwrite(
     trace!("wasi::fd_pwrite");
     // TODO: refactor, this is just copied from `fd_write`...
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
-    let iovs_arr_cell = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
-    let nwritten_cell = wasi_try_ok!(nwritten.deref(memory));
+    let iovs_arr = wasi_try_mem_ok!(iovs.slice(memory, iovs_len));
+    let nwritten_ref = nwritten.deref(memory);
 
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_written = match fd {
@@ -862,7 +834,7 @@ pub fn fd_pwrite(
                 thread
             );
             if let Some(ref mut stdout) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stdout, memory, &iovs_arr_cell), thread)
+                wasi_try_ok!(write_bytes(stdout, memory, iovs_arr), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
@@ -875,7 +847,7 @@ pub fn fd_pwrite(
                 thread
             );
             if let Some(ref mut stderr) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stderr, memory, &iovs_arr_cell), thread)
+                wasi_try_ok!(write_bytes(stderr, memory, iovs_arr), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
@@ -900,7 +872,7 @@ pub fn fd_pwrite(
                                 .map_err(map_io_err),
                             thread
                         );
-                        wasi_try_ok!(write_bytes(handle, memory, &iovs_arr_cell), thread)
+                        wasi_try_ok!(write_bytes(handle, memory, iovs_arr), thread)
                     } else {
                         return Ok(__WASI_EINVAL);
                     }
@@ -911,8 +883,9 @@ pub fn fd_pwrite(
                 }
                 Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_pwrite"),
                 Kind::Buffer { buffer } => {
-                    wasi_try_ok!(
-                        write_bytes(&mut buffer[(offset as usize)..], memory, &iovs_arr_cell),
+                    wasi_try_ok!(write_bytes(&mut buffer[(offset as usize)..],
+                        memory,
+                        iovs_arr),
                         thread
                     )
                 }
@@ -920,7 +893,7 @@ pub fn fd_pwrite(
         }
     };
 
-    nwritten_cell.set(bytes_written);
+    wasi_try_mem_ok!(nwritten_ref.write(bytes_written));
 
     Ok(__WASI_ESUCCESS)
 }
@@ -940,15 +913,15 @@ pub fn fd_pwrite(
 pub fn fd_read(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    iovs: WasmPtr<__wasi_iovec_t, Array>,
+    iovs: WasmPtr<__wasi_iovec_t>,
     iovs_len: u32,
     nread: WasmPtr<u32>,
 ) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::fd_read: fd={}", fd);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
-    let iovs_arr_cell = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
-    let nread_cell = wasi_try_ok!(nread.deref(memory));
+    let iovs_arr = wasi_try_mem_ok!(iovs.slice(memory, iovs_len));
+    let nread_ref = nread.deref(memory);
 
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = match fd {
@@ -960,7 +933,7 @@ pub fn fd_read(
                 thread
             );
             if let Some(ref mut stdin) = guard.deref_mut() {
-                wasi_try_ok!(read_bytes(stdin, memory, &iovs_arr_cell), thread)
+                wasi_try_ok!(read_bytes(stdin, memory, iovs_arr), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
@@ -987,7 +960,7 @@ pub fn fd_read(
                                     .map_err(map_io_err),
                                 thread
                             );
-                            wasi_try_ok!(read_bytes(handle, memory, &iovs_arr_cell), thread)
+                            wasi_try_ok!(read_bytes(handle, memory, iovs_arr), thread)
                         } else {
                             return Ok(__WASI_EINVAL);
                         }
@@ -999,7 +972,7 @@ pub fn fd_read(
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
                     Kind::Buffer { buffer } => {
                         wasi_try_ok!(
-                            read_bytes(&buffer[offset..], memory, &iovs_arr_cell),
+                            read_bytes(&buffer[offset..], memory, iovs_arr),
                             thread
                         )
                     }
@@ -1015,7 +988,7 @@ pub fn fd_read(
         }
     };
 
-    nread_cell.set(bytes_read);
+    wasi_try_mem_ok!(nread_ref.write(bytes_read));
 
     Ok(__WASI_ESUCCESS)
 }
@@ -1038,7 +1011,7 @@ pub fn fd_read(
 pub fn fd_readdir(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    buf: WasmPtr<u8, Array>,
+    buf: WasmPtr<u8>,
     buf_len: u32,
     cookie: __wasi_dircookie_t,
     bufused: WasmPtr<u32>,
@@ -1048,8 +1021,8 @@ pub fn fd_readdir(
     // TODO: figure out how this is supposed to work;
     // is it supposed to pack the buffer full every time until it can't? or do one at a time?
 
-    let buf_arr_cell = wasi_try!(buf.deref(memory, 0, buf_len));
-    let bufused_cell = wasi_try!(bufused.deref(memory));
+    let buf_arr = wasi_try_mem!(buf.slice(memory, buf_len));
+    let bufused_ref = bufused.deref(memory);
     let working_dir = wasi_try!(state.fs.get_fd(fd));
     let mut cur_cookie = cookie;
     let mut buf_idx = 0;
@@ -1131,7 +1104,7 @@ pub fn fd_readdir(
             std::mem::size_of::<__wasi_dirent_t>(),
         );
         for i in 0..upper_limit {
-            buf_arr_cell[i + buf_idx].set(dirent_bytes[i]);
+            wasi_try_mem!(buf_arr.index((i + buf_idx) as u64).write(dirent_bytes[i]));
         }
         buf_idx += upper_limit;
         if upper_limit != std::mem::size_of::<__wasi_dirent_t>() {
@@ -1139,7 +1112,7 @@ pub fn fd_readdir(
         }
         let upper_limit = std::cmp::min(buf_len as usize - buf_idx, namlen);
         for (i, b) in entry_path_str.bytes().take(upper_limit).enumerate() {
-            buf_arr_cell[i + buf_idx].set(b);
+            wasi_try_mem!(buf_arr.index((i + buf_idx) as u64).write(b));
         }
         buf_idx += upper_limit;
         if upper_limit != namlen {
@@ -1147,7 +1120,7 @@ pub fn fd_readdir(
         }
     }
 
-    bufused_cell.set(buf_idx as u32);
+    wasi_try_mem!(bufused_ref.write(buf_idx as u32));
     __WASI_ESUCCESS
 }
 
@@ -1197,7 +1170,7 @@ pub fn fd_seek(
 ) -> Result<__wasi_errno_t, WasiError> {
     debug!("wasi::fd_seek: fd={}, offset={}", fd, offset);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
-    let new_offset_cell = wasi_try_ok!(newoffset.deref(memory));
+    let new_offset_ref = newoffset.deref(memory);
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
 
     if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_SEEK) {
@@ -1253,7 +1226,7 @@ pub fn fd_seek(
     }
     // reborrow
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
-    new_offset_cell.set(fd_entry.offset);
+    wasi_try_mem_ok!(new_offset_ref.write(fd_entry.offset));
 
     Ok(__WASI_ESUCCESS)
 }
@@ -1311,7 +1284,7 @@ pub fn fd_tell(
 ) -> __wasi_errno_t {
     debug!("wasi::fd_tell");
     let (memory, state) = thread.get_memory_and_wasi_state(0);
-    let offset_cell = wasi_try!(offset.deref(memory));
+    let offset_ref = offset.deref(memory);
 
     let fd_entry = wasi_try!(state.fs.get_fd(fd));
 
@@ -1319,7 +1292,7 @@ pub fn fd_tell(
         return __WASI_EACCES;
     }
 
-    offset_cell.set(fd_entry.offset);
+    wasi_try_mem!(offset_ref.write(fd_entry.offset));
 
     __WASI_ESUCCESS
 }
@@ -1341,14 +1314,14 @@ pub fn fd_tell(
 pub fn fd_write(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    iovs: WasmPtr<__wasi_ciovec_t, Array>,
+    iovs: WasmPtr<__wasi_ciovec_t>,
     iovs_len: u32,
     nwritten: WasmPtr<u32>,
 ) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::fd_write: fd={}", fd);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
-    let iovs_arr_cell = wasi_try_ok!(iovs.deref(memory, 0, iovs_len));
-    let nwritten_cell = wasi_try_ok!(nwritten.deref(memory));
+    let iovs_arr = wasi_try_mem_ok!(iovs.slice(memory, iovs_len));
+    let nwritten_ref = nwritten.deref(memory);
 
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_written = match fd {
@@ -1361,7 +1334,7 @@ pub fn fd_write(
                 thread
             );
             if let Some(ref mut stdout) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stdout, memory, &iovs_arr_cell), thread)
+                wasi_try_ok!(write_bytes(stdout, memory, iovs_arr), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
@@ -1374,7 +1347,7 @@ pub fn fd_write(
                 thread
             );
             if let Some(ref mut stderr) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stderr, memory, &iovs_arr_cell), thread)
+                wasi_try_ok!(write_bytes(stderr, memory, iovs_arr), thread)
             } else {
                 return Ok(__WASI_EBADF);
             }
@@ -1399,7 +1372,7 @@ pub fn fd_write(
                                     .map_err(map_io_err),
                                 thread
                             );
-                            wasi_try_ok!(write_bytes(handle, memory, &iovs_arr_cell), thread)
+                            wasi_try_ok!(write_bytes(handle, memory, iovs_arr), thread)
                         } else {
                             return Ok(__WASI_EINVAL);
                         }
@@ -1411,7 +1384,7 @@ pub fn fd_write(
                     Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_write"),
                     Kind::Buffer { buffer } => {
                         wasi_try_ok!(
-                            write_bytes(&mut buffer[offset..], memory, &iovs_arr_cell),
+                            write_bytes(&mut buffer[offset..], memory, iovs_arr),
                             thread
                         )
                     }
@@ -1430,7 +1403,7 @@ pub fn fd_write(
         }
     };
 
-    nwritten_cell.set(bytes_written);
+    wasi_try_mem_ok!(nwritten_ref.write(bytes_written));
 
     Ok(__WASI_ESUCCESS)
 }
@@ -1451,7 +1424,7 @@ pub fn fd_write(
 pub fn path_create_directory(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
 ) -> __wasi_errno_t {
     debug!("wasi::path_create_directory");
@@ -1572,7 +1545,7 @@ pub fn path_filestat_get(
     thread: &WasiThread,
     fd: __wasi_fd_t,
     flags: __wasi_lookupflags_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
     buf: WasmPtr<__wasi_filestat_t>,
 ) -> __wasi_errno_t {
@@ -1583,8 +1556,8 @@ pub fn path_filestat_get(
 
     let stat = wasi_try!(path_filestat_get_internal(memory, state, inodes.deref_mut(), fd, flags, &path_string));
 
-    let buf_cell = wasi_try!(buf.deref(memory));
-    buf_cell.set(stat);
+    wasi_try_mem!(buf.deref(memory).write(stat));
+
     __WASI_ESUCCESS
 
 }
@@ -1658,7 +1631,7 @@ pub fn path_filestat_set_times(
     thread: &WasiThread,
     fd: __wasi_fd_t,
     flags: __wasi_lookupflags_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
     st_atim: __wasi_timestamp_t,
     st_mtim: __wasi_timestamp_t,
@@ -1735,10 +1708,10 @@ pub fn path_link(
     thread: &WasiThread,
     old_fd: __wasi_fd_t,
     old_flags: __wasi_lookupflags_t,
-    old_path: WasmPtr<u8, Array>,
+    old_path: WasmPtr<u8>,
     old_path_len: u32,
     new_fd: __wasi_fd_t,
-    new_path: WasmPtr<u8, Array>,
+    new_path: WasmPtr<u8>,
     new_path_len: u32,
 ) -> __wasi_errno_t {
     debug!("wasi::path_link");
@@ -1827,7 +1800,7 @@ pub fn path_open(
     thread: &WasiThread,
     dirfd: __wasi_fd_t,
     dirflags: __wasi_lookupflags_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
     o_flags: __wasi_oflags_t,
     fs_rights_base: __wasi_rights_t,
@@ -1845,7 +1818,7 @@ pub fn path_open(
         return __WASI_ENAMETOOLONG;
     }
 
-    let fd_cell = wasi_try!(fd.deref(memory));
+    let fd_ref = fd.deref(memory);
 
     // o_flags:
     // - __WASI_O_CREAT (create if it does not exist)
@@ -1890,7 +1863,7 @@ pub fn path_open(
                 if let Some(special_fd) = fd {
                     // short circuit if we're dealing with a special file
                     assert!(handle.is_some());
-                    fd_cell.set(*special_fd);
+                    wasi_try_mem!(fd_ref.write(*special_fd));
                     return __WASI_ESUCCESS;
                 }
                 if o_flags & __WASI_O_DIRECTORY != 0 {
@@ -2039,7 +2012,7 @@ pub fn path_open(
         inode
     ));
 
-    fd_cell.set(out_fd);
+    wasi_try_mem!(fd_ref.write(out_fd));
     debug!("wasi::path_open returning fd {}", out_fd);
 
     __WASI_ESUCCESS
@@ -2064,9 +2037,9 @@ pub fn path_open(
 pub fn path_readlink(
     thread: &WasiThread,
     dir_fd: __wasi_fd_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
-    buf: WasmPtr<u8, Array>,
+    buf: WasmPtr<u8>,
     buf_len: u32,
     buf_used: WasmPtr<u32>,
 ) -> __wasi_errno_t {
@@ -2091,17 +2064,13 @@ pub fn path_readlink(
             if bytes.len() >= buf_len as usize {
                 return __WASI_EOVERFLOW;
             }
+            let bytes: Vec<_> = bytes.collect();
 
-            let out = wasi_try!(buf.deref(memory, 0, buf_len));
-            let mut bytes_written = 0;
-            for b in bytes {
-                out[bytes_written].set(b);
-                bytes_written += 1;
-            }
+            let out = wasi_try_mem!(buf.slice(memory, bytes.len() as u32));
+            wasi_try_mem!(out.write_slice(&bytes[..]));
             // should we null terminate this?
 
-            let bytes_out = wasi_try!(buf_used.deref(memory));
-            bytes_out.set(bytes_written as u32);
+            wasi_try_mem!(buf_used.deref(memory).write(bytes.len() as u32));
         } else {
             return __WASI_EINVAL;
         }
@@ -2114,7 +2083,7 @@ pub fn path_readlink(
 pub fn path_remove_directory(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
 ) -> __wasi_errno_t {
     // TODO check if fd is a dir, ensure it's within sandbox, etc.
@@ -2198,10 +2167,10 @@ pub fn path_remove_directory(
 pub fn path_rename(
     thread: &WasiThread,
     old_fd: __wasi_fd_t,
-    old_path: WasmPtr<u8, Array>,
+    old_path: WasmPtr<u8>,
     old_path_len: u32,
     new_fd: __wasi_fd_t,
-    new_path: WasmPtr<u8, Array>,
+    new_path: WasmPtr<u8>,
     new_path_len: u32,
 ) -> __wasi_errno_t {
     debug!(
@@ -2351,10 +2320,10 @@ pub fn path_rename(
 ///     The number of bytes to read from `new_path`
 pub fn path_symlink(
     thread: &WasiThread,
-    old_path: WasmPtr<u8, Array>,
+    old_path: WasmPtr<u8>,
     old_path_len: u32,
     fd: __wasi_fd_t,
-    new_path: WasmPtr<u8, Array>,
+    new_path: WasmPtr<u8>,
     new_path_len: u32,
 ) -> __wasi_errno_t {
     debug!("wasi::path_symlink");
@@ -2448,7 +2417,7 @@ pub fn path_symlink(
 pub fn path_unlink_file(
     thread: &WasiThread,
     fd: __wasi_fd_t,
-    path: WasmPtr<u8, Array>,
+    path: WasmPtr<u8>,
     path_len: u32,
 ) -> __wasi_errno_t {
     debug!("wasi::path_unlink_file");
@@ -2557,8 +2526,8 @@ pub fn path_unlink_file(
 ///     The number of events seen
 pub fn poll_oneoff(
     thread: &WasiThread,
-    in_: WasmPtr<__wasi_subscription_t, Array>,
-    out_: WasmPtr<__wasi_event_t, Array>,
+    in_: WasmPtr<__wasi_subscription_t>,
+    out_: WasmPtr<__wasi_event_t>,
     nsubscriptions: u32,
     nevents: WasmPtr<u32>,
 ) -> Result<__wasi_errno_t, WasiError> {
@@ -2566,10 +2535,10 @@ pub fn poll_oneoff(
     trace!("  => nsubscriptions = {}", nsubscriptions);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
-    let subscription_array = wasi_try_ok!(in_.deref(memory, 0, nsubscriptions));
-    let event_array = wasi_try_ok!(out_.deref(memory, 0, nsubscriptions));
+    let subscription_array = wasi_try_mem_ok!(in_.slice(memory, nsubscriptions));
+    let event_array = wasi_try_mem_ok!(out_.slice(memory, nsubscriptions));
     let mut events_seen = 0;
-    let out_ptr = wasi_try_ok!(nevents.deref(memory));
+    let out_ptr = nevents.deref(memory);
 
     let mut fd_guards = vec![];
     let mut clock_subs = vec![];
@@ -2577,7 +2546,7 @@ pub fn poll_oneoff(
     let mut total_ns_slept = 0;
 
     for sub in subscription_array.iter() {
-        let s: WasiSubscription = wasi_try_ok!(sub.get().try_into());
+        let s: WasiSubscription = wasi_try_ok!(wasi_try_mem_ok!(sub.read()).try_into());
         let mut peb = PollEventBuilder::new();
         let mut ns_to_sleep = 0;
         
@@ -2739,9 +2708,9 @@ pub fn poll_oneoff(
             }
         }
         let event = __wasi_event_t {
-            userdata: subscription_array[i].get().userdata,
+            userdata: wasi_try_mem_ok!(subscription_array.index(i as u64).read()).userdata,
             error,
-            type_: subscription_array[i].get().type_,
+            type_: wasi_try_mem_ok!(subscription_array.index(i as u64).read()).type_,
             u: unsafe {
                 __wasi_event_u {
                     fd_readwrite: __wasi_event_fd_readwrite_t {
@@ -2751,7 +2720,7 @@ pub fn poll_oneoff(
                 }
             },
         };
-        event_array[events_seen].set(event);
+        wasi_try_mem_ok!(event_array.index(events_seen as u64).write(event));
         events_seen += 1;
     }
     for (clock_info, userdata) in clock_subs {
@@ -2768,10 +2737,10 @@ pub fn poll_oneoff(
                 }
             },
         };
-        event_array[events_seen].set(event);
+        wasi_try_mem_ok!(event_array.index(events_seen as u64).write(event));
         events_seen += 1;
     }
-    out_ptr.set(events_seen as u32);
+    wasi_try_mem_ok!(out_ptr.write(events_seen as u32));
     Ok(__WASI_ESUCCESS)
 }
 
@@ -2799,12 +2768,8 @@ pub fn random_get(thread: &WasiThread, buf: u32, buf_len: u32) -> __wasi_errno_t
     let res = getrandom::getrandom(&mut u8_buffer);
     match res {
         Ok(()) => {
-            unsafe {
-                memory
-                    .uint8view()
-                    .subarray(buf as u32, (buf as u32 + buf_len as u32))
-                    .copy_from(&u8_buffer);
-            }
+            let buf = wasi_try_mem!(WasmPtr::<u8>::new(buf).slice(memory, buf_len));
+            wasi_try_mem!(buf.write_slice(&u8_buffer));
             __WASI_ESUCCESS
         }
         Err(_) => __WASI_EIO,
@@ -2822,7 +2787,7 @@ pub fn sched_yield(thread: &WasiThread) -> Result<__wasi_errno_t, WasiError> {
 pub fn sock_recv(
     thread: &WasiThread,
     sock: __wasi_fd_t,
-    ri_data: WasmPtr<__wasi_iovec_t, Array>,
+    ri_data: WasmPtr<__wasi_iovec_t>,
     ri_data_len: u32,
     ri_flags: __wasi_riflags_t,
     ro_datalen: WasmPtr<u32>,
@@ -2834,7 +2799,7 @@ pub fn sock_recv(
 pub fn sock_send(
     thread: &WasiThread,
     sock: __wasi_fd_t,
-    si_data: WasmPtr<__wasi_ciovec_t, Array>,
+    si_data: WasmPtr<__wasi_ciovec_t>,
     si_data_len: u32,
     si_flags: __wasi_siflags_t,
     so_datalen: WasmPtr<u32>,
