@@ -486,7 +486,7 @@
         <span class="ident">std::thread::yield_now</span>();
     }
 
-    <span class="comment">// Sleeps for a period of time</span>
+    <span class="doccomment">/// Sleeps for a period of time</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">sleep</span>(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="ident">duration</span>: <span class="ident">std::time::Duration</span>) {
         <span class="kw">let</span> <span class="ident">start</span> <span class="op">=</span> <span class="ident">std::time::Instant::now</span>();
         <span class="kw">loop</span> {
