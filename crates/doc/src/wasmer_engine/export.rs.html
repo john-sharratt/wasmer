@@ -175,7 +175,7 @@
 <span class="kw">use</span> <span class="ident">wasmer_vm</span>::{<span class="ident">ImportInitializerFuncPtr</span>, <span class="ident">VMExtern</span>, <span class="ident">VMFunction</span>, <span class="ident">VMGlobal</span>, <span class="ident">VMMemory</span>, <span class="ident">VMTable</span>};
 
 <span class="doccomment">/// The value of an export passed from one instance to another.</span>
-<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Debug</span>, <span class="ident">Clone</span>)]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Debug</span>, <span class="ident">MemoryUsage</span>, <span class="ident">Clone</span>)]</span>
 <span class="kw">pub</span> <span class="kw">enum</span> <span class="ident">Export</span> {
     <span class="doccomment">/// A function export value.</span>
     <span class="ident">Function</span>(<span class="ident">ExportFunction</span>),
