@@ -2,7 +2,7 @@
 
 use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
-use crate::WasiEnv;
+use crate::{WasiEnv, WasiInodes};
 use crate::WasiError;
 use crate::WasiThread;
 use generational_arena::Arena;
@@ -47,7 +47,7 @@ pub struct WasiStateBuilder {
     preopens: Vec<PreopenedDir>,
     vfs_preopens: Vec<String>,
     #[allow(clippy::type_complexity)]
-    setup_fs_fn: Option<Box<dyn Fn(&mut WasiFs) -> Result<(), String> + Send>>,
+    setup_fs_fn: Option<Box<dyn Fn(&mut WasiInodes, &mut WasiFs) -> Result<(), String> + Send>>,
     stdout_override: Option<Box<dyn VirtualFile + Sync>>,
     stderr_override: Option<Box<dyn VirtualFile + Sync>>,
     stdin_override: Option<Box<dyn VirtualFile + Sync>>,
@@ -335,7 +335,7 @@ impl WasiStateBuilder {
     // TODO: improve ergonomics on this function
     pub fn setup_fs(
         &mut self,
-        setup_fs_fn: Box<dyn Fn(&mut WasiFs) -> Result<(), String> + Send>,
+        setup_fs_fn: Box<dyn Fn(&mut WasiInodes, &mut WasiFs) -> Result<(), String> + Send>,
     ) -> &mut Self {
         self.setup_fs_fn = Some(setup_fs_fn);
 
@@ -465,7 +465,8 @@ impl WasiStateBuilder {
             }
 
             if let Some(f) = &self.setup_fs_fn {
-                f(&mut wasi_fs).map_err(WasiStateCreationError::WasiFsSetupError)?;
+                let inodes = inodes.deref_mut();
+                f(inodes, &mut wasi_fs).map_err(WasiStateCreationError::WasiFsSetupError)?;
             }
             wasi_fs
         };

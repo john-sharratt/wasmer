@@ -32,6 +32,7 @@ use crate::{
 use std::borrow::Borrow;
 use std::convert::{Infallible, TryInto};
 use std::io::{self, Read, Seek, Write};
+use std::time::Duration;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 use tracing::{debug, trace};
@@ -667,7 +668,7 @@ pub fn fd_pread(
     offset: __wasi_filesize_t,
     nread: WasmPtr<u32>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::fd_pread: fd={}, offset={}", fd, offset);
+    trace!("wasi::fd_pread: fd={}, offset={}", fd, offset);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
 
     let iovs = wasi_try_mem_ok!(iovs.slice(memory, iovs_len));
@@ -1014,7 +1015,7 @@ pub fn fd_readdir(
     cookie: __wasi_dircookie_t,
     bufused: WasmPtr<u32>,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_readdir");
+    trace!("wasi::fd_readdir");
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
     // TODO: figure out how this is supposed to work;
     // is it supposed to pack the buffer full every time until it can't? or do one at a time?
@@ -1166,7 +1167,7 @@ pub fn fd_seek(
     whence: __wasi_whence_t,
     newoffset: WasmPtr<__wasi_filesize_t>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::fd_seek: fd={}, offset={}", fd, offset);
+    trace!("wasi::fd_seek: fd={}, offset={}", fd, offset);
     let (memory, state, inodes) = thread.get_memory_and_wasi_state_and_inodes(0);
     let new_offset_ref = newoffset.deref(memory);
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
@@ -2550,19 +2551,18 @@ pub fn poll_oneoff(
     let mut fd_guards = vec![];
     let mut clock_subs = vec![];
     let mut in_events = vec![];
-    let mut total_ns_slept = 0;
+    let mut time_to_sleep = Duration::from_millis(5);
 
     for sub in subscription_array.iter() {
         let s: WasiSubscription = wasi_try_ok!(wasi_try_mem_ok!(sub.read()).try_into());
         let mut peb = PollEventBuilder::new();
-        let mut ns_to_sleep = 0;
-
+        
         let fd = match s.event_type {
             EventType::Read(__wasi_subscription_fs_readwrite_t { fd }) => {
                 match fd {
                     __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
                     _ => {
-                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
+                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), thread);
                         if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
                             return Ok(__WASI_EACCES);
                         }
@@ -2575,7 +2575,7 @@ pub fn poll_oneoff(
                 match fd {
                     __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
                     _ => {
-                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
+                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), thread);
                         if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE) {
                             return Ok(__WASI_EACCES);
                         }
@@ -2590,7 +2590,7 @@ pub fn poll_oneoff(
                 {
                     // this is a hack
                     // TODO: do this properly
-                    ns_to_sleep = clock_info.timeout;
+                    time_to_sleep = Duration::from_nanos(clock_info.timeout);
                     clock_subs.push((clock_info, s.user_data));
                     None
                 } else {
@@ -2626,7 +2626,7 @@ pub fn poll_oneoff(
                     )
                 }
                 _ => {
-                    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
+                    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), thread);
                     let inode = fd_entry.inode;
                     if !has_rights(fd_entry.rights, __WASI_RIGHT_POLL_FD_READWRITE) {
                         return Ok(__WASI_EACCES);
@@ -2653,14 +2653,6 @@ pub fn poll_oneoff(
                 }
             };
             fd_guards.push(wasi_file_ref);
-        } else {
-            let remaining_ns = ns_to_sleep as i64 - total_ns_slept as i64;
-            if remaining_ns > 0 {
-                trace!("Sleeping for {} nanoseconds", remaining_ns);
-                let duration = std::time::Duration::from_nanos(remaining_ns as u64);
-                thread.sleep(duration)?;
-                total_ns_slept += remaining_ns;
-            }
         }
     }
 
@@ -2673,15 +2665,39 @@ pub fn poll_oneoff(
     };
 
     let mut seen_events = vec![Default::default(); in_events.len()];
-    wasi_try_ok!(
-        poll(
+
+    let start = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
+    let mut triggered = 0;
+    while triggered == 0 {
+        let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
+        let delta = match now.checked_sub(start) {
+            Some(a) => Duration::from_nanos(a as u64),
+            None => Duration::ZERO
+        };
+        match poll(
             fds.as_slice(),
             in_events.as_slice(),
-            seen_events.as_mut_slice()
+            seen_events.as_mut_slice(),
+            Duration::from_millis(1),
         )
-        .map_err(fs_error_into_wasi_err),
-        thread
-    );
+        {
+            Ok(0) => {
+                thread.yield_now()?;
+            },
+            Ok(a) => {
+                triggered = a;
+            },
+            Err(FsError::WouldBlock) => {
+                thread.sleep(Duration::from_millis(1))?;
+            },
+            Err(err) => {
+                return Ok(fs_error_into_wasi_err(err));
+            }
+        };
+        if delta > time_to_sleep {
+            break;
+        }
+    }
 
     for (i, seen_event) in seen_events.into_iter().enumerate() {
         let mut flags = 0;
@@ -2731,22 +2747,24 @@ pub fn poll_oneoff(
         wasi_try_mem_ok!(event_array.index(events_seen as u64).write(event));
         events_seen += 1;
     }
-    for (clock_info, userdata) in clock_subs {
-        let event = __wasi_event_t {
-            userdata,
-            error: __WASI_ESUCCESS,
-            type_: __WASI_EVENTTYPE_CLOCK,
-            u: unsafe {
-                __wasi_event_u {
-                    fd_readwrite: __wasi_event_fd_readwrite_t {
-                        nbytes: 0,
-                        flags: 0,
-                    },
-                }
-            },
-        };
-        wasi_try_mem_ok!(event_array.index(events_seen as u64).write(event));
-        events_seen += 1;
+    if triggered <= 0 {
+        for (clock_info, userdata) in clock_subs {
+            let event = __wasi_event_t {
+                userdata,
+                error: __WASI_ESUCCESS,
+                type_: __WASI_EVENTTYPE_CLOCK,
+                u: unsafe {
+                    __wasi_event_u {
+                        fd_readwrite: __wasi_event_fd_readwrite_t {
+                            nbytes: 0,
+                            flags: 0,
+                        },
+                    }
+                },
+            };
+            wasi_try_mem_ok!(event_array.index(events_seen as u64).write(event));
+            events_seen += 1;
+        }
     }
     wasi_try_mem_ok!(out_ptr.write(events_seen as u32));
     Ok(__WASI_ESUCCESS)
@@ -2770,7 +2788,7 @@ pub fn proc_raise(thread: &WasiThread, sig: __wasi_signal_t) -> __wasi_errno_t {
 /// - `size_t buf_len`
 ///     The number of bytes that will be written
 pub fn random_get(thread: &WasiThread, buf: u32, buf_len: u32) -> __wasi_errno_t {
-    debug!("wasi::random_get buf_len: {}", buf_len);
+    trace!("wasi::random_get buf_len: {}", buf_len);
     let memory = thread.memory();
     let mut u8_buffer = vec![0; buf_len as usize];
     let res = getrandom::getrandom(&mut u8_buffer);
@@ -2801,7 +2819,7 @@ pub fn sock_recv(
     ro_datalen: WasmPtr<u32>,
     ro_flags: WasmPtr<__wasi_roflags_t>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_recv");
+    trace!("wasi::sock_recv");
     unimplemented!("wasi::sock_recv")
 }
 pub fn sock_send(
@@ -2812,7 +2830,7 @@ pub fn sock_send(
     si_flags: __wasi_siflags_t,
     so_datalen: WasmPtr<u32>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_send");
+    trace!("wasi::sock_send");
     unimplemented!("wasi::sock_send")
 }
 pub fn sock_shutdown(
@@ -2820,6 +2838,6 @@ pub fn sock_shutdown(
     sock: __wasi_fd_t,
     how: __wasi_sdflags_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_shutdown");
+    trace!("wasi::sock_shutdown");
     unimplemented!("wasi::sock_shutdown")
 }

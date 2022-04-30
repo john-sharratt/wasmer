@@ -89,7 +89,7 @@ pub struct InodeValFileReadGuard<'a> {
 }
 
 impl<'a> Deref for InodeValFileReadGuard<'a> {
-    type Target = Option<Box<dyn VirtualFile + Sync>>;
+    type Target = Option<Box<dyn VirtualFile + Sync + 'static>>;
     fn deref(&self) -> &Self::Target {
         if let Kind::File { handle, .. } = self.guard.deref() {
             return handle;
@@ -104,7 +104,7 @@ pub struct InodeValFileWriteGuard<'a> {
 }
 
 impl<'a> Deref for InodeValFileWriteGuard<'a> {
-    type Target = Option<Box<dyn VirtualFile + Sync>>;
+    type Target = Option<Box<dyn VirtualFile + Sync + 'static>>;
     fn deref(&self) -> &Self::Target {
         if let Kind::File { handle, .. } = self.guard.deref() {
             return handle;
@@ -129,7 +129,7 @@ impl<'a> DerefMut for InodeValFileWriteGuard<'a> {
 pub enum Kind {
     File {
         /// The open file, if it's open
-        handle: Option<Box<dyn VirtualFile + Sync>>,
+        handle: Option<Box<dyn VirtualFile + Sync + 'static>>,
         /// The path on the host system where the file is located
         /// This is deprecated and will be removed soon
         path: PathBuf,
