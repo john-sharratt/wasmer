@@ -339,12 +339,10 @@
 <span id="337">337</span>
 <span id="338">338</span>
 <span id="339">339</span>
-<span id="340">340</span>
 </pre><pre class="rust"><code><span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::externals</span>::{<span class="ident">Extern</span>, <span class="ident">Function</span>, <span class="ident">Global</span>, <span class="ident">Memory</span>, <span class="ident">Table</span>};
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::native::NativeFunc</span>;
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::WasmTypeList</span>;
 <span class="kw">use</span> <span class="ident">indexmap::IndexMap</span>;
-<span class="kw">use</span> <span class="ident">loupe::MemoryUsage</span>;
 <span class="kw">use</span> <span class="ident">std::fmt</span>;
 <span class="kw">use</span> <span class="ident">std::iter</span>::{<span class="ident">ExactSizeIterator</span>, <span class="ident">FromIterator</span>};
 <span class="kw">use</span> <span class="ident">thiserror::Error</span>;
@@ -402,7 +400,7 @@
 <span class="doccomment">/// the types of instances.</span>
 <span class="doccomment">///</span>
 <span class="doccomment">/// TODO: add examples of using exports</span>
-<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">Default</span>, <span class="ident">MemoryUsage</span>)]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">Default</span>)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">Exports</span> {
     <span class="ident">map</span>: <span class="ident">IndexMap</span><span class="op">&lt;</span><span class="ident">String</span>, <span class="ident">Extern</span><span class="op">&gt;</span>,
 }

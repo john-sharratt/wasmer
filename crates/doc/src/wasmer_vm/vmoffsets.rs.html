@@ -717,7 +717,6 @@
 <span id="715">715</span>
 <span id="716">716</span>
 <span id="717">717</span>
-<span id="718">718</span>
 </pre><pre class="rust"><code><span class="comment">// This file contains code from external sources.</span>
 <span class="comment">// Attributions: https://github.com/wasmerio/wasmer/blob/master/ATTRIBUTIONS.md</span>
 
@@ -727,7 +726,6 @@
 <span class="attribute">#![<span class="ident">deny</span>(<span class="ident">broken_intra_doc_links</span>)]</span>
 
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::VMBuiltinFunctionIndex</span>;
-<span class="kw">use</span> <span class="ident">loupe::MemoryUsage</span>;
 <span class="kw">use</span> <span class="ident">more_asserts::assert_lt</span>;
 <span class="kw">use</span> <span class="ident">std::convert::TryFrom</span>;
 <span class="kw">use</span> <span class="ident">wasmer_types</span>::{
@@ -753,7 +751,7 @@
 <span class="doccomment">/// related structs that JIT code accesses directly.</span>
 <span class="doccomment">///</span>
 <span class="doccomment">/// [`VMContext`]: crate::vmcontext::VMContext</span>
-<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">Debug</span>, <span class="ident">MemoryUsage</span>)]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">Debug</span>)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">VMOffsets</span> {
     <span class="doccomment">/// The size in bytes of a pointer on the target.</span>
     <span class="kw">pub</span> <span class="ident">pointer_size</span>: <span class="ident">u8</span>,

@@ -317,12 +317,9 @@
 <span id="315">315</span>
 <span id="316">316</span>
 <span id="317">317</span>
-<span id="318">318</span>
-<span id="319">319</span>
 </pre><pre class="rust"><code><span class="doccomment">//! Universal compilation.</span>
 
 <span class="kw">use</span> <span class="kw">crate</span>::{<span class="ident">CodeMemory</span>, <span class="ident">UniversalArtifact</span>};
-<span class="kw">use</span> <span class="ident">loupe::MemoryUsage</span>;
 <span class="kw">use</span> <span class="ident">std::sync</span>::{<span class="ident">Arc</span>, <span class="ident">Mutex</span>};
 <span class="attribute">#[<span class="ident">cfg</span>(<span class="ident">feature</span> <span class="op">=</span> <span class="string">&quot;compiler&quot;</span>)]</span>
 <span class="kw">use</span> <span class="ident">wasmer_compiler::Compiler</span>;
@@ -340,7 +337,7 @@
 };
 
 <span class="doccomment">/// A WebAssembly `Universal` Engine.</span>
-<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">MemoryUsage</span>)]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">UniversalEngine</span> {
     <span class="ident">inner</span>: <span class="ident">Arc</span><span class="op">&lt;</span><span class="ident">Mutex</span><span class="op">&lt;</span><span class="ident">UniversalEngineInner</span><span class="op">&gt;</span><span class="op">&gt;</span>,
     <span class="doccomment">/// The target for the compiler</span>
@@ -468,7 +465,6 @@
 }
 
 <span class="doccomment">/// The inner contents of `UniversalEngine`</span>
-<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">MemoryUsage</span>)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">UniversalEngineInner</span> {
     <span class="doccomment">/// The compiler</span>
     <span class="attribute">#[<span class="ident">cfg</span>(<span class="ident">feature</span> <span class="op">=</span> <span class="string">&quot;compiler&quot;</span>)]</span>

@@ -453,12 +453,10 @@
 <span id="451">451</span>
 <span id="452">452</span>
 <span id="453">453</span>
-<span id="454">454</span>
 </pre><pre class="rust"><code><span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::exports::Exportable</span>;
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::store::Store</span>;
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::types</span>::{<span class="ident">ExportType</span>, <span class="ident">ImportType</span>};
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::InstantiationError</span>;
-<span class="kw">use</span> <span class="ident">loupe::MemoryUsage</span>;
 <span class="kw">use</span> <span class="ident">std::fmt</span>;
 <span class="kw">use</span> <span class="ident">std::io</span>;
 <span class="kw">use</span> <span class="ident">std::path::Path</span>;
@@ -489,7 +487,7 @@
 <span class="doccomment">///</span>
 <span class="doccomment">/// Cloning a module is cheap: it does a shallow copy of the compiled</span>
 <span class="doccomment">/// contents rather than a deep copy.</span>
-<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">MemoryUsage</span>)]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">Module</span> {
     <span class="comment">// The field ordering here is actually significant because of the drop</span>
     <span class="comment">// order: we want to drop the artifact before dropping the engine.</span>
