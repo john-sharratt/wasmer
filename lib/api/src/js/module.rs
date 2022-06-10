@@ -19,6 +19,7 @@ use wasmer_types::{
     ExportsIterator, ExternType, FunctionType, GlobalType, ImportsIterator, MemoryType, Mutability,
     Pages, TableType, Type,
 };
+use tracing::{warn};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "std", derive(Error))]
@@ -248,6 +249,8 @@ impl Module {
                     )?;
                 }
                 import_externs.push(import);
+            } else {
+                warn!("import not found {}:{}", import_type.module(), import_type.name());
             }
             // in case the import is not found, the JS Wasm VM will handle
             // the error for us, so we don't need to handle it

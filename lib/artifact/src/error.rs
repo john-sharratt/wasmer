@@ -53,6 +53,10 @@ pub enum ImportError {
     /// This error occurs when an import was expected but not provided.
     #[error("unknown import. Expected {0:?}")]
     UnknownImport(ExternType),
+
+    /// Memory Error
+    #[error("memory error. {0}")]
+    MemoryError(String),
 }
 
 /// An error while preinstantiating a module.

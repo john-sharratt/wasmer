@@ -10,6 +10,9 @@ mod ptr;
 mod store;
 mod tunables;
 mod types;
+mod thread;
+#[path = "../common/reactors.rs"]
+mod reactors;
 
 /// Implement [`WasmerEnv`] for your type with `#[derive(WasmerEnv)]`.
 ///
@@ -36,6 +39,8 @@ pub use crate::sys::instance::{Instance, InstantiationError};
 pub use crate::sys::mem_access::{MemoryAccessError, WasmRef, WasmSlice, WasmSliceIter};
 pub use crate::sys::module::Module;
 pub use crate::sys::native::TypedFunction;
+pub use crate::sys::thread::ThreadControl;
+pub use crate::sys::reactors::Reactors;
 
 pub use crate::sys::ptr::{Memory32, Memory64, MemorySize, WasmPtr, WasmPtr64};
 pub use crate::sys::store::{Store, StoreObject};

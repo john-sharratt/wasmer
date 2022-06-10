@@ -60,6 +60,11 @@ pub trait Engine {
         self.deserialize(&mmap)
     }
 
+    /// Flag that indicates if the engine is multi threaded
+    fn multi_threaded(&self) -> bool {
+        false
+    }
+
     /// A unique identifier for this object.
     ///
     /// This exists to allow us to compare two Engines for equality. Otherwise,

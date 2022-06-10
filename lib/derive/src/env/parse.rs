@@ -15,6 +15,10 @@ pub enum WasmerAttr {
         aliases: Vec<LitStr>,
         span: Span,
     },
+    /// Will load a copy of the instance into the structure
+    Instance,
+    /// Will attach a reactors that are used to wake the reactors from sleeping
+    Reactors,
 }
 
 #[derive(Debug)]
@@ -123,10 +127,16 @@ impl Parse for WasmerAttrInner {
                     aliases,
                     span,
                 }
-            }
+            },
+            "instance" => {
+                WasmerAttr::Instance
+            },
+            "reactors" => {
+                WasmerAttr::Reactors
+            },
             otherwise => abort!(
                 ident,
-                "Unexpected identifier `{}`. Expected `export`.",
+                "Unexpected identifier `{}`. Expected `export`, `instance` or `reactors`.",
                 otherwise
             ),
         };

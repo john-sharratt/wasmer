@@ -126,12 +126,12 @@ fn derive_struct_fields(data: &DataStruct) -> (TokenStream, TokenStream) {
                             identifier.unwrap_or_else(|| LitStr::new(&name_str, name.span()));
                         let mut access_expr = quote_spanned! {
                             f.span() =>
-                                instance.exports.get_with_generics_weak::<#inner_type, _, _>(#item_name)
+                                instance.resolve::<#inner_type, _, _>(#item_name)
                         };
                         for alias in aliases {
                             access_expr = quote_spanned! {
                                 f.span()=>
-                                    #access_expr .or_else(|_| instance.exports.get_with_generics_weak::<#inner_type, _, _>(#alias))
+                                    #access_expr .or_else(|_| instance.resolve::<#inner_type, _, _>(#alias))
                             };
                         }
                         if optional {
@@ -153,12 +153,12 @@ fn derive_struct_fields(data: &DataStruct) -> (TokenStream, TokenStream) {
                         if let Some(identifier) = identifier {
                             let mut access_expr = quote_spanned! {
                                 f.span() =>
-                                    instance.exports.get_with_generics_weak::<#inner_type, _, _>(#identifier)
+                                    instance.resolve::<#inner_type, _, _>(#identifier)
                             };
                             for alias in aliases {
                                 access_expr = quote_spanned! {
                                     f.span()=>
-                                        #access_expr .or_else(|_| instance.exports.get_with_generics_weak::<#inner_type, _, _>(#alias))
+                                        #access_expr .or_else(|_| instance.resolve::<#inner_type, _, _>(#alias))
                                 };
                             }
                             let local_var =
@@ -186,6 +186,36 @@ fn derive_struct_fields(data: &DataStruct) -> (TokenStream, TokenStream) {
                                 "Expected `name` field on export attribute because field does not have a name. For example: `#[wasmer(export(name = \"wasm_ident\"))]`.",
                             );
                         }
+                    };
+
+                    finish.push(finish_tokens);
+                },
+                WasmerAttr::Instance => {
+                    let finish_tokens = if let Some(name) = name {
+                        quote_spanned! {
+                            f.span()=>
+                                self.#name.initialize(instance.clone());
+                        }
+                    } else {
+                        abort!(
+                            name,
+                            "Expected a named field as otherwise it can not be intialized.",
+                        );
+                    };
+
+                    finish.push(finish_tokens);
+                },
+                WasmerAttr::Reactors => {
+                    let finish_tokens = if let Some(name) = name {
+                        quote_spanned! {
+                            f.span()=>
+                                self.#name.initialize(instance.reactors.clone());
+                        }
+                    } else {
+                        abort!(
+                            name,
+                            "Expected a named field as otherwise it can not be intialized.",
+                        );
                     };
 
                     finish.push(finish_tokens);

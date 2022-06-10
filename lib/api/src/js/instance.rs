@@ -6,8 +6,11 @@ use crate::js::imports::Imports;
 use crate::js::module::Module;
 use crate::js::store::Store;
 use crate::js::trap::RuntimeError;
+use crate::js::thread::ThreadControl;
+use crate::js::Reactors;
 use js_sys::WebAssembly;
 use std::fmt;
+use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
 #[cfg(feature = "std")]
 use thiserror::Error;
 
@@ -21,9 +24,11 @@ use thiserror::Error;
 /// Spec: <https://webassembly.github.io/spec/core/exec/runtime.html#module-instances>
 #[derive(Clone)]
 pub struct Instance {
+    thread_seed: Arc<AtomicU32>,
     instance: WebAssembly::Instance,
     module: Module,
-    #[allow(dead_code)]
+    /// Reactors are used to wake up the program
+    pub reactors: Reactors,
     imports: Imports,
     /// The exports for an instance.
     pub exports: Exports,
@@ -140,7 +145,9 @@ impl Instance {
             .collect::<Result<Exports, InstantiationError>>()?;
 
         Ok(Self {
+            thread_seed: Arc::new(AtomicU32::new(0)),
             instance,
+            reactors: Default::default(),
             module: module.clone(),
             imports,
             exports,
@@ -180,6 +187,33 @@ impl Instance {
     #[doc(hidden)]
     pub fn raw(&self) -> &WebAssembly::Instance {
         &self.instance
+    }
+
+    #[doc(hidden)]
+    pub fn resolve<'a, T, Args, Rets>(&'a self, name: &str) -> Result<T, crate::ExportError>
+    where
+        Args: crate::WasmTypeList,
+        Rets: crate::WasmTypeList,
+        T: super::exports::ExportableWithGenerics<'a, Args, Rets>,
+    {
+        match self.exports.get_with_generics_weak(name) {
+            Ok(a) => Ok(a),
+            Err(crate::ExportError::Missing(a)) if a == "memory" => {
+                for (_, _, import) in self.imports.iter() {
+                    if let Extern::Memory(_) = import {
+                        return T::get_self_from_extern_with_generics(import);
+                    }
+                }
+                Err(crate::ExportError::Missing("memory".to_string()))
+            }
+            Err(err) => Err(err)
+        }
+    }
+
+    /// Creates a a thread and returns it
+    pub fn new_thread(&self) -> ThreadControl {
+        let id = self.thread_seed.fetch_add(1, Ordering::AcqRel) + 1;
+        ThreadControl::new(id)
     }
 }
 

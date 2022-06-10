@@ -22,6 +22,18 @@ pub type Result<T> = std::result::Result<T, FsError>;
 #[repr(transparent)]
 pub struct FileDescriptor(usize);
 
+impl From<u32> for FileDescriptor {
+    fn from(a: u32) -> Self {
+        Self(a as usize)
+    }
+}
+
+impl Into<u32> for FileDescriptor {
+    fn into(self) -> u32 {
+        self.0 as u32
+    }
+}
+
 pub trait FileSystem: fmt::Debug + Send + Sync + 'static + Upcastable {
     fn read_dir(&self, path: &Path) -> Result<ReadDir>;
     fn create_dir(&self, path: &Path) -> Result<()>;
@@ -55,7 +67,7 @@ pub trait FileOpener {
         &mut self,
         path: &Path,
         conf: &OpenOptionsConfig,
-    ) -> Result<Box<dyn VirtualFile + Sync>>;
+    ) -> Result<Box<dyn VirtualFile + Send + Sync + 'static>>;
 }
 
 #[derive(Debug, Clone)]
@@ -150,14 +162,14 @@ impl OpenOptions {
         self
     }
 
-    pub fn open<P: AsRef<Path>>(&mut self, path: P) -> Result<Box<dyn VirtualFile + Sync>> {
+    pub fn open<P: AsRef<Path>>(&mut self, path: P) -> Result<Box<dyn VirtualFile + Send + Sync + 'static>> {
         self.opener.open(path.as_ref(), &self.conf)
     }
 }
 
 /// This trait relies on your file closing when it goes out of scope via `Drop`
 #[cfg_attr(feature = "enable-serde", typetag::serde)]
-pub trait VirtualFile: fmt::Debug + Send + Write + Read + Seek + 'static + Upcastable {
+pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable {
     /// the last time the file was accessed in nanoseconds as a UNIX timestamp
     fn last_accessed(&self) -> u64;
 
@@ -235,17 +247,6 @@ impl<T: Any + fmt::Debug + 'static> Upcastable for T {
     #[inline]
     fn upcast_any_box(self: Box<Self>) -> Box<dyn Any> {
         self
-    }
-}
-
-impl dyn VirtualFile + 'static {
-    #[inline]
-    pub fn downcast_ref<T: 'static>(&'_ self) -> Option<&'_ T> {
-        self.upcast_any_ref().downcast_ref::<T>()
-    }
-    #[inline]
-    pub fn downcast_mut<T: 'static>(&'_ mut self) -> Option<&'_ mut T> {
-        self.upcast_any_mut().downcast_mut::<T>()
     }
 }
 

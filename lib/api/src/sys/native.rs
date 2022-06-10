@@ -18,6 +18,7 @@ use wasmer_vm::{VMDynamicFunctionContext, VMFunctionBody, VMFunctionEnvironment,
 
 /// A WebAssembly function that can be called natively
 /// (using the Native ABI).
+#[derive(Debug)]
 pub struct TypedFunction<Args = (), Rets = ()> {
     store: Store,
     exported: ExportFunction,

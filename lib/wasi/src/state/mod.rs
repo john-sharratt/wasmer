@@ -19,19 +19,29 @@ mod builder;
 mod pipe;
 mod socket;
 mod types;
+mod guard;
 
 pub use self::builder::*;
 pub use self::pipe::*;
 pub use self::socket::*;
 pub use self::types::*;
+pub use self::guard::*;
+use crate::WasiThreadId;
 use crate::syscalls::types::*;
 use crate::utils::map_io_err;
+use crate::WasiBusProcessId;
+use derivative::Derivative;
 use generational_arena::Arena;
 pub use generational_arena::Index as Inode;
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
+use wasmer::ThreadControl;
+use wasmer_vbus::VirtualBusCalled;
+use wasmer_vbus::VirtualBusInvocation;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::Condvar;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::{
@@ -40,11 +50,12 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
 };
 use tracing::{debug, trace};
+use wasmer_vbus::BusSpawnedProcess;
 
 use wasmer_vfs::{FileSystem, FsError, OpenOptions, VirtualFile};
 
@@ -76,7 +87,7 @@ pub const MAX_SYMLINKS: u32 = 128;
 pub struct InodeVal {
     pub stat: RwLock<__wasi_filestat_t>,
     pub is_preopened: bool,
-    pub name: String,
+    pub name: Cow<'static, str>,
     pub kind: RwLock<Kind>,
 }
 
@@ -90,45 +101,6 @@ impl InodeVal {
     }
 }
 
-#[derive(Debug)]
-pub struct InodeValFileReadGuard<'a> {
-    pub(crate) guard: RwLockReadGuard<'a, Kind>,
-}
-
-impl<'a> Deref for InodeValFileReadGuard<'a> {
-    type Target = Option<Box<dyn VirtualFile + Sync + 'static>>;
-    fn deref(&self) -> &Self::Target {
-        if let Kind::File { handle, .. } = self.guard.deref() {
-            return handle;
-        }
-        unreachable!()
-    }
-}
-
-#[derive(Debug)]
-pub struct InodeValFileWriteGuard<'a> {
-    pub(crate) guard: RwLockWriteGuard<'a, Kind>,
-}
-
-impl<'a> Deref for InodeValFileWriteGuard<'a> {
-    type Target = Option<Box<dyn VirtualFile + Sync + 'static>>;
-    fn deref(&self) -> &Self::Target {
-        if let Kind::File { handle, .. } = self.guard.deref() {
-            return handle;
-        }
-        unreachable!()
-    }
-}
-
-impl<'a> DerefMut for InodeValFileWriteGuard<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        if let Kind::File { handle, .. } = self.guard.deref_mut() {
-            return handle;
-        }
-        unreachable!()
-    }
-}
-
 /// The core of the filesystem abstraction.  Includes directories,
 /// files, and symlinks.
 #[derive(Debug)]
@@ -136,7 +108,7 @@ impl<'a> DerefMut for InodeValFileWriteGuard<'a> {
 pub enum Kind {
     File {
         /// The open file, if it's open
-        handle: Option<Box<dyn VirtualFile + Sync + 'static>>,
+        handle: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
         /// The path on the host system where the file is located
         /// This is deprecated and will be removed soon
         path: PathBuf,
@@ -264,14 +236,14 @@ impl WasiInodes {
     }
 
     /// Get the `VirtualFile` object at stdout
-    pub fn stdout(
+    pub(crate) fn stdout(
         &self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
     ) -> Result<InodeValFileReadGuard, FsError> {
         self.std_dev_get(fd_map, __WASI_STDOUT_FILENO)
     }
     /// Get the `VirtualFile` object at stdout mutably
-    pub fn stdout_mut(
+    pub(crate) fn stdout_mut(
         &self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
     ) -> Result<InodeValFileWriteGuard, FsError> {
@@ -279,14 +251,14 @@ impl WasiInodes {
     }
 
     /// Get the `VirtualFile` object at stderr
-    pub fn stderr(
+    pub(crate) fn stderr(
         &self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
     ) -> Result<InodeValFileReadGuard, FsError> {
         self.std_dev_get(fd_map, __WASI_STDERR_FILENO)
     }
     /// Get the `VirtualFile` object at stderr mutably
-    pub fn stderr_mut(
+    pub(crate) fn stderr_mut(
         &self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
     ) -> Result<InodeValFileWriteGuard, FsError> {
@@ -294,14 +266,14 @@ impl WasiInodes {
     }
 
     /// Get the `VirtualFile` object at stdin
-    pub fn stdin(
+    pub(crate) fn stdin(
         &self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
     ) -> Result<InodeValFileReadGuard, FsError> {
         self.std_dev_get(fd_map, __WASI_STDIN_FILENO)
     }
     /// Get the `VirtualFile` object at stdin mutably
-    pub fn stdin_mut(
+    pub(crate) fn stdin_mut(
         &self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
     ) -> Result<InodeValFileWriteGuard, FsError> {
@@ -310,18 +282,18 @@ impl WasiInodes {
 
     /// Internal helper function to get a standard device handle.
     /// Expects one of `__WASI_STDIN_FILENO`, `__WASI_STDOUT_FILENO`, `__WASI_STDERR_FILENO`.
-    fn std_dev_get(
-        &self,
+    fn std_dev_get<'a>(
+        &'a self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
         fd: __wasi_fd_t,
-    ) -> Result<InodeValFileReadGuard, FsError> {
+    ) -> Result<InodeValFileReadGuard<'a>, FsError> {
         if let Some(fd) = fd_map.read().unwrap().get(&fd) {
             let guard = self.arena[fd.inode].read();
             if let Kind::File { .. } = guard.deref() {
                 Ok(InodeValFileReadGuard { guard })
             } else {
                 // Our public API should ensure that this is not possible
-                unreachable!("Non-file found in standard device location")
+                Err(FsError::NotAFile)
             }
         } else {
             // this should only trigger if we made a mistake in this crate
@@ -330,18 +302,18 @@ impl WasiInodes {
     }
     /// Internal helper function to mutably get a standard device handle.
     /// Expects one of `__WASI_STDIN_FILENO`, `__WASI_STDOUT_FILENO`, `__WASI_STDERR_FILENO`.
-    fn std_dev_get_mut(
-        &self,
+    fn std_dev_get_mut<'a>(
+        &'a self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
         fd: __wasi_fd_t,
-    ) -> Result<InodeValFileWriteGuard, FsError> {
+    ) -> Result<InodeValFileWriteGuard<'a>, FsError> {
         if let Some(fd) = fd_map.read().unwrap().get(&fd) {
             let guard = self.arena[fd.inode].write();
             if let Kind::File { .. } = guard.deref() {
                 Ok(InodeValFileWriteGuard { guard })
             } else {
                 // Our public API should ensure that this is not possible
-                unreachable!("Non-file found in standard device location")
+                Err(FsError::NotAFile)
             }
         } else {
             // this should only trigger if we made a mistake in this crate
@@ -362,6 +334,7 @@ pub struct WasiFs {
     pub next_fd: AtomicU32,
     inode_counter: AtomicU64,
     pub current_dir: Mutex<String>,
+    pub is_wasix: AtomicBool,
     #[cfg_attr(feature = "enable-serde", serde(skip, default = "default_fs_backing"))]
     pub fs_backing: Box<dyn FileSystem>,
 }
@@ -613,6 +586,7 @@ impl WasiFs {
             next_fd: AtomicU32::new(3),
             inode_counter: AtomicU64::new(1024),
             current_dir: Mutex::new("/".to_string()),
+            is_wasix: AtomicBool::new(false),
             fs_backing,
         };
         wasi_fs.create_stdin(inodes);
@@ -701,7 +675,7 @@ impl WasiFs {
                         inodes,
                         kind,
                         false,
-                        segment_name.clone(),
+                        segment_name.clone().into(),
                     );
 
                     // reborrow to insert
@@ -742,7 +716,7 @@ impl WasiFs {
         &mut self,
         inodes: &mut WasiInodes,
         base: __wasi_fd_t,
-        file: Box<dyn VirtualFile + Sync>,
+        file: Box<dyn VirtualFile + Send + Sync + 'static>,
         open_flags: u16,
         name: String,
         rights: __wasi_rights_t,
@@ -800,8 +774,8 @@ impl WasiFs {
         &self,
         inodes: &WasiInodes,
         fd: __wasi_fd_t,
-        file: Box<dyn VirtualFile + Sync>,
-    ) -> Result<Option<Box<dyn VirtualFile + Sync>>, FsError> {
+        file: Box<dyn VirtualFile + Send + Sync + 'static>,
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
         let mut ret = Some(file);
         match fd {
             __WASI_STDIN_FILENO => {
@@ -866,22 +840,25 @@ impl WasiFs {
     pub fn get_current_dir(
         &self,
         inodes: &mut WasiInodes,
+        base: __wasi_fd_t,
     ) -> Result<(Inode, String), __wasi_errno_t> {
-        self.get_current_dir_inner(inodes, 0)
+        self.get_current_dir_inner(inodes, base, 0)
     }
 
-    fn get_current_dir_inner(
+    pub(crate) fn get_current_dir_inner(
         &self,
         inodes: &mut WasiInodes,
+        base: __wasi_fd_t,
         symlink_count: u32,
     ) -> Result<(Inode, String), __wasi_errno_t> {
         let current_dir = {
             let guard = self.current_dir.lock().unwrap();
             guard.clone()
         };
+        let cur_inode = self.get_fd_inode(base)?;
         let inode = self.get_inode_at_path_inner(
             inodes,
-            VIRTUAL_ROOT_FD,
+            cur_inode,
             current_dir.as_str(),
             symlink_count,
             true,
@@ -905,7 +882,7 @@ impl WasiFs {
     fn get_inode_at_path_inner(
         &self,
         inodes: &mut WasiInodes,
-        base: __wasi_fd_t,
+        mut cur_inode: generational_arena::Index,
         path: &str,
         mut symlink_count: u32,
         follow_symlinks: bool,
@@ -915,22 +892,7 @@ impl WasiFs {
         }
 
         let path: &Path = Path::new(path);
-        let mut cur_inode = self.get_fd_inode(base)?;
-        if path.to_str().unwrap() == "/" && base == VIRTUAL_ROOT_FD {
-            return Ok(cur_inode);
-        }
         let n_components = path.components().count();
-
-        // If this is the start of the path search and it starts with the
-        // current directory marker then we need to resolve the current
-        // path to the inode before we do the search
-        if path.components().next().map(|c| c.as_os_str().to_str()).flatten() == Some(".")
-           && base == VIRTUAL_ROOT_FD   // File queries will occur on the root first
-           && symlink_count == 0
-        // The resolving of the current path only should happen once and not after symbolic links are followed
-        {
-            (cur_inode, _) = self.get_current_dir_inner(inodes, symlink_count + 1)?;
-        }
 
         // TODO: rights checks
         'path_iter: for (i, component) in path.components().enumerate() {
@@ -1045,7 +1007,7 @@ impl WasiFs {
                                         inodes,
                                         kind,
                                         false,
-                                        file.to_string_lossy().to_string(),
+                                        file.to_string_lossy().to_string().into(),
                                         __wasi_filestat_t {
                                             st_filetype: file_type,
                                             ..__wasi_filestat_t::default()
@@ -1129,6 +1091,8 @@ impl WasiFs {
                         relative_path,
                     } => {
                         let new_base_dir = *base_po_dir;
+                        let new_base_inode = self.get_fd_inode(new_base_dir)?;
+
                         // allocate to reborrow mutabily to recur
                         let new_path = {
                             /*if let Kind::Root { .. } = self.inodes[base_po_dir].kind {
@@ -1145,7 +1109,7 @@ impl WasiFs {
                         drop(guard);
                         let symlink_inode = self.get_inode_at_path_inner(
                             inodes,
-                            new_base_dir,
+                            new_base_inode,
                             &new_path,
                             symlink_count + 1,
                             follow_symlinks,
@@ -1275,7 +1239,15 @@ impl WasiFs {
         path: &str,
         follow_symlinks: bool,
     ) -> Result<Inode, __wasi_errno_t> {
-        self.get_inode_at_path_inner(inodes, base, path, 0, follow_symlinks)
+        let start_inode;
+        if path.starts_with("/") == false && self.is_wasix.load(Ordering::Acquire) {
+            let (cur_inode, _) = self.get_current_dir(inodes, base)?;
+            start_inode = cur_inode;
+        } else {
+            start_inode = self.get_fd_inode(base)?;
+        }
+
+        self.get_inode_at_path_inner(inodes, start_inode, path, 0, follow_symlinks)
     }
 
     /// Returns the parent Dir or Root that the file at a given path is in and the file name
@@ -1401,16 +1373,20 @@ impl WasiFs {
         let inode_val = &inodes.arena[inode];
 
         if inode_val.is_preopened {
-            Ok(__wasi_prestat_t {
-                pr_type: __WASI_PREOPENTYPE_DIR,
-                u: PrestatEnum::Dir {
-                    // REVIEW:
-                    pr_name_len: inode_val.name.len() as u32 + 1,
-                }
-                .untagged(),
-            })
+            Ok(self.prestat_fd_inner(inode_val))
         } else {
             Err(__WASI_EBADF)
+        }
+    }
+
+    pub(crate) fn prestat_fd_inner(&self, inode_val: &InodeVal) -> __wasi_prestat_t {
+        __wasi_prestat_t {
+            pr_type: __WASI_PREOPENTYPE_DIR,
+            u: PrestatEnum::Dir {
+                // REVIEW:
+                pr_name_len: inode_val.name.len() as u32 + 1,
+            }
+            .untagged(),
         }
     }
 
@@ -1464,7 +1440,7 @@ impl WasiFs {
         name: String,
     ) -> Result<Inode, __wasi_errno_t> {
         let stat = self.get_stat_for_kind(inodes, &kind)?;
-        Ok(self.create_inode_with_stat(inodes, kind, is_preopened, name, stat))
+        Ok(self.create_inode_with_stat(inodes, kind, is_preopened, name.into(), stat))
     }
 
     /// Creates an inode and inserts it given a Kind, does not assume the file exists.
@@ -1473,7 +1449,7 @@ impl WasiFs {
         inodes: &mut WasiInodes,
         kind: Kind,
         is_preopened: bool,
-        name: String,
+        name: Cow<'static, str>,
     ) -> Inode {
         let stat = __wasi_filestat_t::default();
         self.create_inode_with_stat(inodes, kind, is_preopened, name, stat)
@@ -1485,7 +1461,7 @@ impl WasiFs {
         inodes: &mut WasiInodes,
         kind: Kind,
         is_preopened: bool,
-        name: String,
+        name: Cow<'static, str>,
         mut stat: __wasi_filestat_t,
     ) -> Inode {
         stat.st_ino = self.get_next_inode_index();
@@ -1563,7 +1539,7 @@ impl WasiFs {
         inodes.arena.insert(InodeVal {
             stat: RwLock::new(stat),
             is_preopened: true,
-            name: "/".to_string(),
+            name: "/".into(),
             kind: RwLock::new(root_kind),
         })
     }
@@ -1602,7 +1578,7 @@ impl WasiFs {
     fn create_std_dev_inner(
         &self,
         inodes: &mut WasiInodes,
-        handle: Box<dyn VirtualFile + Sync>,
+        handle: Box<dyn VirtualFile + Send + Sync + 'static>,
         name: &'static str,
         raw_fd: __wasi_fd_t,
         rights: __wasi_rights_t,
@@ -1622,7 +1598,7 @@ impl WasiFs {
             inodes.arena.insert(InodeVal {
                 stat: RwLock::new(stat),
                 is_preopened: true,
-                name: name.to_string(),
+                name: name.to_string().into(),
                 kind: RwLock::new(kind),
             })
         };
@@ -1830,6 +1806,121 @@ impl WasiState {
     }
 }
 
+/// Structures used for the threading and sub-processes
+///
+/// These internal implementation details are hidden away from the
+/// consumer who should instead implement the vbus trait on the runtime
+
+#[derive(Derivative, Default)]
+#[derivative(Debug)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub(crate) struct WasiStateThreading {
+    threads: Arc<RwLock<HashMap<WasiThreadId, ThreadControl>>>,
+    thread_seed: WasiThreadId,
+    thread_count: Arc<AtomicU32>,
+    pub processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess>>,
+    pub process_reuse: HashMap<Cow<'static, str>, WasiBusProcessId>,
+    pub process_seed: u32,
+    pub thread_local: HashMap<(WasiThreadId, u32), u64>,
+    pub thread_local_user_data: HashMap<u32, u64>,
+    pub thread_local_seed: u32,
+    #[derivative(Debug = "ignore")]
+    pub chained_worker: Option<Box<dyn FnOnce() -> u32 + Send + Sync>>,
+}
+
+impl WasiStateThreading
+{
+    /// Creates a a thread and returns it
+    pub fn new_thread(&mut self) -> WasiThreadHandle {
+        let id = self.thread_seed.inc();
+        let ctrl = ThreadControl::new(id.raw());
+        {
+            let mut guard = self.threads.write().unwrap();
+            guard.insert(id, ctrl);
+        }
+        self.thread_count.fetch_add(1, Ordering::AcqRel);
+        
+        WasiThreadHandle {
+            id,
+            threads: self.threads.clone(),
+            thread_count: self.thread_count.clone()
+        }
+    }
+
+    pub fn get(&self, tid: &WasiThreadId) -> Option<ThreadControl> {
+        let guard = self.threads.read().unwrap();
+        guard.get(tid).map(|a| a.clone())
+    }
+
+    pub fn active_threads(&self) -> u32 {
+        self.thread_count.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+pub struct WasiThreadHandle {
+    id: WasiThreadId,
+    threads: Arc<RwLock<HashMap<WasiThreadId, ThreadControl>>>,
+    thread_count: Arc<AtomicU32>,
+}
+
+impl WasiThreadHandle {
+    pub fn id(&self) -> WasiThreadId {
+        self.id
+    }
+}
+
+impl Drop
+for WasiThreadHandle {
+    fn drop(&mut self) {
+        if let Some(ctrl) = {
+            let mut guard = self.threads.write().unwrap();
+            guard.remove(&self.id)
+        } {
+            ctrl.mark_exited();
+        }
+        self.thread_count.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Represents a futex which will make threads wait for completion in a more
+/// CPU efficient manner
+#[derive(Debug, Clone)]
+pub struct WasiFutex {
+    pub(crate) refcnt: Arc<AtomicU32>,
+    pub(crate) inner: Arc<(Mutex<()>, Condvar)>,
+}
+
+#[derive(Debug)]
+pub struct WasiBusCall
+{
+    pub bid: WasiBusProcessId,
+    pub invocation: Box<dyn VirtualBusInvocation + Sync>,
+}
+
+/// Structure that holds the state of BUS calls to this process and from
+/// this process. BUS calls are the equivalent of RPC's with support
+/// for all the major serializers
+#[derive(Debug)]
+pub struct WasiBusState
+{
+    pub call_seed: u64,
+    pub called: HashMap<u64, Box<dyn VirtualBusCalled + Sync + Unpin>>, 
+    pub calls: HashMap<u64, WasiBusCall>,
+}
+
+impl Default
+for WasiBusState
+{
+    fn default() -> Self {
+        Self {
+            call_seed: 0,
+            called: Default::default(),
+            calls: Default::default(),
+        }
+    }
+}
+
 /// Top level data type containing all* the state with which WASI can
 /// interact.
 ///
@@ -1862,7 +1953,10 @@ impl WasiState {
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct WasiState {
     pub fs: WasiFs,
-    pub inodes: RwLock<WasiInodes>,
+    pub inodes: Arc<RwLock<WasiInodes>>,
+    pub(crate) threading: RwLock<WasiStateThreading>,
+    pub(crate) futexs: Mutex<HashMap<u64, WasiFutex>>,
+    pub(crate) bus: Mutex<WasiBusState>,
     pub args: Vec<Vec<u8>>,
     pub envs: Vec<Vec<u8>>,
 }
@@ -1885,6 +1979,80 @@ impl WasiState {
     #[cfg(feature = "enable-serde")]
     pub fn unfreeze(bytes: &[u8]) -> Option<Self> {
         bincode::deserialize(bytes).ok()
+    }
+
+    /// Get the `VirtualFile` object at stdout
+    pub fn stdout(
+        &self,
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
+        self.std_dev_get(__WASI_STDOUT_FILENO)
+    }
+
+    #[deprecated(
+        since = "3.0.0",
+        note = "stdout_mut() is no longer needed - just use stdout() instead"
+    )]
+    pub fn stdout_mut(
+        &self
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
+        self.stdout()
+    }
+    
+    /// Get the `VirtualFile` object at stderr
+    pub fn stderr(
+        &self,
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
+        self.std_dev_get(__WASI_STDERR_FILENO)
+    }
+
+    #[deprecated(
+        since = "3.0.0",
+        note = "stderr_mut() is no longer needed - just use stderr() instead"
+    )]
+    pub fn stderr_mut(
+        &self
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
+        self.stderr()
+    }
+
+    /// Get the `VirtualFile` object at stdin
+    pub fn stdin(
+        &self,
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
+        self.std_dev_get(__WASI_STDIN_FILENO)
+    }
+
+    #[deprecated(
+        since = "3.0.0",
+        note = "stdin_mut() is no longer needed - just use stdin() instead"
+    )]
+    pub fn stdin_mut(
+        &self
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
+        self.stdin()
+    }
+
+    /// Internal helper function to get a standard device handle.
+    /// Expects one of `__WASI_STDIN_FILENO`, `__WASI_STDOUT_FILENO`, `__WASI_STDERR_FILENO`.
+    fn std_dev_get(
+        &self,
+        fd: __wasi_fd_t,
+    ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
+        let ret = WasiStateFileGuard::new(self, fd)?
+            .map(|a| {
+                let ret = Box::new(a);
+                let ret: Box<dyn VirtualFile + Send + Sync + 'static> = ret;
+                ret
+            });
+        Ok(
+            ret
+        )
+    }
+
+    /// Grabs the next chained work (if there is one)
+    pub fn next_chained_worker(&self) -> Option<Box<dyn FnOnce() -> u32 + Send + Sync>> {
+        let mut guard = self.threading.write().unwrap();
+        guard.chained_worker.take()
     }
 }
 

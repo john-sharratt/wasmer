@@ -8,6 +8,7 @@ use crate::js::module::Module;
 use crate::Extern;
 use std::collections::HashMap;
 use std::fmt;
+use tracing::trace;
 
 /// All of the import data used when instantiating.
 ///
@@ -138,6 +139,9 @@ impl Imports {
             {
                 ret.push(imp.clone());
             } else {
+                for (k1, k2) in self.map.keys() {
+                    trace!("import extern ({}, {})", k1, k2);
+                }
                 return Err(InstantiationError::Link(format!(
                     "Error while importing {0:?}.{1:?}: unknown import. Expected {2:?}",
                     import.module(),
@@ -176,6 +180,36 @@ impl Imports {
                 .expect("Error while setting into the js imports object");
         }
         imports
+    }
+
+    /// Iterates through all the imports in this structure
+    pub fn iter<'a>(&'a self) -> ImportsIterator<'a> {
+        ImportsIterator::new(self)
+    }
+}
+
+pub struct ImportsIterator<'a> {
+    iter: std::collections::hash_map::Iter<'a, (String, String), Extern>
+}
+
+impl<'a> ImportsIterator<'a>
+{
+    fn new(imports: &'a Imports) -> Self {
+        let iter = imports.map.iter();
+        Self { iter }
+    }
+}
+
+impl<'a> Iterator
+for ImportsIterator<'a> {
+    type Item = (&'a str, &'a str, &'a Extern);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter
+            .next()
+            .map(|(k, v)| {
+                (k.0.as_str(), k.1.as_str(), v)
+            })
     }
 }
 

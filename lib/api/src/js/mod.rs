@@ -41,6 +41,9 @@ mod store;
 mod trap;
 mod types;
 mod wasm_bindgen_polyfill;
+mod thread;
+#[path = "../common/reactors.rs"]
+mod reactors;
 
 /// Implement [`WasmerEnv`] for your type with `#[derive(WasmerEnv)]`.
 ///
@@ -63,6 +66,8 @@ pub use crate::js::module::{Module, ModuleTypeHints};
 pub use crate::js::native::TypedFunction;
 pub use crate::js::ptr::{Memory32, Memory64, MemorySize, WasmPtr, WasmPtr64};
 pub use crate::js::trap::RuntimeError;
+pub use crate::js::thread::ThreadControl;
+pub use crate::js::reactors::Reactors;
 
 pub use crate::js::store::{Store, StoreObject};
 pub use crate::js::types::{

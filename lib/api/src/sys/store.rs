@@ -29,7 +29,8 @@ impl Store {
     where
         E: Engine + ?Sized,
     {
-        Self::new_with_tunables(engine, BaseTunables::for_target(engine.target()))
+        let ret = Self::new_with_tunables(engine, BaseTunables::for_target(engine.target()));
+        ret
     }
 
     /// Set the trap handler in this store.

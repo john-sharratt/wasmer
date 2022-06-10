@@ -174,6 +174,10 @@ impl Engine for DylibEngine {
         )?))
     }
 
+    fn multi_threaded(&self) -> bool {
+        self.inner().features().threads
+    }
+
     fn id(&self) -> &EngineId {
         &self.engine_id
     }

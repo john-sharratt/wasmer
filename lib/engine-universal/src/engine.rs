@@ -134,6 +134,10 @@ impl Engine for UniversalEngine {
         Ok(Arc::new(UniversalArtifact::deserialize(&self, &bytes)?))
     }
 
+    fn multi_threaded(&self) -> bool {
+        self.inner().features().threads
+    }
+
     fn id(&self) -> &EngineId {
         &self.engine_id
     }

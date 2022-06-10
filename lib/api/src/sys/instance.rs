@@ -1,3 +1,4 @@
+use crate::Reactors;
 use crate::sys::exports::Exports;
 use crate::sys::externals::Extern;
 use crate::sys::imports::Imports;
@@ -21,7 +22,8 @@ use wasmer_vm::{InstanceHandle, VMContext};
 pub struct Instance {
     handle: Arc<Mutex<InstanceHandle>>,
     module: Module,
-    #[allow(dead_code)]
+    /// Reactors are used to wake up the program
+    pub reactors: Reactors,
     imports: Vec<Extern>,
     /// The exports for an instance.
     pub exports: Exports,
@@ -114,11 +116,15 @@ impl Instance {
     /// Those are, as defined by the spec:
     ///  * Link errors that happen when plugging the imports into the instance
     ///  * Runtime errors that happen when running the module `start` function.
-    pub fn new(module: &Module, imports: &Imports) -> Result<Self, InstantiationError> {
-        let store = module.store();
+    pub fn new(module: &Module, imports: &Imports) -> Result<Instance, InstantiationError> {
         let imports = imports
             .imports_for_module(module)
             .map_err(InstantiationError::Link)?;
+        Self::new_ext(module, imports)
+    }
+
+    fn new_ext(module: &Module, imports: Vec<Extern>) -> Result<Instance, InstantiationError> {
+        let store = module.store();
         let handle = module.instantiate(&imports)?;
         let exports = module
             .exports()
@@ -132,6 +138,7 @@ impl Instance {
 
         let instance = Self {
             handle: Arc::new(Mutex::new(handle)),
+            reactors: Default::default(),
             module: module.clone(),
             imports,
             exports,
@@ -166,7 +173,7 @@ impl Instance {
     /// Those are, as defined by the spec:
     ///  * Link errors that happen when plugging the imports into the instance
     ///  * Runtime errors that happen when running the module `start` function.
-    pub fn new_by_index(module: &Module, externs: &[Extern]) -> Result<Self, InstantiationError> {
+    pub fn new_by_index(module: &Module, externs: &[Extern]) -> Result<Instance, InstantiationError> {
         let store = module.store();
         let imports = externs.iter().cloned().collect::<Vec<_>>();
         let handle = module.instantiate(&imports)?;
@@ -182,11 +189,12 @@ impl Instance {
 
         let instance = Self {
             handle: Arc::new(Mutex::new(handle)),
+            reactors: Default::default(),
             module: module.clone(),
             imports,
             exports,
         };
-
+        
         // # Safety
         // `initialize_host_envs` should be called after instantiation but before
         // returning an `Instance` to the user. We set up the host environments
@@ -219,6 +227,27 @@ impl Instance {
     #[doc(hidden)]
     pub fn vmctx_ptr(&self) -> *mut VMContext {
         self.handle.lock().unwrap().vmctx_ptr()
+    }
+
+    #[doc(hidden)]
+    pub fn resolve<'a, T, Args, Rets>(&'a self, name: &str) -> Result<T, crate::ExportError>
+    where
+        Args: crate::WasmTypeList,
+        Rets: crate::WasmTypeList,
+        T: super::exports::ExportableWithGenerics<'a, Args, Rets>,
+    {
+        match self.exports.get_with_generics_weak(name) {
+            Ok(a) => Ok(a),
+            Err(crate::ExportError::Missing(a)) if a == "memory" => {
+                for import in self.imports.iter() {
+                    if let Extern::Memory(_) = import {
+                        return T::get_self_from_extern_with_generics(import);
+                    }
+                }
+                Err(crate::ExportError::Missing("memory".to_string()))
+            }
+            Err(err) => Err(err)
+        }
     }
 }
 

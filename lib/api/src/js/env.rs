@@ -71,7 +71,7 @@ impl From<ExportError> for HostEnvInitError {
 ///
 /// impl WasmerEnv for MyEnv {
 ///     fn init_with_instance(&mut self, instance: &Instance) -> Result<(), HostEnvInitError> {
-///         let memory: Memory = instance.exports.get_with_generics_weak("memory").unwrap();
+///         let memory: Memory = instance.resolve("memory").unwrap();
 ///         self.memory.initialize(memory.clone());
 ///         Ok(())
 ///     }

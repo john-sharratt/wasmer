@@ -859,10 +859,11 @@ impl Instance {
 ///
 /// This is more or less a public facade of the private `Instance`,
 /// providing useful higher-level API.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InstanceHandle {
-    /// The [`InstanceRef`]. See its documentation to learn more.
-    instance: InstanceRef,
+    /// A “reference” to the instance through the
+    /// `InstanceRef`. `None` if it is a host memory.
+    pub instance_ref: WeakOrStrongInstanceRef,
 }
 
 impl InstanceHandle {
@@ -945,7 +946,7 @@ impl InstanceHandle {
             }
 
             Self {
-                instance: instance_ref,
+                instance_ref: WeakOrStrongInstanceRef::Strong(instance_ref),
             }
         };
         let instance = handle.instance().as_ref();
@@ -996,9 +997,34 @@ impl InstanceHandle {
         Ok(handle)
     }
 
+    pub(crate) fn make_strong_ref(&mut self) -> &mut Self {        
+        if let WeakOrStrongInstanceRef::Weak(weak) = &self.instance_ref {
+            if let Some(strong) = weak.upgrade() {
+                self.instance_ref = WeakOrStrongInstanceRef::Strong(strong);
+            }
+        }
+        self
+    }
+
     /// Return a reference to the contained `Instance`.
     pub(crate) fn instance(&self) -> &InstanceRef {
-        &self.instance
+        match &self.instance_ref {
+            WeakOrStrongInstanceRef::Strong(i) => i,
+            WeakOrStrongInstanceRef::Weak(_) => {
+                panic!("instances with weak references can not be mutated - first convert it back to a strong reference with make_strong_ref()")
+            },
+        }
+    }
+
+    /// Return a reference to the contained `Instance`.
+    pub(crate) fn instance_mut(&mut self) -> &mut InstanceRef {
+        self.make_strong_ref();
+        match &mut self.instance_ref {
+            WeakOrStrongInstanceRef::Strong(i) => i,
+            WeakOrStrongInstanceRef::Weak(_) => {
+                panic!("instances with weak references can not be mutated and this instance can not be upgraded from weak to strong as its gone out of scope")
+            },
+        }
     }
 
     /// Finishes the instantiation process started by `Instance::new`.
@@ -1230,7 +1256,7 @@ impl InstanceHandle {
         &mut self,
         instance_ptr: *const ffi::c_void,
     ) -> Result<(), Err> {
-        let instance_ref = self.instance.as_mut_unchecked();
+        let instance_ref = self.instance_mut().as_mut_unchecked();
 
         for import_function_env in instance_ref.imported_function_envs.values_mut() {
             match import_function_env {

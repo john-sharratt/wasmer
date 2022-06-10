@@ -1,10 +1,11 @@
 //! The import module contains the implementation data structures and helper functions used to
 //! manipulate and access a wasm module's imports including memories, tables, globals, and
 //! functions.
-use crate::{Exports, Extern, Module};
+use crate::{Exports, Extern, Module, Memory};
 use std::collections::HashMap;
 use std::fmt;
 use wasmer_engine::{ImportError, LinkError};
+use tracing::trace;
 
 /// All of the import data used when instantiating.
 ///
@@ -137,7 +138,21 @@ impl Imports {
                 .get(&(import.module().to_string(), import.name().to_string()))
             {
                 ret.push(imp.clone());
+            } else if let wasmer_types::ExternType::Memory(mem_ty) = import.ty() {
+                let store = module.store();
+                ret.push(Extern::Memory(Memory::new(store, mem_ty.clone())
+                    .map_err(|err| {
+                        LinkError::Import(
+                            import.module().to_string(),
+                            import.name().to_string(),
+                            ImportError::MemoryError(err.to_string()),
+                        )
+                    })?
+                ));
             } else {
+                for (k1, k2) in self.map.keys() {
+                    trace!("import extern ({}, {})", k1, k2);
+                }
                 return Err(LinkError::Import(
                     import.module().to_string(),
                     import.name().to_string(),
@@ -146,6 +161,36 @@ impl Imports {
             }
         }
         Ok(ret)
+    }
+
+    /// Iterates through all the imports in this structure
+    pub fn iter<'a>(&'a self) -> ImportsIterator<'a> {
+        ImportsIterator::new(self)
+    }
+}
+
+pub struct ImportsIterator<'a> {
+    iter: std::collections::hash_map::Iter<'a, (String, String), Extern>
+}
+
+impl<'a> ImportsIterator<'a>
+{
+    fn new(imports: &'a Imports) -> Self {
+        let iter = imports.map.iter();
+        Self { iter }
+    }
+}
+
+impl<'a> Iterator
+for ImportsIterator<'a> {
+    type Item = (&'a str, &'a str, &'a Extern);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter
+            .next()
+            .map(|(k, v)| {
+                (k.0.as_str(), k.1.as_str(), v)
+            })
     }
 }
 

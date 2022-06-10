@@ -167,6 +167,10 @@ impl Engine for StaticlibEngine {
         self.deserialize(&vec[..])
     }
 
+    fn multi_threaded(&self) -> bool {
+        self.inner().features().threads
+    }
+
     fn id(&self) -> &EngineId {
         &self.engine_id
     }
