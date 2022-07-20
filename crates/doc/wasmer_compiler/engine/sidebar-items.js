@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["artifact",""],["error","The WebAssembly possible errors"],["inner","Engine trait and associated types."],["resolver","Custom resolution for external references."],["trap",""],["tunables",""],["universal","Universal backend for Wasmer compilers."]]});

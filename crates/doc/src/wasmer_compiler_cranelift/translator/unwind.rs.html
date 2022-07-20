@@ -67,6 +67,7 @@
 <span id="65">65</span>
 <span id="66">66</span>
 <span id="67">67</span>
+<span id="68">68</span>
 </pre><pre class="rust"><code><span class="doccomment">//! A `Compilation` contains the compiled function bodies for a WebAssembly</span>
 <span class="doccomment">//! module.</span>
 
@@ -74,7 +75,8 @@
 <span class="kw">use</span> <span class="ident">cranelift_codegen::isa::unwind</span>::{<span class="ident">systemv::UnwindInfo</span> <span class="kw">as</span> <span class="ident">DwarfFDE</span>, <span class="ident">UnwindInfo</span>};
 <span class="kw">use</span> <span class="ident">cranelift_codegen::print_errors::pretty_error</span>;
 <span class="kw">use</span> <span class="ident">cranelift_codegen</span>::{<span class="ident">isa</span>, <span class="ident">Context</span>};
-<span class="kw">use</span> <span class="ident">wasmer_compiler</span>::{<span class="ident">CompileError</span>, <span class="ident">CompiledFunctionUnwindInfo</span>};
+<span class="kw">use</span> <span class="ident">wasmer_types::CompileError</span>;
+<span class="kw">use</span> <span class="ident">wasmer_types::CompiledFunctionUnwindInfo</span>;
 
 <span class="doccomment">/// Cranelift specific unwind info</span>
 <span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum</span> <span class="ident">CraneliftUnwindInfo</span> {
@@ -83,7 +85,7 @@
     <span class="ident">WindowsX64</span>(<span class="ident">Vec</span><span class="op">&lt;</span><span class="ident">u8</span><span class="op">&gt;</span>),
     <span class="doccomment">/// Dwarf FDE</span>
     <span class="attribute">#[<span class="ident">cfg</span>(<span class="ident">feature</span> <span class="op">=</span> <span class="string">&quot;unwind&quot;</span>)]</span>
-    <span class="ident">FDE</span>(<span class="ident">DwarfFDE</span>),
+    <span class="ident">Fde</span>(<span class="ident">DwarfFDE</span>),
     <span class="doccomment">/// No Unwind info attached</span>
     <span class="prelude-val">None</span>,
 }
@@ -121,7 +123,7 @@
             <span class="ident">unwind</span>.<span class="ident">emit</span>(<span class="kw-2">&amp;mut</span> <span class="ident">data</span>[..]);
             <span class="prelude-val">Ok</span>(<span class="ident">CraneliftUnwindInfo::WindowsX64</span>(<span class="ident">data</span>))
         }
-        <span class="prelude-val">Some</span>(<span class="ident">UnwindInfo::SystemV</span>(<span class="ident">unwind</span>)) =&gt; <span class="prelude-val">Ok</span>(<span class="ident">CraneliftUnwindInfo::FDE</span>(<span class="ident">unwind</span>)),
+        <span class="prelude-val">Some</span>(<span class="ident">UnwindInfo::SystemV</span>(<span class="ident">unwind</span>)) =&gt; <span class="prelude-val">Ok</span>(<span class="ident">CraneliftUnwindInfo::Fde</span>(<span class="ident">unwind</span>)),
         <span class="prelude-val">Some</span>(<span class="kw">_</span>) <span class="op">|</span> <span class="prelude-val">None</span> =&gt; <span class="prelude-val">Ok</span>(<span class="ident">CraneliftUnwindInfo::None</span>),
     }
 }

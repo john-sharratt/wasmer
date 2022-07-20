@@ -437,13 +437,15 @@
 <span id="435">435</span>
 <span id="436">436</span>
 <span id="437">437</span>
+<span id="438">438</span>
+<span id="439">439</span>
 </pre><pre class="rust"><code><span class="kw">use</span> <span class="ident">inkwell</span>::{
     <span class="ident">basic_block::BasicBlock</span>,
     <span class="ident">values</span>::{<span class="ident">BasicValue</span>, <span class="ident">BasicValueEnum</span>, <span class="ident">PhiValue</span>},
 };
 <span class="kw">use</span> <span class="ident">smallvec::SmallVec</span>;
 <span class="kw">use</span> <span class="ident">std::ops</span>::{<span class="ident">BitAnd</span>, <span class="ident">BitOr</span>, <span class="ident">BitOrAssign</span>};
-<span class="kw">use</span> <span class="ident">wasmer_compiler::CompileError</span>;
+<span class="kw">use</span> <span class="ident">wasmer_types::CompileError</span>;
 
 <span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Debug</span>)]</span>
 <span class="kw">pub</span> <span class="kw">enum</span> <span class="ident">ControlFrame</span><span class="op">&lt;</span><span class="lifetime">&#39;ctx</span><span class="op">&gt;</span> {
@@ -740,6 +742,7 @@
         <span class="prelude-val">Ok</span>((<span class="ident">v1</span>, <span class="ident">v2</span>))
     }
 
+    <span class="attribute">#[<span class="ident">allow</span>(<span class="ident">clippy::type_complexity</span>)]</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">pop2_extra</span>(
         <span class="kw-2">&amp;mut</span> <span class="self">self</span>,
     ) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span>
@@ -770,6 +773,7 @@
         <span class="prelude-val">Ok</span>((<span class="ident">v1</span>, <span class="ident">v2</span>, <span class="ident">v3</span>))
     }
 
+    <span class="attribute">#[<span class="ident">allow</span>(<span class="ident">clippy::type_complexity</span>)]</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">pop3_extra</span>(
         <span class="kw-2">&amp;mut</span> <span class="self">self</span>,
     ) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span>

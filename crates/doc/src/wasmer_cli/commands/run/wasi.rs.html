@@ -133,12 +133,27 @@
 <span id="131">131</span>
 <span id="132">132</span>
 <span id="133">133</span>
+<span id="134">134</span>
+<span id="135">135</span>
+<span id="136">136</span>
+<span id="137">137</span>
+<span id="138">138</span>
+<span id="139">139</span>
+<span id="140">140</span>
+<span id="141">141</span>
+<span id="142">142</span>
+<span id="143">143</span>
+<span id="144">144</span>
+<span id="145">145</span>
 </pre><pre class="rust"><code><span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::utils</span>::{<span class="ident">parse_envvar</span>, <span class="ident">parse_mapdir</span>};
 <span class="kw">use</span> <span class="ident">anyhow::Result</span>;
 <span class="kw">use</span> <span class="ident">std::collections::BTreeSet</span>;
 <span class="kw">use</span> <span class="ident">std::path::PathBuf</span>;
-<span class="kw">use</span> <span class="ident">wasmer</span>::{<span class="ident">Instance</span>, <span class="ident">Module</span>, <span class="ident">RuntimeError</span>, <span class="ident">Val</span>};
-<span class="kw">use</span> <span class="ident">wasmer_wasi</span>::{<span class="ident">get_wasi_versions</span>, <span class="ident">WasiError</span>, <span class="ident">WasiState</span>, <span class="ident">WasiVersion</span>};
+<span class="kw">use</span> <span class="ident">wasmer</span>::{<span class="ident">AsStoreMut</span>, <span class="ident">FunctionEnv</span>, <span class="ident">Instance</span>, <span class="ident">Module</span>, <span class="ident">RuntimeError</span>, <span class="ident">Value</span>};
+<span class="kw">use</span> <span class="ident">wasmer_wasi</span>::{
+    <span class="ident">get_wasi_versions</span>, <span class="ident">import_object_for_all_wasi_versions</span>, <span class="ident">is_wasix_module</span>, <span class="ident">WasiEnv</span>, <span class="ident">WasiError</span>,
+    <span class="ident">WasiState</span>, <span class="ident">WasiVersion</span>,
+};
 
 <span class="kw">use</span> <span class="ident">structopt::StructOpt</span>;
 
@@ -176,7 +191,10 @@
 
     <span class="doccomment">/// Enable experimental IO devices</span>
     <span class="attribute">#[<span class="ident">cfg</span>(<span class="ident">feature</span> <span class="op">=</span> <span class="string">&quot;experimental-io-devices&quot;</span>)]</span>
-    <span class="attribute">#[<span class="ident">structopt</span>(<span class="ident">long</span> <span class="op">=</span> <span class="string">&quot;enable-experimental-io-devices&quot;</span>)]</span>
+    <span class="attribute">#[<span class="ident">cfg_attr</span>(
+        <span class="ident">feature</span> <span class="op">=</span> <span class="string">&quot;experimental-io-devices&quot;</span>,
+        <span class="ident">structopt</span>(<span class="ident">long</span> <span class="op">=</span> <span class="string">&quot;enable-experimental-io-devices&quot;</span>)
+    )]</span>
     <span class="ident">enable_experimental_io_devices</span>: <span class="ident">bool</span>,
 
     <span class="doccomment">/// Allow WASI modules to import multiple versions of WASI without a warning.</span>
@@ -194,23 +212,24 @@
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">get_versions</span>(<span class="ident">module</span>: <span class="kw-2">&amp;</span><span class="ident">Module</span>) -&gt; <span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="ident">BTreeSet</span><span class="op">&lt;</span><span class="ident">WasiVersion</span><span class="op">&gt;</span><span class="op">&gt;</span> {
         <span class="comment">// Get the wasi version in strict mode, so no other imports are</span>
         <span class="comment">// allowed.</span>
-        <span class="ident">get_wasi_versions</span>(<span class="kw-2">&amp;</span><span class="ident">module</span>, <span class="bool-val">true</span>)
+        <span class="ident">get_wasi_versions</span>(<span class="ident">module</span>, <span class="bool-val">true</span>)
     }
 
     <span class="doccomment">/// Checks if a given module has any WASI imports at all.</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">has_wasi_imports</span>(<span class="ident">module</span>: <span class="kw-2">&amp;</span><span class="ident">Module</span>) -&gt; <span class="ident">bool</span> {
         <span class="comment">// Get the wasi version in non-strict mode, so no other imports</span>
         <span class="comment">// are allowed</span>
-        <span class="ident">get_wasi_versions</span>(<span class="kw-2">&amp;</span><span class="ident">module</span>, <span class="bool-val">false</span>).<span class="ident">is_some</span>()
+        <span class="ident">get_wasi_versions</span>(<span class="ident">module</span>, <span class="bool-val">false</span>).<span class="ident">is_some</span>()
     }
 
     <span class="doccomment">/// Helper function for instantiating a module with Wasi imports for the `Run` command.</span>
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">instantiate</span>(
         <span class="kw-2">&amp;</span><span class="self">self</span>,
+        <span class="ident">store</span>: <span class="kw-2">&amp;mut</span> <span class="kw">impl</span> <span class="ident">AsStoreMut</span>,
         <span class="ident">module</span>: <span class="kw-2">&amp;</span><span class="ident">Module</span>,
         <span class="ident">program_name</span>: <span class="ident">String</span>,
         <span class="ident">args</span>: <span class="ident">Vec</span><span class="op">&lt;</span><span class="ident">String</span><span class="op">&gt;</span>,
-    ) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="ident">Instance</span><span class="op">&gt;</span> {
+    ) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span>(<span class="ident">FunctionEnv</span><span class="op">&lt;</span><span class="ident">WasiEnv</span><span class="op">&gt;</span>, <span class="ident">Instance</span>)<span class="op">&gt;</span> {
         <span class="kw">let</span> <span class="ident">args</span> <span class="op">=</span> <span class="ident">args</span>.<span class="ident">iter</span>().<span class="ident">cloned</span>().<span class="ident">map</span>(<span class="op">|</span><span class="ident">arg</span><span class="op">|</span> <span class="ident">arg</span>.<span class="ident">into_bytes</span>());
 
         <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">wasi_state_builder</span> <span class="op">=</span> <span class="ident">WasiState::new</span>(<span class="ident">program_name</span>);
@@ -228,15 +247,20 @@
             }
         }
 
-        <span class="kw">let</span> <span class="ident">wasi_env</span> <span class="op">=</span> <span class="ident">wasi_state_builder</span>.<span class="ident">finalize</span>()<span class="question-mark">?</span>;
-        <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">wasi_thread</span> <span class="op">=</span> <span class="ident">wasi_env</span>.<span class="ident">new_thread</span>();
-        <span class="kw">let</span> <span class="ident">import_object</span> <span class="op">=</span> <span class="ident">wasi_thread</span>.<span class="ident">import_object_for_all_wasi_versions</span>(<span class="kw-2">&amp;</span><span class="ident">module</span>)<span class="question-mark">?</span>;
-        <span class="kw">let</span> <span class="ident">instance</span> <span class="op">=</span> <span class="ident">Instance::new</span>(<span class="kw-2">&amp;</span><span class="ident">module</span>, <span class="kw-2">&amp;</span><span class="ident">import_object</span>)<span class="question-mark">?</span>;
-        <span class="prelude-val">Ok</span>(<span class="ident">instance</span>)
+        <span class="kw">let</span> <span class="ident">wasi_env</span> <span class="op">=</span> <span class="ident">wasi_state_builder</span>.<span class="ident">finalize</span>(<span class="ident">store</span>)<span class="question-mark">?</span>;
+        <span class="ident">wasi_env</span>.<span class="ident">env</span>.<span class="ident">as_mut</span>(<span class="ident">store</span>).<span class="ident">state</span>.<span class="ident">fs</span>.<span class="ident">is_wasix</span>.<span class="ident">store</span>(
+            <span class="ident">is_wasix_module</span>(<span class="ident">module</span>),
+            <span class="ident">std::sync::atomic::Ordering::Release</span>,
+        );
+        <span class="kw">let</span> <span class="ident">import_object</span> <span class="op">=</span> <span class="ident">import_object_for_all_wasi_versions</span>(<span class="ident">store</span>, <span class="kw-2">&amp;</span><span class="ident">wasi_env</span>.<span class="ident">env</span>);
+        <span class="kw">let</span> <span class="ident">instance</span> <span class="op">=</span> <span class="ident">Instance::new</span>(<span class="ident">store</span>, <span class="ident">module</span>, <span class="kw-2">&amp;</span><span class="ident">import_object</span>)<span class="question-mark">?</span>;
+        <span class="kw">let</span> <span class="ident">memory</span> <span class="op">=</span> <span class="ident">instance</span>.<span class="ident">exports</span>.<span class="ident">get_memory</span>(<span class="string">&quot;memory&quot;</span>)<span class="question-mark">?</span>;
+        <span class="ident">wasi_env</span>.<span class="ident">data_mut</span>(<span class="ident">store</span>).<span class="ident">set_memory</span>(<span class="ident">memory</span>.<span class="ident">clone</span>());
+        <span class="prelude-val">Ok</span>((<span class="ident">wasi_env</span>.<span class="ident">env</span>, <span class="ident">instance</span>))
     }
 
     <span class="doccomment">/// Helper function for handling the result of a Wasi _start function.</span>
-    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">handle_result</span>(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="ident">result</span>: <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="ident">Box</span><span class="op">&lt;</span>[<span class="ident">Val</span>]<span class="op">&gt;</span>, <span class="ident">RuntimeError</span><span class="op">&gt;</span>) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span>()<span class="op">&gt;</span> {
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">handle_result</span>(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="ident">result</span>: <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="ident">Box</span><span class="op">&lt;</span>[<span class="ident">Value</span>]<span class="op">&gt;</span>, <span class="ident">RuntimeError</span><span class="op">&gt;</span>) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span>()<span class="op">&gt;</span> {
         <span class="kw">match</span> <span class="ident">result</span> {
             <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Ok</span>(()),
             <span class="prelude-val">Err</span>(<span class="ident">err</span>) =&gt; {
@@ -257,7 +281,7 @@
         <span class="kw">use</span> <span class="ident">std::env</span>;
         <span class="kw">let</span> <span class="ident">dir</span> <span class="op">=</span> <span class="ident">env::var_os</span>(<span class="string">&quot;WASMER_BINFMT_MISC_PREOPEN&quot;</span>)
             .<span class="ident">map</span>(<span class="ident">Into::into</span>)
-            .<span class="ident">unwrap_or</span>(<span class="ident">PathBuf::from</span>(<span class="string">&quot;.&quot;</span>));
+            .<span class="ident">unwrap_or_else</span>(<span class="op">|</span><span class="op">|</span> <span class="ident">PathBuf::from</span>(<span class="string">&quot;.&quot;</span>));
         <span class="prelude-val">Ok</span>(<span class="self">Self</span> {
             <span class="ident">deny_multiple_wasi_versions</span>: <span class="bool-val">true</span>,
             <span class="ident">env_vars</span>: <span class="ident">env::vars</span>().<span class="ident">collect</span>(),

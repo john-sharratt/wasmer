@@ -372,8 +372,21 @@
 <span id="370">370</span>
 <span id="371">371</span>
 <span id="372">372</span>
+<span id="373">373</span>
+<span id="374">374</span>
+<span id="375">375</span>
+<span id="376">376</span>
+<span id="377">377</span>
+<span id="378">378</span>
+<span id="379">379</span>
+<span id="380">380</span>
+<span id="381">381</span>
+<span id="382">382</span>
+<span id="383">383</span>
+<span id="384">384</span>
+<span id="385">385</span>
 </pre><pre class="rust"><code><span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::RuntimeError</span>;
-<span class="kw">use</span> <span class="kw">crate</span>::{<span class="ident">Memory</span>, <span class="ident">Memory32</span>, <span class="ident">Memory64</span>, <span class="ident">WasmPtr</span>};
+<span class="kw">use</span> <span class="kw">crate</span>::{<span class="ident">Memory</span>, <span class="ident">Memory32</span>, <span class="ident">Memory64</span>, <span class="ident">MemorySize</span>, <span class="ident">WasmPtr</span>};
 <span class="kw">use</span> <span class="ident">std</span>::{
     <span class="ident">convert::TryInto</span>,
     <span class="ident">fmt</span>,
@@ -385,6 +398,9 @@
 };
 <span class="kw">use</span> <span class="ident">thiserror::Error</span>;
 <span class="kw">use</span> <span class="ident">wasmer_types::ValueType</span>;
+
+<span class="kw">use</span> <span class="ident"><span class="kw">super</span>::externals::memory::MemoryBuffer</span>;
+<span class="kw">use</span> <span class="ident"><span class="kw">super</span>::store::AsStoreRef</span>;
 
 <span class="doccomment">/// Error for invalid [`Memory`] access.</span>
 <span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">Copy</span>, <span class="ident">Debug</span>, <span class="ident">Error</span>)]</span>
@@ -403,12 +419,12 @@
 
 <span class="kw">impl</span> <span class="ident">From</span><span class="op">&lt;</span><span class="ident">MemoryAccessError</span><span class="op">&gt;</span> <span class="kw">for</span> <span class="ident">RuntimeError</span> {
     <span class="kw">fn</span> <span class="ident">from</span>(<span class="ident">err</span>: <span class="ident">MemoryAccessError</span>) -&gt; <span class="self">Self</span> {
-        <span class="ident">RuntimeError::new</span>(<span class="ident">err</span>.<span class="ident">to_string</span>())
+        <span class="ident"><span class="self">Self</span>::new</span>(<span class="ident">err</span>.<span class="ident">to_string</span>())
     }
 }
 <span class="kw">impl</span> <span class="ident">From</span><span class="op">&lt;</span><span class="ident">FromUtf8Error</span><span class="op">&gt;</span> <span class="kw">for</span> <span class="ident">MemoryAccessError</span> {
     <span class="kw">fn</span> <span class="ident">from</span>(<span class="ident">_err</span>: <span class="ident">FromUtf8Error</span>) -&gt; <span class="self">Self</span> {
-        <span class="ident">MemoryAccessError::NonUtf8String</span>
+        <span class="ident"><span class="self">Self</span>::NonUtf8String</span>
     }
 }
 
@@ -425,7 +441,7 @@
 <span class="doccomment">/// thread.</span>
 <span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">Copy</span>)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">WasmRef</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">T</span>: <span class="ident">ValueType</span><span class="op">&gt;</span> {
-    <span class="ident">memory</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span>,
+    <span class="ident">buffer</span>: <span class="ident">MemoryBuffer</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span><span class="op">&gt;</span>,
     <span class="ident">offset</span>: <span class="ident">u64</span>,
     <span class="ident">marker</span>: <span class="ident">PhantomData</span><span class="op">&lt;</span><span class="kw-2">*mut</span> <span class="ident">T</span><span class="op">&gt;</span>,
 }
@@ -433,9 +449,9 @@
 <span class="kw">impl</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">T</span>: <span class="ident">ValueType</span><span class="op">&gt;</span> <span class="ident">WasmRef</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">T</span><span class="op">&gt;</span> {
     <span class="doccomment">/// Creates a new `WasmRef` at the given offset in a memory.</span>
     <span class="attribute">#[<span class="ident">inline</span>]</span>
-    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">new</span>(<span class="ident">memory</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span>, <span class="ident">offset</span>: <span class="ident">u64</span>) -&gt; <span class="self">Self</span> {
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">new</span>(<span class="ident">store</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="kw">impl</span> <span class="ident">AsStoreRef</span>, <span class="ident">memory</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span>, <span class="ident">offset</span>: <span class="ident">u64</span>) -&gt; <span class="self">Self</span> {
         <span class="self">Self</span> {
-            <span class="ident">memory</span>,
+            <span class="ident">buffer</span>: <span class="ident">memory</span>.<span class="ident">buffer</span>(<span class="ident">store</span>),
             <span class="ident">offset</span>,
             <span class="ident">marker</span>: <span class="ident">PhantomData</span>,
         }
@@ -459,10 +475,15 @@
         <span class="ident">WasmPtr::new</span>(<span class="self">self</span>.<span class="ident">offset</span>)
     }
 
-    <span class="doccomment">/// Get a reference to the Wasm memory backing this reference.</span>
+    <span class="doccomment">/// Get a `WasmPtr` fror this `WasmRef`.</span>
     <span class="attribute">#[<span class="ident">inline</span>]</span>
-    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">memory</span>(<span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span> {
-        <span class="self">self</span>.<span class="ident">memory</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">as_ptr</span><span class="op">&lt;</span><span class="ident">M</span>: <span class="ident">MemorySize</span><span class="op">&gt;</span>(<span class="self">self</span>) -&gt; <span class="ident">WasmPtr</span><span class="op">&lt;</span><span class="ident">T</span>, <span class="ident">M</span><span class="op">&gt;</span> {
+        <span class="kw">let</span> <span class="ident">offset</span>: <span class="ident">M::Offset</span> <span class="op">=</span> <span class="self">self</span>
+            .<span class="ident">offset</span>
+            .<span class="ident">try_into</span>()
+            .<span class="ident">map_err</span>(<span class="op">|</span><span class="kw">_</span><span class="op">|</span> <span class="string">&quot;invalid offset into memory&quot;</span>)
+            .<span class="ident">unwrap</span>();
+        <span class="ident">WasmPtr</span>::<span class="op">&lt;</span><span class="ident">T</span>, <span class="ident">M</span><span class="op">&gt;</span><span class="ident">::new</span>(<span class="ident">offset</span>)
     }
 
     <span class="doccomment">/// Reads the location pointed to by this `WasmRef`.</span>
@@ -471,7 +492,7 @@
         <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">out</span> <span class="op">=</span> <span class="ident">MaybeUninit::uninit</span>();
         <span class="kw">let</span> <span class="ident">buf</span> <span class="op">=</span>
             <span class="kw">unsafe</span> { <span class="ident">slice::from_raw_parts_mut</span>(<span class="ident">out</span>.<span class="ident">as_mut_ptr</span>() <span class="kw">as</span> <span class="kw-2">*mut</span> <span class="ident">u8</span>, <span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>()) };
-        <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">read</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">buf</span>)<span class="question-mark">?</span>;
+        <span class="self">self</span>.<span class="ident">buffer</span>.<span class="ident">read</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">buf</span>)<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(<span class="kw">unsafe</span> { <span class="ident">out</span>.<span class="ident">assume_init</span>() })
     }
 
@@ -487,7 +508,7 @@
         };
         <span class="ident">val</span>.<span class="ident">zero_padding_bytes</span>(<span class="ident">data</span>);
         <span class="kw">let</span> <span class="ident">data</span> <span class="op">=</span> <span class="kw">unsafe</span> { <span class="ident">slice::from_raw_parts</span>(<span class="ident">data</span>.<span class="ident">as_ptr</span>() <span class="kw">as</span> <span class="kw-2">*const</span> <span class="kw">_</span>, <span class="ident">data</span>.<span class="ident">len</span>()) };
-        <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">write</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">data</span>)
+        <span class="self">self</span>.<span class="ident">buffer</span>.<span class="ident">write</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">data</span>)
     }
 }
 
@@ -514,7 +535,7 @@
 <span class="doccomment">/// thread.</span>
 <span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>, <span class="ident">Copy</span>)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">WasmSlice</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">T</span>: <span class="ident">ValueType</span><span class="op">&gt;</span> {
-    <span class="ident">memory</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span>,
+    <span class="ident">buffer</span>: <span class="ident">MemoryBuffer</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span><span class="op">&gt;</span>,
     <span class="ident">offset</span>: <span class="ident">u64</span>,
     <span class="ident">len</span>: <span class="ident">u64</span>,
     <span class="ident">marker</span>: <span class="ident">PhantomData</span><span class="op">&lt;</span><span class="kw-2">*mut</span> <span class="ident">T</span><span class="op">&gt;</span>,
@@ -526,7 +547,12 @@
     <span class="doccomment">///</span>
     <span class="doccomment">/// Returns a `MemoryAccessError` if the slice length overflows.</span>
     <span class="attribute">#[<span class="ident">inline</span>]</span>
-    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">new</span>(<span class="ident">memory</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span>, <span class="ident">offset</span>: <span class="ident">u64</span>, <span class="ident">len</span>: <span class="ident">u64</span>) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="self">Self</span>, <span class="ident">MemoryAccessError</span><span class="op">&gt;</span> {
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">new</span>(
+        <span class="ident">store</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="kw">impl</span> <span class="ident">AsStoreRef</span>,
+        <span class="ident">memory</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span>,
+        <span class="ident">offset</span>: <span class="ident">u64</span>,
+        <span class="ident">len</span>: <span class="ident">u64</span>,
+    ) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="self">Self</span>, <span class="ident">MemoryAccessError</span><span class="op">&gt;</span> {
         <span class="kw">let</span> <span class="ident">total_len</span> <span class="op">=</span> <span class="ident">len</span>
             .<span class="ident">checked_mul</span>(<span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>() <span class="kw">as</span> <span class="ident">u64</span>)
             .<span class="ident">ok_or</span>(<span class="ident">MemoryAccessError::Overflow</span>)<span class="question-mark">?</span>;
@@ -534,7 +560,7 @@
             .<span class="ident">checked_add</span>(<span class="ident">total_len</span>)
             .<span class="ident">ok_or</span>(<span class="ident">MemoryAccessError::Overflow</span>)<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(<span class="self">Self</span> {
-            <span class="ident">memory</span>,
+            <span class="ident">buffer</span>: <span class="ident">memory</span>.<span class="ident">buffer</span>(<span class="ident">store</span>),
             <span class="ident">offset</span>,
             <span class="ident">len</span>,
             <span class="ident">marker</span>: <span class="ident">PhantomData</span>,
@@ -565,10 +591,10 @@
         <span class="self">self</span>.<span class="ident">len</span>
     }
 
-    <span class="doccomment">/// Get a reference to the Wasm memory backing this reference.</span>
+    <span class="doccomment">/// Returns `true` if the number of elements is 0.</span>
     <span class="attribute">#[<span class="ident">inline</span>]</span>
-    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">memory</span>(<span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> <span class="ident">Memory</span> {
-        <span class="self">self</span>.<span class="ident">memory</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">is_empty</span>(<span class="self">self</span>) -&gt; <span class="ident">bool</span> {
+        <span class="self">self</span>.<span class="ident">len</span> <span class="op">==</span> <span class="number">0</span>
     }
 
     <span class="doccomment">/// Get a `WasmRef` to an element in the slice.</span>
@@ -579,7 +605,7 @@
         }
         <span class="kw">let</span> <span class="ident">offset</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">offset</span> <span class="op">+</span> <span class="ident">idx</span> <span class="op">*</span> <span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>() <span class="kw">as</span> <span class="ident">u64</span>;
         <span class="ident">WasmRef</span> {
-            <span class="ident">memory</span>: <span class="self">self</span>.<span class="ident">memory</span>,
+            <span class="ident">buffer</span>: <span class="self">self</span>.<span class="ident">buffer</span>,
             <span class="ident">offset</span>,
             <span class="ident">marker</span>: <span class="ident">PhantomData</span>,
         }
@@ -593,7 +619,7 @@
         }
         <span class="kw">let</span> <span class="ident">offset</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">offset</span> <span class="op">+</span> <span class="ident">range</span>.<span class="ident">start</span> <span class="op">*</span> <span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>() <span class="kw">as</span> <span class="ident">u64</span>;
         <span class="self">Self</span> {
-            <span class="ident">memory</span>: <span class="self">self</span>.<span class="ident">memory</span>,
+            <span class="ident">buffer</span>: <span class="self">self</span>.<span class="ident">buffer</span>,
             <span class="ident">offset</span>,
             <span class="ident">len</span>: <span class="ident">range</span>.<span class="ident">end</span> <span class="op">-</span> <span class="ident">range</span>.<span class="ident">start</span>,
             <span class="ident">marker</span>: <span class="ident">PhantomData</span>,
@@ -634,7 +660,7 @@
                 <span class="ident">buf</span>.<span class="ident">len</span>() <span class="op">*</span> <span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>(),
             )
         };
-        <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">read_uninit</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)<span class="question-mark">?</span>;
+        <span class="self">self</span>.<span class="ident">buffer</span>.<span class="ident">read_uninit</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(())
     }
 
@@ -659,7 +685,7 @@
                 <span class="ident">buf</span>.<span class="ident">len</span>() <span class="op">*</span> <span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>(),
             )
         };
-        <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">read_uninit</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)<span class="question-mark">?</span>;
+        <span class="self">self</span>.<span class="ident">buffer</span>.<span class="ident">read_uninit</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)<span class="question-mark">?</span>;
         <span class="prelude-val">Ok</span>(<span class="kw">unsafe</span> { <span class="ident">slice::from_raw_parts_mut</span>(<span class="ident">buf</span>.<span class="ident">as_mut_ptr</span>() <span class="kw">as</span> <span class="kw-2">*mut</span> <span class="ident">T</span>, <span class="ident">buf</span>.<span class="ident">len</span>()) })
     }
 
@@ -676,7 +702,7 @@
         <span class="kw">let</span> <span class="ident">bytes</span> <span class="op">=</span> <span class="kw">unsafe</span> {
             <span class="ident">slice::from_raw_parts</span>(<span class="ident">data</span>.<span class="ident">as_ptr</span>() <span class="kw">as</span> <span class="kw-2">*const</span> <span class="ident">u8</span>, <span class="ident">data</span>.<span class="ident">len</span>() <span class="op">*</span> <span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>())
         };
-        <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">write</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)
+        <span class="self">self</span>.<span class="ident">buffer</span>.<span class="ident">write</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)
     }
 
     <span class="doccomment">/// Reads this `WasmSlice` into a `Vec`.</span>
@@ -690,7 +716,7 @@
                 <span class="ident">len</span> <span class="op">*</span> <span class="ident">mem::size_of</span>::<span class="op">&lt;</span><span class="ident">T</span><span class="op">&gt;</span>(),
             )
         };
-        <span class="self">self</span>.<span class="ident">memory</span>.<span class="ident">read_uninit</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)<span class="question-mark">?</span>;
+        <span class="self">self</span>.<span class="ident">buffer</span>.<span class="ident">read_uninit</span>(<span class="self">self</span>.<span class="ident">offset</span>, <span class="ident">bytes</span>)<span class="question-mark">?</span>;
         <span class="kw">unsafe</span> {
             <span class="ident">vec</span>.<span class="ident">set_len</span>(<span class="ident">len</span>);
         }
@@ -717,7 +743,7 @@
     <span class="kw">type</span> <span class="ident">Item</span> <span class="op">=</span> <span class="ident">WasmRef</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">T</span><span class="op">&gt;</span>;
 
     <span class="kw">fn</span> <span class="ident">next</span>(<span class="kw-2">&amp;mut</span> <span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="ident"><span class="self">Self</span>::Item</span><span class="op">&gt;</span> {
-        <span class="kw">if</span> <span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">len</span>() <span class="op">!</span><span class="op">=</span> <span class="number">0</span> {
+        <span class="kw">if</span> <span class="op">!</span><span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">is_empty</span>() {
             <span class="kw">let</span> <span class="ident">elem</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">index</span>(<span class="number">0</span>);
             <span class="self">self</span>.<span class="ident">slice</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">subslice</span>(<span class="number">1</span>..<span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">len</span>());
             <span class="prelude-val">Some</span>(<span class="ident">elem</span>)
@@ -733,7 +759,7 @@
 
 <span class="kw">impl</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">T</span>: <span class="ident">ValueType</span><span class="op">&gt;</span> <span class="ident">DoubleEndedIterator</span> <span class="kw">for</span> <span class="ident">WasmSliceIter</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">T</span><span class="op">&gt;</span> {
     <span class="kw">fn</span> <span class="ident">next_back</span>(<span class="kw-2">&amp;mut</span> <span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="ident"><span class="self">Self</span>::Item</span><span class="op">&gt;</span> {
-        <span class="kw">if</span> <span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">len</span>() <span class="op">!</span><span class="op">=</span> <span class="number">0</span> {
+        <span class="kw">if</span> <span class="op">!</span><span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">is_empty</span>() {
             <span class="kw">let</span> <span class="ident">elem</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">index</span>(<span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">len</span>() <span class="op">-</span> <span class="number">1</span>);
             <span class="self">self</span>.<span class="ident">slice</span> <span class="op">=</span> <span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">subslice</span>(<span class="number">0</span>..<span class="self">self</span>.<span class="ident">slice</span>.<span class="ident">len</span>() <span class="op">-</span> <span class="number">1</span>);
             <span class="prelude-val">Some</span>(<span class="ident">elem</span>)
