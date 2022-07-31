@@ -281,6 +281,7 @@
 <span id="279">279</span>
 <span id="280">280</span>
 <span id="281">281</span>
+<span id="282">282</span>
 </pre><pre class="rust"><code><span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::exports</span>::{<span class="ident">ExportError</span>, <span class="ident">Exportable</span>};
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::externals::Extern</span>;
 <span class="kw">use</span> <span class="ident"><span class="kw">crate</span>::sys::store</span>::{<span class="ident">AsStoreMut</span>, <span class="ident">AsStoreRef</span>};
@@ -317,6 +318,7 @@
 }
 
 <span class="kw">impl</span> <span class="ident">Memory</span> {
+    <span class="attribute">#[<span class="ident">cfg</span>(<span class="ident">feature</span> <span class="op">=</span> <span class="string">&quot;compiler&quot;</span>)]</span>
     <span class="doccomment">/// Creates a new host `Memory` from the provided [`MemoryType`].</span>
     <span class="doccomment">///</span>
     <span class="doccomment">/// This function will construct the `Memory` using the store</span>
