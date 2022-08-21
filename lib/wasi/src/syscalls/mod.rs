@@ -403,7 +403,15 @@ pub fn clock_time_get<M: MemorySize>(
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
-    let t_out = wasi_try!(platform_clock_time_get(clock_id, precision));
+    let mut t_out = wasi_try!(platform_clock_time_get(clock_id, precision));
+
+    {
+        let guard = env.state.clock_offset.lock().unwrap();
+        if let Some(offset) = guard.get(&clock_id) {
+            t_out += *offset;
+        }
+    };
+
     wasi_try_mem!(time.write(&memory, t_out as __wasi_timestamp_t));
 
     let result = __WASI_ESUCCESS;
@@ -413,6 +421,38 @@ pub fn clock_time_get<M: MemorySize>(
         result
     );
     result
+}
+
+/// ### `clock_time_set()`
+/// Set the time of the specified clock
+/// Inputs:
+/// - `__wasi_clockid_t clock_id`
+///     The ID of the clock to query
+/// - `__wasi_timestamp_t *time`
+///     The value of the clock in nanoseconds
+pub fn clock_time_set<M: MemorySize>(
+    ctx: FunctionEnvMut<'_, WasiEnv>,
+    clock_id: __wasi_clockid_t,
+    time: __wasi_timestamp_t,
+) -> __wasi_errno_t {
+    trace!(
+        "wasi::clock_time_set clock_id: {}, time: {}",
+        clock_id, time
+    );
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+
+    let precision = 1 as __wasi_timestamp_t;
+    let t_now = wasi_try!(platform_clock_time_get(clock_id, precision));
+    let t_now = t_now as i64;
+
+    let t_target = time as i64;
+    let t_offset = t_target - t_now;
+    
+    let mut guard = env.state.clock_offset.lock().unwrap();
+    guard.insert(clock_id, t_offset);
+
+    __WASI_ESUCCESS
 }
 
 /// ### `environ_get()`
@@ -1267,7 +1307,9 @@ pub fn fd_read<M: MemorySize>(
             bytes_read
         }
     };
+
     let bytes_read: M::Offset = wasi_try_ok!(bytes_read.try_into().map_err(|_| __WASI_EOVERFLOW));
+    trace!("wasi::fd_read: bytes_read={}", bytes_read);
     wasi_try_mem_ok!(nread_ref.write(bytes_read));
 
     Ok(__WASI_ESUCCESS)
@@ -3527,19 +3569,21 @@ pub fn thread_spawn<M: MemorySize>(
     #[cfg(feature = "compiler")]
     let engine = ctx.as_store_ref().engine().clone();
 
+    // Build a new store that will be passed to the thread
+    #[cfg(feature = "compiler")]
+    let mut store = Store::new(engine);
+    #[cfg(not(feature = "compiler"))]
+    let mut store = Store::default();
+
     // This function takes in memory and a store and creates a context that
     // can be used to call back into the process
     let create_ctx = {
         let state = env.state.clone();
         let wasi_env = env.clone();
         let thread_id = thread_handle.id();
-        move |module: Module, memory: VMMemory|
+        move |mut store: Store, module: Module, memory: VMMemory|
         {
             // We need to reconstruct some things
-            #[cfg(feature = "compiler")]
-            let mut store = Store::new(engine);
-            #[cfg(not(feature = "compiler"))]
-            let mut store = Store::default();
             let module = module.clone();
             let memory = Memory::new_from_existing(&mut store, memory);
 
@@ -3566,8 +3610,6 @@ pub fn thread_spawn<M: MemorySize>(
                     thread_spawn: instance.exports.get_typed_function(&store, "_start_thread").ok(),
                     react: instance.exports.get_typed_function(&store, "_react").ok(),
                     thread_local_destroy: instance.exports.get_typed_function(&store, "_thread_local_destroy").ok(),
-                    _malloc: instance.exports.get_typed_function(&store, "_malloc").ok(),
-                    _free: instance.exports.get_typed_function(&store, "_free").ok()
                 }
             );
             trace!("threading: new context created for thread_id = {}", thread_id.raw());
@@ -3591,8 +3633,12 @@ pub fn thread_spawn<M: MemorySize>(
                 return __WASI_ENOEXEC as u32;
             }
         };
+
+        let user_data_low: u32 = (user_data & 0xFFFFFFFF) as u32;
+        let user_data_high: u32 = (user_data >> 32) as u32;
+
         let mut ret = __WASI_ESUCCESS;
-        if let Err(err) = spawn.call(store, user_data as i64) {
+        if let Err(err) = spawn.call(store, user_data_low as i32, user_data_high as i32) {
             debug!("thread failed - start: {}", err);
             ret = __WASI_ENOEXEC;
         }
@@ -3620,8 +3666,14 @@ pub fn thread_spawn<M: MemorySize>(
             };
             if to_local_destroy.len() > 0 {
                 if let Some(thread_local_destroy) = ctx.data(store).inner().thread_local_destroy.as_ref().map(|a| a.clone()) {
-                    for (userdata, val) in to_local_destroy {
-                        let _ = thread_local_destroy.call(store, user_data as i64, val as i64);
+                    for (user_data, val) in to_local_destroy {
+                        let user_data_low: u32 = (user_data & 0xFFFFFFFF) as u32;
+                        let user_data_high: u32 = (user_data >> 32) as u32;
+
+                        let val_low: u32 = (val & 0xFFFFFFFF) as u32;
+                        let val_high: u32 = (val >> 32) as u32;
+
+                        let _ = thread_local_destroy.call(store, user_data_low as i32, user_data_high as i32, val_low as i32, val_high as i32);
                     }
                 }
             }
@@ -3635,7 +3687,7 @@ pub fn thread_spawn<M: MemorySize>(
     // calls into the process    
     let mut execute_module = {
         let state = env.state.clone();
-        move |module: Module, memory: &mut Option<VMMemory>|
+        move |store: &mut Option<Store>, module: Module, memory: &mut Option<VMMemory>|
         {
             // We capture the thread handle here, it is used to notify
             // anyone that is interested when this thread has terminated
@@ -3671,10 +3723,17 @@ pub fn thread_spawn<M: MemorySize>(
                         return __WASI_ENOEXEC as u32;
                     }
                 };
+                let store = match store.take() {
+                    Some(s) => s,
+                    None => {
+                        debug!("thread failed - store can only be consumed once per context creation");
+                        return __WASI_ENOEXEC as u32;
+                    }
+                };
 
                 // Now create the context and hook it up
                 let mut guard = state.threading.write().unwrap();
-                let ctx = match create_ctx(module.clone(), memory) {
+                let ctx = match create_ctx(store, module.clone(), memory) {
                     Ok(c) => c,
                     Err(err) => {
                         return err;
@@ -3705,10 +3764,11 @@ pub fn thread_spawn<M: MemorySize>(
             trace!("threading: spawning background thread");
             let thread_module = env.inner().module.clone();
             wasi_try!(runtime
-                .thread_spawn(Box::new(move |module: Module, thread_memory: VMMemory| {
+                .thread_spawn(Box::new(move |store: Store, module: Module, thread_memory: VMMemory| {
                     let mut thread_memory = Some(thread_memory);
-                    execute_module(module, &mut thread_memory);
-                }), thread_module, thread_memory)
+                    let mut store = Some(store);
+                    execute_module(&mut store, module, &mut thread_memory);
+                }), store, thread_module, thread_memory)
                 .map_err(|err| {
                     let err: __wasi_errno_t = err.into();
                     err
@@ -3777,7 +3837,13 @@ pub fn thread_local_destroy(
                 .iter()
                 .filter(|((_, k), _)| *k == key)
                 .for_each(|((_, _), val)| {
-                    let _ = thread_local_destroy.call(&mut ctx, user_data as i64, *val as i64);
+                    let user_data_low: u32 = (user_data & 0xFFFFFFFF) as u32;
+                    let user_data_high: u32 = (user_data >> 32) as u32;
+
+                    let val_low: u32 = (val & 0xFFFFFFFF) as u32;
+                    let val_high: u32 = (val >> 32) as u32;
+
+                    let _ = thread_local_destroy.call(&mut ctx, user_data_low as i32, user_data_high as i32, val_low as i32, val_high as i32);
                 });
         }
     }
@@ -4085,6 +4151,28 @@ pub fn getpid<M: MemorySize>(
     if let Some(pid) = pid {
         let memory = env.memory_view(&ctx);
         wasi_try_mem!(ret_pid.write(&memory, pid as __wasi_pid_t));
+        __WASI_ESUCCESS
+    } else {
+        __WASI_ENOTSUP
+    }
+}
+
+/// ### `getppid()`
+/// Returns the parent handle of the supplied process
+pub fn getppid<M: MemorySize>(
+    ctx: FunctionEnvMut<'_, WasiEnv>,
+    pid: __wasi_pid_t,
+    ret_parent: WasmPtr<__wasi_pid_t, M>,
+) -> __wasi_errno_t {
+    debug!("wasi::getpid");
+
+    let env = ctx.data();
+    
+    let parent = env.runtime().getppid(pid);
+
+    if let Some(parent) = parent {
+        let memory = env.memory_view(&ctx);
+        wasi_try_mem!(ret_parent.write(&memory, parent as __wasi_pid_t));
         __WASI_ESUCCESS
     } else {
         __WASI_ENOTSUP
@@ -4677,7 +4765,7 @@ pub fn bus_poll<M: MemorySize>(
     let env = ctx.data();
     let bus = env.runtime.bus();
     let memory = env.memory_view(&ctx);
-    //trace!("wasi::bus_poll (timeout={})", timeout);
+    trace!("wasi::bus_poll (timeout={})", timeout);
 
     // Lets start by processing events for calls that are already running
     let mut nevents = M::ZERO;
@@ -4975,22 +5063,13 @@ pub fn bus_poll<M: MemorySize>(
         if nevents >= M::ONE {
             break;
         }
-
-        // Determine the interval we will wake to check things like timeouts
-        // or the thread terminating
-        let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
-        let delta = match now.checked_sub(start) {
-            Some(a) => Duration::from_nanos(a as u64),
-            None => Duration::ZERO,
-        };
-        let interval = Duration::from_millis(5).min(delta);
-
-        // Every 50 milliseconds we check if the thread needs to terminate (20 times a second)
-        // or for timeout, otherwise the reactor has to be woken
+        
+        // Every 100 milliseconds we check if the thread needs to terminate (via `env.yield_now`)
+        // otherwise the loop will break if the BUS futex is triggered or a timeout is reached
         loop {
             // Check for timeout (zero will mean the loop will not wait)
             let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
-            let delta = (now - start) as __wasi_timestamp_t;
+            let delta = now.checked_sub(start).unwrap_or(0) as __wasi_timestamp_t;
             if delta >= timeout {
                 trace!("wasi::bus_poll (timeout)");
                 wasi_try_mem_bus_ok!(ret_nevents.write(&memory, nevents));
@@ -4998,8 +5077,14 @@ pub fn bus_poll<M: MemorySize>(
             }
 
             env.yield_now()?;
-            state.bus.poll_wait(interval);
-            break;
+
+            let remaining = timeout.checked_sub(delta).unwrap_or(0);
+            let interval = Duration::from_nanos(remaining)
+                .min(Duration::from_millis(5)) // we don't want the CPU burning
+                .max(Duration::from_millis(100)); // 100 milliseconds to kill worker threads seems acceptable
+            if state.bus.poll_wait(interval) == true {
+                break;
+            }
         }
     }
     if nevents > M::ZERO {

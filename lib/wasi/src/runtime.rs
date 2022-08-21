@@ -2,7 +2,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
-use wasmer::Module;
+use wasmer::{Module, Store};
 use wasmer::vm::VMMemory;
 use wasmer_vbus::{UnsupportedVirtualBus, VirtualBus};
 use wasmer_vnet::VirtualNetworking;
@@ -89,7 +89,8 @@ where Self: fmt::Debug + Sync,
     /// Spawns a new thread by invoking the
     fn thread_spawn(
         &self,
-        _callback: Box<dyn FnOnce(Module, VMMemory) + Send + 'static>,
+        _callback: Box<dyn FnOnce(Store, Module, VMMemory) + Send + 'static>,
+        _store: Store,
         _existing_module: Module,
         _existing_memory: VMMemory,
     ) -> Result<(), WasiThreadError>
@@ -112,6 +113,11 @@ where Self: fmt::Debug + Sync,
 
     /// Gets the current process ID
     fn getpid(&self) -> Option<u32> {
+        None
+    }
+
+    /// Gets the parent process ID of a particular process
+    fn getppid(&self, _pid: u32) -> Option<u32> {
         None
     }
 }
@@ -174,14 +180,15 @@ for PluggableRuntimeImplementation
     #[cfg(feature = "sys-thread")]
     fn thread_spawn(
         &self,
-        callback: Box<dyn FnOnce(Module, VMMemory) + Send + 'static>,
+        callback: Box<dyn FnOnce(Store, Module, VMMemory) + Send + 'static>,
+        store: Store,
         existing_module: Module,
         existing_memory: VMMemory,
     ) -> Result<(), WasiThreadError>
     {
         let existing_module = existing_module.clone();
         std::thread::spawn(move || {
-            callback(existing_module, existing_memory)
+            callback(store, existing_module, existing_memory)
         });
         Ok(())
     }

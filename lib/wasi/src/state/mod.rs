@@ -1999,6 +1999,7 @@ pub struct WasiState {
     pub inodes: Arc<RwLock<WasiInodes>>,
     pub(crate) threading: RwLock<WasiStateThreading>,
     pub(crate) futexs: Mutex<HashMap<u64, WasiFutex>>,
+    pub(crate) clock_offset: Mutex<HashMap<__wasi_clockid_t, i64>>,
     pub(crate) bus: WasiBusState,
     pub args: Vec<Vec<u8>>,
     pub envs: Vec<Vec<u8>>,
