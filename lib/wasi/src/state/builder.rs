@@ -4,6 +4,7 @@ use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes};
 use generational_arena::Arena;
+use rand::Rng;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -465,6 +466,7 @@ impl WasiStateBuilder {
 
         Ok(WasiState {
             fs: wasi_fs,
+            secret: rand::thread_rng().gen::<[u8; 32]>(),
             inodes: Arc::new(inodes),
             args: self.args.clone(),
             threading: Default::default(),

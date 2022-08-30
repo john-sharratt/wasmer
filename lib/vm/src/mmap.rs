@@ -40,11 +40,18 @@ impl Mmap {
         }
     }
 
+    /// Create a new `Mmap` pointing to a specific address space of page-aligned accessible memory.
+    pub fn with_static(start: usize, size: usize) -> Result<Self, String> {
+        let page_size = region::page::size();
+        let rounded_size = round_up_to_page_size(size, page_size);
+        Self::accessible_reserved(rounded_size, rounded_size, Some(start))
+    }
+
     /// Create a new `Mmap` pointing to at least `size` bytes of page-aligned accessible memory.
     pub fn with_at_least(size: usize) -> Result<Self, String> {
         let page_size = region::page::size();
         let rounded_size = round_up_to_page_size(size, page_size);
-        Self::accessible_reserved(rounded_size, rounded_size)
+        Self::accessible_reserved(rounded_size, rounded_size, None)
     }
 
     /// Create a new `Mmap` pointing to `accessible_size` bytes of page-aligned accessible memory,
@@ -54,6 +61,7 @@ impl Mmap {
     pub fn accessible_reserved(
         accessible_size: usize,
         mapping_size: usize,
+        mapping_start: Option<usize>,
     ) -> Result<Self, String> {
         let page_size = region::page::size();
         assert_le!(accessible_size, mapping_size);
@@ -66,11 +74,16 @@ impl Mmap {
             return Ok(Self::new());
         }
 
+        let addr = match mapping_start {
+            Some(addr) => addr as *mut libc::c_void,
+            None => ptr::null_mut()
+        };
+
         Ok(if accessible_size == mapping_size {
             // Allocate a single read-write region at once.
             let ptr = unsafe {
                 libc::mmap(
-                    ptr::null_mut(),
+                    addr,
                     mapping_size,
                     libc::PROT_READ | libc::PROT_WRITE,
                     libc::MAP_PRIVATE | libc::MAP_ANON,
@@ -81,6 +94,11 @@ impl Mmap {
             if ptr as isize == -1_isize {
                 return Err(io::Error::last_os_error().to_string());
             }
+            if addr != ptr::null_mut() && ptr != addr {
+                let r = unsafe { libc::munmap(ptr as *mut libc::c_void, mapping_size) };
+                assert_eq!(r, 0, "munmap failed: {}", io::Error::last_os_error());
+                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
+            }
 
             Self {
                 ptr: ptr as usize,
@@ -90,7 +108,7 @@ impl Mmap {
             // Reserve the mapping size.
             let ptr = unsafe {
                 libc::mmap(
-                    ptr::null_mut(),
+                    addr,
                     mapping_size,
                     libc::PROT_NONE,
                     libc::MAP_PRIVATE | libc::MAP_ANON,
@@ -100,6 +118,11 @@ impl Mmap {
             };
             if ptr as isize == -1_isize {
                 return Err(io::Error::last_os_error().to_string());
+            }
+            if addr != ptr::null_mut() && ptr != addr {
+                let r = unsafe { libc::munmap(ptr as *mut libc::c_void, mapping_size) };
+                assert_eq!(r, 0, "munmap failed: {}", io::Error::last_os_error());
+                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
             }
 
             let mut result = Self {
@@ -122,6 +145,7 @@ impl Mmap {
     #[cfg(target_os = "windows")]
     pub fn accessible_reserved(
         accessible_size: usize,
+        mapping_start: Option<usize>,
         mapping_size: usize,
     ) -> Result<Self, String> {
         use winapi::um::memoryapi::VirtualAlloc;
@@ -138,11 +162,16 @@ impl Mmap {
             return Ok(Self::new());
         }
 
+        let addr = match mapping_start {
+            Some(addr) => addr as *mut libc::c_void,
+            None => ptr::null_mut()
+        };
+
         Ok(if accessible_size == mapping_size {
             // Allocate a single read-write region at once.
             let ptr = unsafe {
                 VirtualAlloc(
-                    ptr::null_mut(),
+                    addr,
                     mapping_size,
                     MEM_RESERVE | MEM_COMMIT,
                     PAGE_READWRITE,
@@ -150,6 +179,14 @@ impl Mmap {
             };
             if ptr.is_null() {
                 return Err(io::Error::last_os_error().to_string());
+            }
+            if addr != ptr::null_mut() && ptr != addr {
+                use winapi::ctypes::c_void;
+                use winapi::um::memoryapi::VirtualFree;
+                use winapi::um::winnt::MEM_RELEASE;
+                let r = unsafe { VirtualFree(self.ptr as *mut c_void, 0, MEM_RELEASE) };
+                assert_ne!(r, 0);
+                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
             }
 
             Self {
@@ -159,9 +196,17 @@ impl Mmap {
         } else {
             // Reserve the mapping size.
             let ptr =
-                unsafe { VirtualAlloc(ptr::null_mut(), mapping_size, MEM_RESERVE, PAGE_NOACCESS) };
+                unsafe { VirtualAlloc(addr, mapping_size, MEM_RESERVE, PAGE_NOACCESS) };
             if ptr.is_null() {
                 return Err(io::Error::last_os_error().to_string());
+            }
+            if addr != ptr::null_mut() && ptr != addr {
+                use winapi::ctypes::c_void;
+                use winapi::um::memoryapi::VirtualFree;
+                use winapi::um::winnt::MEM_RELEASE;
+                let r = unsafe { VirtualFree(self.ptr as *mut c_void, 0, MEM_RELEASE) };
+                assert_ne!(r, 0);
+                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
             }
 
             let mut result = Self {

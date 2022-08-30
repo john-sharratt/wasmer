@@ -295,7 +295,7 @@ impl Function {
             func,
         });
         let function_type = FunctionType::new(Args::wasm_types(), Rets::wasm_types());
-
+        
         let func_ptr = <F as HostFunction<T, Args, Rets, WithEnv>>::function_body_ptr();
         let type_index = store
             .as_store_mut()
@@ -729,8 +729,9 @@ where
     ) {
         use std::panic::{self, AssertUnwindSafe};
 
-        let result =
-            on_host_stack(|| panic::catch_unwind(AssertUnwindSafe(|| (this.ctx.func)(values_vec))));
+        let result = on_host_stack(
+            || panic::catch_unwind(AssertUnwindSafe(|| (this.ctx.func)(values_vec)))
+        );
 
         match result {
             Ok(Ok(())) => {}
@@ -769,8 +770,8 @@ mod inner {
     use wasmer_vm::{on_host_stack, VMContext, VMTrampoline};
 
     use crate::sys::function_env::FunctionEnvMut;
-    use wasmer_types::{NativeWasmType, RawValue, Type};
-    use wasmer_vm::{raise_user_trap, resume_panic, VMFunctionBody};
+    use wasmer_types::{NativeWasmType, RawValue, Type, YieldingResult};
+    use wasmer_vm::{raise_user_trap, raise_restore_stack, raise_capture_stack, resume_panic, VMFunctionBody};
 
     use crate::sys::NativeWasmTypeInto;
     use crate::{AsStoreMut, AsStoreRef, ExternRef, Function, FunctionEnv, StoreMut};
@@ -1001,6 +1002,62 @@ mod inner {
     ///
     /// It is mostly used to turn result values of a Wasm function
     /// call into a `Result`.
+    pub trait IntoYieldingResult<T>
+    where
+        T: WasmTypeList,
+    {
+        /// The error type for this trait.
+        type Error: Error + Sync + Send + 'static;
+
+        /// Transforms `Self` into a `Result`.
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error>;
+    }
+
+    impl<T> IntoYieldingResult<T> for T
+    where
+        T: WasmTypeList,
+    {
+        // `T` is not a `Result`, it's already a value, so no error
+        // can be built.
+        type Error = Infallible;
+
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
+            YieldingResult::Result(Ok(self))
+        }
+    }
+
+    impl<T, E> IntoYieldingResult<T> for Result<T, E>
+    where
+        T: WasmTypeList,
+        E: Error + Sync + Send + 'static,
+    {
+        type Error = E;
+
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
+            match self {
+                Ok(a) => YieldingResult::Result(Ok(a)),
+                Err(err) => YieldingResult::Result(Err(err))
+            }
+        }
+    }
+
+    impl<T, E> IntoYieldingResult<T> for YieldingResult<T, E>
+    where
+        T: WasmTypeList,
+        E: Error + Sync + Send + 'static,
+    {
+        type Error = E;
+
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
+            self
+        }
+    }
+
+    /// The `IntoResult` trait turns a `WasmTypeList` into a
+    /// `Result<WasmTypeList, Self::Error>`.
+    ///
+    /// It is mostly used to turn result values of a Wasm function
+    /// call into a `Result`.
     pub trait IntoResult<T>
     where
         T: WasmTypeList,
@@ -1012,28 +1069,21 @@ mod inner {
         fn into_result(self) -> Result<T, Self::Error>;
     }
 
-    impl<T> IntoResult<T> for T
-    where
-        T: WasmTypeList,
-    {
-        // `T` is not a `Result`, it's already a value, so no error
-        // can be built.
-        type Error = Infallible;
-
-        fn into_result(self) -> Result<Self, Infallible> {
-            Ok(self)
-        }
-    }
-
-    impl<T, E> IntoResult<T> for Result<T, E>
-    where
-        T: WasmTypeList,
-        E: Error + Sync + Send + 'static,
+    impl<T, E, Y> IntoResult<T>
+    for Y
+    where T: WasmTypeList,
+          Y: IntoYieldingResult<T, Error = E>,
+          E: Error + Sync + Send + 'static
     {
         type Error = E;
 
-        fn into_result(self) -> Self {
-            self
+        fn into_result(self) -> Result<T, Self::Error> {
+            match self.into_yielding_result() {
+                YieldingResult::Result(r) => r,
+                _ => {
+                    panic!("can not convert a yielding error into a result");
+                }
+            }
         }
     }
 
@@ -1264,7 +1314,7 @@ mod inner {
             where
                 $( $x: FromToNativeWasmType, )*
                 Rets: WasmTypeList,
-                RetsAsResult: IntoResult<Rets>,
+                RetsAsResult: IntoYieldingResult<Rets>,
                 Func: Fn(FunctionEnvMut<T>, $( $x , )*) -> RetsAsResult + 'static,
             {
                 #[allow(non_snake_case)]
@@ -1276,32 +1326,42 @@ mod inner {
                     where
                         $( $x: FromToNativeWasmType, )*
                         Rets: WasmTypeList,
-                        RetsAsResult: IntoResult<Rets>,
+                        RetsAsResult: IntoYieldingResult<Rets>,
                         Func: Fn(FunctionEnvMut<T>, $( $x , )*) -> RetsAsResult + 'static,
                     {
                         // println!("func wrapper");
                         let mut store = StoreMut::from_raw(env.raw_store as *mut _);
-                        let result = on_host_stack(|| {
-                            // println!("func wrapper1");
-                            panic::catch_unwind(AssertUnwindSafe(|| {
-                                $(
-                                    let $x = FromToNativeWasmType::from_native(NativeWasmTypeInto::from_abi(&mut store, $x));
-                                )*
-                                // println!("func wrapper2 {:p}", *env.raw_env);
-                                let store_mut = StoreMut::from_raw(env.raw_store as *mut _);
-                                let f_env = FunctionEnvMut {
-                                    store_mut,
-                                    func_env: env.env.clone(),
-                                };
-                                // println!("func wrapper3");
-                                (env.func)(f_env, $($x),* ).into_result()
-                            }))
-                        });
-
-                        match result {
-                            Ok(Ok(result)) => return result.into_c_struct(&mut store),
-                            Ok(Err(trap)) => raise_user_trap(Box::new(trap)),
-                            Err(panic) => resume_panic(panic) ,
+                        loop {
+                            let result = on_host_stack(|| {
+                                // println!("func wrapper1");
+                                panic::catch_unwind(AssertUnwindSafe(|| {
+                                    $(
+                                        let $x = FromToNativeWasmType::from_native(NativeWasmTypeInto::from_abi(&mut store, $x));
+                                    )*
+                                    // println!("func wrapper2 {:p}", *env.raw_env);
+                                    let store_mut = StoreMut::from_raw(env.raw_store as *mut _);
+                                    let f_env = FunctionEnvMut {
+                                        store_mut,
+                                        func_env: env.env.clone(),
+                                    };
+                                    // println!("func wrapper3");
+                                    (env.func)(f_env, $($x),* ).into_yielding_result()
+                                }))
+                            });
+                            
+                            return match result {
+                                Ok(YieldingResult::Result((Ok(result)))) => result.into_c_struct(&mut store),
+                                Ok(YieldingResult::Result((Err(trap)))) => raise_user_trap(Box::new(trap)),
+                                Ok(YieldingResult::CaptureStack) => {
+                                    raise_capture_stack();
+                                    continue;
+                                },
+                                Ok(YieldingResult::RestoreStack(stack)) => {
+                                    raise_restore_stack(stack);
+                                    unreachable!("stack restore should have restarted func_wrapper");
+                                },
+                                Err(panic) => resume_panic(panic),
+                            };
                         }
                     }
 
@@ -1348,7 +1408,7 @@ mod inner {
             where
                 $( $x: FromToNativeWasmType, )*
                 Rets: WasmTypeList,
-                RetsAsResult: IntoResult<Rets>,
+                RetsAsResult: IntoYieldingResult<Rets>,
                 Func: Fn($( $x , )*) -> RetsAsResult + 'static,
             {
                 #[allow(non_snake_case)]
@@ -1360,25 +1420,35 @@ mod inner {
                     where
                         $( $x: FromToNativeWasmType, )*
                         Rets: WasmTypeList,
-                        RetsAsResult: IntoResult<Rets>,
+                        RetsAsResult: IntoYieldingResult<Rets>,
                         Func: Fn($( $x , )*) -> RetsAsResult + 'static,
                     {
                         // println!("func wrapper");
                         let mut store = StoreMut::from_raw(env.raw_store as *mut _);
-                        let result = on_host_stack(|| {
-                            // println!("func wrapper1");
-                            panic::catch_unwind(AssertUnwindSafe(|| {
-                                $(
-                                    let $x = FromToNativeWasmType::from_native(NativeWasmTypeInto::from_abi(&mut store, $x));
-                                )*
-                                (env.func)($($x),* ).into_result()
-                            }))
-                        });
-
-                        match result {
-                            Ok(Ok(result)) => return result.into_c_struct(&mut store),
-                            Ok(Err(trap)) => raise_user_trap(Box::new(trap)),
-                            Err(panic) => resume_panic(panic) ,
+                        loop {
+                            let result = on_host_stack(|| {
+                                // println!("func wrapper1");
+                                panic::catch_unwind(AssertUnwindSafe(|| {
+                                    $(
+                                        let $x = FromToNativeWasmType::from_native(NativeWasmTypeInto::from_abi(&mut store, $x));
+                                    )*
+                                    (env.func)($($x),* ).into_yielding_result()
+                                }))
+                            });
+                            
+                            return match result {
+                                Ok(YieldingResult::Result((Ok(result)))) => result.into_c_struct(&mut store),
+                                Ok(YieldingResult::Result((Err(trap)))) => raise_user_trap(Box::new(trap)),
+                                Ok(YieldingResult::CaptureStack) => {
+                                    raise_capture_stack();
+                                    continue;
+                                },
+                                Ok(YieldingResult::RestoreStack(stack)) => {
+                                    raise_restore_stack(stack);
+                                    unreachable!("stack restore should have restarted func_wrapper");
+                                },
+                                Err(panic) => resume_panic(panic),
+                            };
                         }
                     }
 

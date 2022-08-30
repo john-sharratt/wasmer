@@ -18,6 +18,18 @@ macro_rules! wasi_try {
 }
 
 /// Like the `try!` macro or `?` syntax: returns the value if the computation
+/// succeeded or returns the error value.
+macro_rules! wasi_try_yielding {
+    ($expr:expr) => {{
+        let res: Result<_, _> = $expr;
+        match res {
+            Ok(val) => { val }
+            Err(err) => { return YieldingResult::Result(Err(err)); }
+        }
+    }};
+}
+
+/// Like the `try!` macro or `?` syntax: returns the value if the computation
 /// succeeded or returns the error value. Results are wrapped in an Ok
 macro_rules! wasi_try_ok {
     ($expr:expr) => {{

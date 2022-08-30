@@ -5,6 +5,7 @@ use std::sync::Arc;
 use wasm_bindgen::convert::FromWasmAbi;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
+use wasmer_types::YieldingResult;
 
 /// A struct representing an aborted instruction execution, with a message
 /// indicating the cause.
@@ -166,4 +167,14 @@ impl From<JsValue> for RuntimeError {
             inner: Arc::new(RuntimeErrorSource::Js(js)),
         })
     }
+}
+
+/// Captures the current WASM stack and returns it
+pub fn wasm_capture_stack<T, E>() -> Result<Vec<u8>, YieldingResult<T, E>> {
+    unimplemented!("not yet implemented for JS");
+}
+
+/// Returns true if the stack was just recently restored and resets the flag
+pub fn wasm_is_stack_restored() -> bool {
+    false
 }

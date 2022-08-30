@@ -973,7 +973,7 @@ impl<'module_environment> BaseFuncEnvironment for FuncEnvironment<'module_enviro
                     },
                     false,
                 )
-            }
+            },
             MemoryStyle::Static {
                 bound,
                 offset_guard_size,
@@ -981,6 +981,17 @@ impl<'module_environment> BaseFuncEnvironment for FuncEnvironment<'module_enviro
                 Uimm64::new(offset_guard_size),
                 ir::HeapStyle::Static {
                     bound: Uimm64::new(bound.bytes().0 as u64),
+                },
+                true,
+            ),            
+            MemoryStyle::Prescribed {
+                size,
+                offset_guard_size,
+                ..
+            } => (
+                Uimm64::new(offset_guard_size),
+                ir::HeapStyle::Static {
+                    bound: Uimm64::new(size.bytes().0 as u64),
                 },
                 true,
             ),

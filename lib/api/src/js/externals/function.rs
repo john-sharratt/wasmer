@@ -607,7 +607,7 @@ mod inner {
     use std::marker::PhantomData;
     use std::panic::{self, AssertUnwindSafe};
 
-    use wasmer_types::{FunctionType, NativeWasmType, Type};
+    use wasmer_types::{FunctionType, NativeWasmType, Type, YieldingResult};
     // use wasmer::{raise_user_trap, resume_panic};
 
     /// A trait to convert a Rust value to a `WasmNativeType` value,
@@ -798,6 +798,62 @@ mod inner {
     ///
     /// It is mostly used to turn result values of a Wasm function
     /// call into a `Result`.
+    pub trait IntoYieldingResult<T>
+    where
+        T: WasmTypeList,
+    {
+        /// The error type for this trait.
+        type Error: Error + Sync + Send + 'static;
+
+        /// Transforms `Self` into a `Result`.
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error>;
+    }
+
+    impl<T> IntoYieldingResult<T> for T
+    where
+        T: WasmTypeList,
+    {
+        // `T` is not a `Result`, it's already a value, so no error
+        // can be built.
+        type Error = Infallible;
+
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
+            YieldingResult::Result(Ok(self))
+        }
+    }
+
+    impl<T, E> IntoYieldingResult<T> for Result<T, E>
+    where
+        T: WasmTypeList,
+        E: Error + Sync + Send + 'static,
+    {
+        type Error = E;
+
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
+            match self {
+                Ok(a) => YieldingResult::Result(Ok(a)),
+                Err(err) => YieldingResult::Result(Err(err))
+            }
+        }
+    }
+
+    impl<T, E> IntoYieldingResult<T> for YieldingResult<T, E>
+    where
+        T: WasmTypeList,
+        E: Error + Sync + Send + 'static,
+    {
+        type Error = E;
+
+        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
+            self
+        }
+    }
+
+    /// The `IntoResult` trait turns a `WasmTypeList` into a
+    /// `Result<WasmTypeList, Self::Error>`.
+    ///
+    /// It is mostly used to turn result values of a Wasm function
+    /// call into a `Result`.
     pub trait IntoResult<T>
     where
         T: WasmTypeList,
@@ -809,28 +865,21 @@ mod inner {
         fn into_result(self) -> Result<T, Self::Error>;
     }
 
-    impl<T> IntoResult<T> for T
-    where
-        T: WasmTypeList,
-    {
-        // `T` is not a `Result`, it's already a value, so no error
-        // can be built.
-        type Error = Infallible;
-
-        fn into_result(self) -> Result<Self, Infallible> {
-            Ok(self)
-        }
-    }
-
-    impl<T, E> IntoResult<T> for Result<T, E>
-    where
-        T: WasmTypeList,
-        E: Error + Sync + Send + 'static,
+    impl<T, E, Y> IntoResult<T>
+    for Y
+    where T: WasmTypeList,
+          Y: IntoYieldingResult<T, Error = E>,
+          E: Error + Sync + Send + 'static
     {
         type Error = E;
 
-        fn into_result(self) -> Self {
-            self
+        fn into_result(self) -> Result<T, Self::Error> {
+            match self.into_yielding_result() {
+                YieldingResult::Result(r) => r,
+                _ => {
+                    panic!("can not convert a yielding error into a result");
+                }
+            }
         }
     }
 
@@ -1097,7 +1146,7 @@ mod inner {
             where
                 $( $x: FromToNativeWasmType, )*
                 Rets: WasmTypeList,
-                RetsAsResult: IntoResult<Rets>,
+                RetsAsResult: IntoYieldingResult<Rets>,
                 T: Send + 'static,
                 Func: Fn(FunctionEnvMut<'_, T>, $( $x , )*) -> RetsAsResult + 'static,
             {
@@ -1110,7 +1159,7 @@ mod inner {
                     where
                         $( $x: FromToNativeWasmType, )*
                         Rets: WasmTypeList,
-                        RetsAsResult: IntoResult<Rets>,
+                        RetsAsResult: IntoYieldingResult<Rets>,
                         T: Send + 'static,
                         Func: Fn(FunctionEnvMut<'_, T>, $( $x , )*) -> RetsAsResult + 'static,
                     {
@@ -1146,7 +1195,7 @@ mod inner {
             where
                 $( $x: FromToNativeWasmType, )*
                 Rets: WasmTypeList,
-                RetsAsResult: IntoResult<Rets>,
+                RetsAsResult: IntoYieldingResult<Rets>,
                 Func: Fn($( $x , )*) -> RetsAsResult + 'static,
             {
                 #[allow(non_snake_case)]
@@ -1158,7 +1207,7 @@ mod inner {
                     where
                         $( $x: FromToNativeWasmType, )*
                         Rets: WasmTypeList,
-                        RetsAsResult: IntoResult<Rets>,
+                        RetsAsResult: IntoYieldingResult<Rets>,
                         Func: Fn($( $x , )*) -> RetsAsResult + 'static,
                     {
                         // let env: &Env = unsafe { &*(ptr as *const u8 as *const Env) };

@@ -1,3 +1,14 @@
+use wasmer_derive::ValueType;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ValueType)]
+#[repr(C)]
+pub struct __wasi_stack_snaphost_t {
+    pub memory_offset: u32,
+    pub host_offset: u32,
+    pub upper_stack: [u8; 1024],
+    pub hash: u128,
+}
+
 pub type __wasi_signal_t = u8;
 pub const __WASI_SIGHUP: u8 = 1;
 pub const __WASI_SIGINT: u8 = 2;

@@ -1,7 +1,16 @@
 use super::*;
 use wasmer_derive::ValueType;
 
+pub type __wasi_small_hash_t = u64;
+
 pub type __wasi_hash_t = u128;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueType)]
+#[repr(C)]
+pub struct __wasi_option_hash_t {
+    pub tag: __wasi_option_t,
+    pub u: __wasi_hash_t,
+}
 
 pub type __wasi_busdataformat_t = u8;
 pub const __WASI_BUS_DATA_FORMAT_RAW: __wasi_busdataformat_t = 0;

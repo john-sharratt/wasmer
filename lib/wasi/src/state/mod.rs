@@ -1996,6 +1996,7 @@ impl WasiBusState
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct WasiState {
     pub fs: WasiFs,
+    pub secret: [u8; 32],
     pub inodes: Arc<RwLock<WasiInodes>>,
     pub(crate) threading: RwLock<WasiStateThreading>,
     pub(crate) futexs: Mutex<HashMap<u64, WasiFutex>>,

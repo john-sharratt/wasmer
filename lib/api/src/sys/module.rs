@@ -75,9 +75,29 @@ for Vec<u8> {
 }
 
 impl IntoBytes
+for &Vec<u8> {
+    fn into_bytes(self) -> Bytes {
+        Bytes::from(self.clone())
+    }
+}
+
+impl IntoBytes
 for &[u8] {
     fn into_bytes(self) -> Bytes {
         Bytes::from(self.to_vec())
+    }
+}
+
+impl<const N: usize> IntoBytes for &[u8; N] {
+    fn into_bytes(self) -> Bytes {
+        Bytes::from(self.to_vec())
+    }
+}
+
+impl IntoBytes
+for &str {
+    fn into_bytes(self) -> Bytes {
+        Bytes::from(self.as_bytes().to_vec())
     }
 }
 

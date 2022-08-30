@@ -9,7 +9,7 @@ use crate::{
     CustomSectionIndex, DataIndex, ElemIndex, ExportIndex, ExportType, ExternType, FunctionIndex,
     FunctionType, GlobalIndex, GlobalInit, GlobalType, ImportIndex, ImportType, LocalFunctionIndex,
     LocalGlobalIndex, LocalMemoryIndex, LocalTableIndex, MemoryIndex, MemoryType, SignatureIndex,
-    TableIndex, TableInitializer, TableType,
+    TableIndex, TableInitializer, TableType, Pages,
 };
 use indexmap::IndexMap;
 use rkyv::{
@@ -19,6 +19,7 @@ use rkyv::{
 };
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
+use core::convert::TryInto;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
@@ -80,6 +81,10 @@ pub struct ModuleInfo {
     /// it's still deserialized back as a garbage number, and later override from computed by the process
     #[cfg_attr(feature = "enable-serde", serde(skip_serializing, skip_deserializing))]
     pub id: ModuleId,
+
+    /// The virtual address space start address if it needs to be
+    /// prescribed (for instance when using modules across machines)
+    pub module_start: Option<Pages>,
 
     /// The name of this wasm module, often found in the wasm file.
     pub name: Option<String>,
@@ -150,6 +155,7 @@ pub struct ModuleInfo {
 #[derive(RkyvSerialize, RkyvDeserialize, Archive)]
 pub struct ArchivableModuleInfo {
     name: Option<String>,
+    module_start: Option<usize>,
     imports: IndexMap<ImportKey, ImportIndex>,
     exports: IndexMap<String, ExportIndex>,
     start_function: Option<FunctionIndex>,
@@ -175,6 +181,7 @@ impl From<ModuleInfo> for ArchivableModuleInfo {
     fn from(it: ModuleInfo) -> Self {
         Self {
             name: it.name,
+            module_start: it.module_start.map(|a| a.bytes().0),
             imports: it.imports,
             exports: it.exports,
             start_function: it.start_function,
@@ -202,6 +209,7 @@ impl From<ArchivableModuleInfo> for ModuleInfo {
     fn from(it: ArchivableModuleInfo) -> Self {
         Self {
             id: Default::default(),
+            module_start: it.module_start.map(|a| crate::Bytes(a).try_into().unwrap()),
             name: it.name,
             imports: it.imports,
             exports: it.exports,

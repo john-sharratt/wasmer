@@ -33,6 +33,18 @@ pub enum MemoryStyle {
         /// to optimize loads and stores with constant offsets.
         offset_guard_size: u64,
     },
+    /// Address space is allocated up front.
+    Prescribed {
+        /// The start of the virtual address space (as a multiple of pages)
+        start: Pages,
+        /// The size of the virtual addess space
+        size: Pages,
+        /// Our chosen offset-guard size.
+        ///
+        /// It represents the size in bytes of extra guard pages after the end
+        /// to optimize loads and stores with constant offsets.
+        offset_guard_size: u64,
+    },
 }
 
 impl MemoryStyle {
@@ -43,6 +55,9 @@ impl MemoryStyle {
             Self::Static {
                 offset_guard_size, ..
             } => *offset_guard_size,
+            Self::Prescribed {
+                offset_guard_size, ..
+            } => *offset_guard_size
         }
     }
 }
@@ -130,6 +145,27 @@ unsafe impl MemorySize for Memory64 {
     }
 }
 
+/// Represents different roles that a particular region of memory plays
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryRole
+{
+    /// The region is used for storing data (default)
+    Data,
+    /// The region is used as a stack
+    Stack,
+    /// The region is used to guard against memory access violations
+    Guard,
+    /// The region resides on another remote location (holds the reference number for that location)
+    Remote(u64),
+}
+
+impl Default
+for MemoryRole {
+    fn default() -> Self {
+        MemoryRole::Data
+    }
+}
+
 /// Represents memory that is used by the WebAsssembly module
 pub trait LinearMemory
 where Self: std::fmt::Debug + Send
@@ -154,6 +190,12 @@ where Self: std::fmt::Debug + Send
 
     /// Attempts to clone this memory (if its clonable)
     fn try_clone(&self) -> Option<Box<dyn LinearMemory + 'static>>;
+
+    /// Marks a region of the memory for a particular role
+    fn mark_region(&mut self, start: u64, end: u64, role: MemoryRole);
+
+    /// Returns the role of a part of the memory
+    fn region(&self, pointer: u64) -> MemoryRole;
 }
 
 /// The fields compiled code needs to access to utilize a WebAssembly linear

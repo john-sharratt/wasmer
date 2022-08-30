@@ -24,7 +24,7 @@ enum-iterator = "0.7.0"
 scopeguard = "1.1.0"
 lazy_static = "1.4.0"
 region = { version = "3.0" }
-corosensei = { version = "0.1.2" }
+corosensei = { version = "0.1.2", path = "../../../corosensei" }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 mach = "0.3.2"

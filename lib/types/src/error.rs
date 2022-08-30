@@ -1,5 +1,6 @@
 //! The WebAssembly possible errors
 use crate::{ExternType, Pages};
+use core::convert::Infallible;
 use std::io;
 use thiserror::Error;
 
@@ -224,6 +225,19 @@ impl From<MiddlewareError> for WasmError {
     fn from(original: MiddlewareError) -> Self {
         Self::Middleware(original)
     }
+}
+
+/// A WebAssembly yielding error are used for long-jumps and parking the stack.
+///
+/// Yielding errors are used to 
+#[derive(Debug)]
+pub enum YieldingResult<T, E = Infallible> {
+    /// Normal result
+    Result(Result<T, E>),
+    /// Capture the current stack
+    CaptureStack,
+    /// Restores the stack to a previous state
+    RestoreStack(Vec<u8>),
 }
 
 /// The error that can happen while parsing a `str`

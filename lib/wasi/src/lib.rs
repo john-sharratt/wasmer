@@ -68,7 +68,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 use wasmer::{
     imports, namespace, AsStoreMut, Exports, Function, FunctionEnv, Imports, Memory, Memory32,
-    MemoryAccessError, MemorySize, Module, TypedFunction, Memory64, MemoryView, AsStoreRef, Instance, ExportError
+    MemoryAccessError, MemorySize, Module, TypedFunction, Memory64, MemoryView, AsStoreRef, Instance, ExportError, Global, Value
 };
 
 pub use runtime::{
@@ -162,6 +162,8 @@ pub struct WasiEnvInner
     /// Represents the module that is being used (this is NOT send/sync)
     /// however the code itself makes sure that it is used in a safe way
     module: Module,
+    //// Points to the current location of the memory stack pointer
+    stack_pointer: Option<Global>,
     /// Represents the callback for spawning a thread (name = "_start_thread")
     /// (due to limitations with i64 in browsers the parameters are broken into i32 pairs)
     /// [this takes a user_data field]
@@ -181,6 +183,10 @@ pub struct WasiEnvInner
 unsafe impl Send for WasiEnvInner { }
 unsafe impl Sync for WasiEnvInner { }
 
+/// The default stack size for WASIX
+pub const DEFAULT_STACK_SIZE: u64 = 1_048_576u64;
+pub const DEFAULT_STACK_BASE: u64 = DEFAULT_STACK_SIZE;
+
 /// The environment provided to the WASI imports.
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
@@ -189,6 +195,8 @@ where
 {
     /// ID of this thread (zero is the main thread)
     id: WasiThreadId,
+    /// Base stack pointer for the memory stack
+    pub stack_base: u64,
     /// Shared state of the WASI system. Manages all the data that the
     /// executing WASI program can see.
     pub state: Arc<WasiState>,
@@ -225,6 +233,7 @@ impl WasiEnv {
     fn new_ext(state: Arc<WasiState>) -> Self {
         let ret = Self {
             id: 0u32.into(),
+            stack_base: 0,
             state,
             inner: None,
             runtime: Arc::new(PluggableRuntimeImplementation::default()),
@@ -411,6 +420,7 @@ impl WasiFunctionEnv {
         let new_inner = WasiEnvInner {
             memory,
             module: instance.module().clone(),
+            stack_pointer: instance.exports.get_global("__stack_pointer").map(|a| a.clone()).ok(),
             thread_spawn: instance.exports.get_typed_function(store, "_start_thread").ok(),
             react: instance.exports.get_typed_function(store, "_react").ok(),
             thread_local_destroy: instance.exports.get_typed_function(store, "_thread_local_destroy").ok(),
@@ -423,6 +433,19 @@ impl WasiFunctionEnv {
             is_wasix_module(instance.module()),
             std::sync::atomic::Ordering::Release,
         );
+
+        let stack_base = if let Some(stack_pointer) = env.inner().stack_pointer.clone() {
+            match stack_pointer.get(store) {
+                Value::I32(a) => a as u64,
+                Value::I64(a) => a as u64,
+                _ => DEFAULT_STACK_SIZE
+            }
+        } else {
+            DEFAULT_STACK_SIZE
+        };
+
+        let env = self.data_mut(store);
+        env.stack_base = stack_base;
 
         Ok(())
     }
@@ -641,6 +664,9 @@ fn wasix_exports_32(
         "thread_parallelism" => Function::new_typed_with_env(&mut store, env, thread_parallelism::<Memory32>),
         "thread_exit" => Function::new_typed_with_env(&mut store, env, thread_exit),
         "sched_yield" => Function::new_typed_with_env(&mut store, env, sched_yield),
+        "stack_checkpoint" => Function::new_typed_with_env(&mut store, env, stack_checkpoint::<Memory32>),
+        "stack_restore" => Function::new_typed_with_env(&mut store, env, stack_restore::<Memory32>),
+        "fork" => Function::new_typed_with_env(&mut store, env, fork),
         "futex_wait" => Function::new_typed_with_env(&mut store, env, futex_wait::<Memory32>),
         "futex_wake" => Function::new_typed_with_env(&mut store, env, futex_wake::<Memory32>),
         "futex_wake_all" => Function::new_typed_with_env(&mut store, env, futex_wake_all::<Memory32>),
@@ -768,6 +794,9 @@ fn wasix_exports_64(
         "thread_parallelism" => Function::new_typed_with_env(&mut store, env, thread_parallelism::<Memory64>),
         "thread_exit" => Function::new_typed_with_env(&mut store, env, thread_exit),
         "sched_yield" => Function::new_typed_with_env(&mut store, env, sched_yield),
+        "stack_checkpoint" => Function::new_typed_with_env(&mut store, env, stack_checkpoint::<Memory64>),
+        "stack_restore" => Function::new_typed_with_env(&mut store, env, stack_restore::<Memory64>),
+        "fork" => Function::new_typed_with_env(&mut store, env, fork),
         "futex_wait" => Function::new_typed_with_env(&mut store, env, futex_wait::<Memory64>),
         "futex_wake" => Function::new_typed_with_env(&mut store, env, futex_wake::<Memory64>),
         "futex_wake_all" => Function::new_typed_with_env(&mut store, env, futex_wake_all::<Memory64>),

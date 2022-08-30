@@ -57,6 +57,18 @@ impl_context_object! {
     memories => VMMemory,
     extern_objs => VMExternObj,
     function_environments => VMFunctionEnvironment,
+    stack_snapshots => VMStackSnapshot,
+}
+
+/// Represents a series of stack snapshots that can be restored
+pub struct VMStackSnapshot
+{
+    /// Represents the stack thats held in memory
+    #[allow(dead_code)]
+    memory_stack: Vec<u8>,
+    /// Represents the stack thats held on the host machine
+    #[allow(dead_code)]
+    host_stack: Vec<u8>,
 }
 
 /// Set of objects managed by a context.
@@ -70,6 +82,7 @@ pub struct StoreObjects {
     instances: Vec<InstanceHandle>,
     extern_objs: Vec<VMExternObj>,
     function_environments: Vec<VMFunctionEnvironment>,
+    stack_snapshots: Vec<VMStackSnapshot>, 
 }
 
 impl StoreObjects {

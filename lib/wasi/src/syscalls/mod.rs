@@ -21,7 +21,7 @@ pub mod legacy;
 use self::types::*;
 use crate::state::{bus_error_into_wasi_err, wasi_error_into_bus_err, InodeHttpSocketType, WasiFutex, bus_write_rights, bus_read_rights, WasiBusCall, WasiThreadContext, WasiParkingLot, WasiDummyWaker};
 use crate::utils::map_io_err;
-use crate::{WasiBusProcessId, WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id};
+use crate::{WasiBusProcessId, WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE};
 use crate::{
     mem_error_to_wasi,
     state::{
@@ -55,6 +55,7 @@ use tracing::{debug, error, trace, warn};
 use wasmer::{
     AsStoreMut, FunctionEnvMut, Memory, Memory32, Memory64, MemorySize, RuntimeError, Value,
     WasmPtr, WasmSlice, FunctionEnv, Instance, Module, Extern, MemoryView, TypedFunction, Store, Pages, Global, AsStoreRef,
+    wasm_capture_stack, wasm_is_stack_restored, YieldingResult,
 };
 use wasmer_vbus::{FileDescriptor, StdioMode, BusDataFormat, BusInvocationEvent};
 use wasmer_vfs::{FsError, VirtualFile};
@@ -3339,6 +3340,321 @@ pub fn sched_yield(ctx: FunctionEnvMut<'_, WasiEnv>) -> Result<__wasi_errno_t, W
     Ok(__WASI_ESUCCESS)
 }
 
+fn get_stack_base(
+    mut ctx: &mut FunctionEnvMut<'_, WasiEnv>,
+) -> u64 {
+    ctx.data().stack_base
+}
+
+fn get_memory_stack_offset(
+    ctx: &mut FunctionEnvMut<'_, WasiEnv>,
+) -> Result<u64, String>
+{
+    // Get the current value of the stack pointer (which we will use
+    // to save all of the stack)
+    let stack_base = get_stack_base(ctx);
+    let stack_pointer = if let Some(stack_pointer) = ctx.data().inner().stack_pointer.clone() {
+        match stack_pointer.get(ctx) {
+            Value::I32(a) => a as u64,
+            Value::I64(a) => a as u64,
+            _ => stack_base
+        }
+    } else {
+        return Err(format!("failed to save stack: not exported __stack_pointer global"));
+    };
+
+    Ok(stack_base - stack_pointer)
+}
+
+fn set_memory_stack_offset(
+    ctx: &mut FunctionEnvMut<'_, WasiEnv>,
+    offset: u64,
+) -> Result<(), String>
+{
+    // Sets the stack pointer
+    let stack_base = get_stack_base(ctx);
+    let stack_pointer = stack_base - offset;
+    if let Some(stack_pointer_ptr) = ctx.data().inner().stack_pointer.clone() {
+        match stack_pointer_ptr.get(ctx) {
+            Value::I32(_) => {
+                stack_pointer_ptr.set(ctx, Value::I32(stack_pointer as i32));
+            },
+            Value::I64(_) => {
+                stack_pointer_ptr.set(ctx, Value::I64(stack_pointer as i64));
+            },
+            _ => {
+                return Err(format!("failed to save stack: __stack_pointer global is of an unknown type"));
+            }
+        }
+    } else {
+        return Err(format!("failed to save stack: not exported __stack_pointer global"));
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn get_memory_stack<M: MemorySize>(
+    ctx: &mut FunctionEnvMut<'_, WasiEnv>,
+) -> Result<Vec<u8>, String> {
+    
+
+    // Get the current value of the stack pointer (which we will use
+    // to save all of the stack)
+    let stack_base = get_stack_base(ctx);
+    let stack_pointer = if let Some(stack_pointer) = ctx.data().inner().stack_pointer.clone() {
+        match stack_pointer.get(ctx) {
+            Value::I32(a) => a as u64,
+            Value::I64(a) => a as u64,
+            _ => stack_base
+        }
+    } else {
+        return Err(format!("failed to save stack: not exported __stack_pointer global"));
+    };
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let stack_offset = env.stack_base - stack_pointer;
+
+    // Read the memory stack into a vector
+    let memory_stack_ptr = WasmPtr::<u8, M>::new(stack_pointer.try_into().map_err(|_| {
+        format!("failed to save stack: stack pointer overflow")
+    })?);
+    memory_stack_ptr.slice(&memory, stack_offset.try_into().map_err(|_| {
+        format!("failed to save stack: stack pointer overflow")
+    })?)
+        .and_then(|memory_stack| {
+            memory_stack.read_to_vec()
+        })
+        .map_err(|err| {
+            format!("failed to read stack: {}", err)
+        })
+}
+
+#[allow(dead_code)]
+fn set_memory_stack<M: MemorySize>(
+    mut ctx: &mut FunctionEnvMut<'_, WasiEnv>,
+    stack: Vec<u8>
+) -> Result<(), String> {
+    // First we restore the memory stack
+    let stack_base = get_stack_base(ctx);
+    let stack_offset = stack.len() as u64;
+    let stack_pointer = stack_base - stack_offset;
+    let stack_ptr = WasmPtr::<u8, M>::new(stack_pointer.try_into().map_err(|_| {
+        format!("failed to restore stack: stack pointer overflow")
+    })?);
+
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    stack_ptr.slice(&memory, stack_offset.try_into().map_err(|_| {
+        format!("failed to restore stack: stack pointer overflow")
+    })?)
+        .and_then(|memory_stack| {
+            memory_stack.write_slice(&stack[..])
+        })
+        .map_err(|err| {
+            format!("failed to write stack: {}", err)
+        })?;
+
+    // Set the stack pointer itself and return
+    set_memory_stack_offset(ctx, stack_offset)?;
+    Ok(())
+}
+
+/// ### `stack_checkpoint()`
+/// Creates a snapshot of the current stack which allows it to be restored
+/// later using its stack hash.
+pub fn stack_checkpoint<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    snapshot_ptr: WasmPtr<__wasi_stack_snaphost_t, M>,
+    mut val: u64,
+) -> YieldingResult<u64, WasiError> {
+    // If we were just restored then we need to return the value instead
+    if wasm_is_stack_restored() {
+        if val == 0 {
+            val = 1;
+        }
+        return YieldingResult::Result(Ok(val));
+    }
+
+    // Capture the wasm stack (if there is no stack to
+    // be saved then we have already resumed the stack
+    // from where it left off)
+    let host_stack = match wasm_capture_stack() {
+        Ok(a) => a,
+        Err(err) => {
+            trace!("-- stack_capture for checkpoint --");
+            return err
+        }
+    };
+    trace!("wasi::stack_save");
+    let env = ctx.data();
+    let secret = env.state().secret.clone();
+
+    // Capture the memory stack offset
+    let memory_stack_offset = wasi_try_yielding!(
+        get_memory_stack_offset(&mut ctx)
+            .map_err(|err| {
+                error!("failed to get the memory stack offset - {}", err);
+                WasiError::Exit(__WASI_EFAULT as u32)
+            })
+    );
+    
+    // We compute the hash again for two reasons... integrity so if there
+    // is a long jump that goes to the wrong place it will fail gracefully.
+    // and security so that the stack can not be used to attempt to break
+    // out of the sandbox
+    let hash = {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&secret[..]);
+        hasher.update(&host_stack[..]);
+        let hash: [u8; 16] = hasher.finalize()[..16].try_into().unwrap();
+        u128::from_le_bytes(hash)
+    };
+
+    // Build the upper stack
+    let mut upper_stack = [0u8; 1024];
+    let upper_stack_clip = host_stack.len().min(1024);
+    upper_stack[..upper_stack_clip]
+        .copy_from_slice(&host_stack[..upper_stack_clip]);
+
+    // Build a stack snapshot
+    let snapshot = __wasi_stack_snaphost_t {
+        memory_offset: memory_stack_offset as u32,
+        host_offset: host_stack.len() as u32,
+        upper_stack,
+        hash
+    };
+
+    // Save the stack snapshot
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    wasi_try_yielding!(
+        snapshot_ptr.write(&memory, snapshot)
+            .map_err(|err| {
+                error!("failed to write the snapshot to memory - {}", err);
+                WasiError::Exit(__WASI_EFAULT as u32)
+            })
+    );
+
+    // Return zero to indicate we have saved the snapshot
+    YieldingResult::Result(Ok(0))
+}
+
+/// ### `stack_restore()`
+/// Restores the current stack to a previous stack described by its
+/// stack hash.
+///
+/// ## Parameters
+///
+/// * `snapshot_ptr` - Contains a previously made snapshot
+pub fn stack_restore<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    snapshot_ptr: WasmPtr<__wasi_stack_snaphost_t, M>,
+) -> YieldingResult<u64, WasiError> {
+    // Capture the wasm stack (if there is no stack to
+    // be saved then we have already resumed the stack
+    // from where it left off)
+    let host_stack = match wasm_capture_stack() {
+        Ok(a) => a,
+        Err(err) => {
+            trace!("-- stack_capture for restore --");
+            return err
+        }
+    };
+    let host_stack_offset = host_stack.len() as u64;
+
+    trace!("wasi::stack_restore");
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let secret = env.state().secret.clone();
+
+    // Read the snapshot from the stack
+    let snapshot = wasi_try_yielding!(
+        snapshot_ptr.read(&memory)
+            .map_err(|err| {
+                error!("wasi::stack_restore - failed to read the stack snapshot from memory - {}", err);
+                WasiError::Exit(__WASI_EFAULT as u32)
+            })
+    );
+
+    // Build a new host stack using the current stack and the data that was supplied
+    let host_stack = {
+        let upper = snapshot.upper_stack.len()
+            .min(snapshot.host_offset as usize);
+        let mut s = snapshot.upper_stack[..upper].to_vec();
+        if snapshot.host_offset as usize > upper {
+            let remainder = snapshot.host_offset as usize - upper;
+            if remainder >= host_stack.len() {
+                error!("wasi::stack_restore - current stack is too small to restore the snapshot");
+                return YieldingResult::Result(Err(WasiError::Exit(__WASI_EFAULT as u32)));
+            }
+            let lower = host_stack.len() - remainder;
+            s.extend_from_slice(&host_stack[lower..]);
+        }
+        s
+    };
+
+    // Get the current host and memory stack pointers
+    let memory_stack_offset = wasi_try_yielding!(
+        get_memory_stack_offset(&mut ctx)
+            .map_err(|err| {
+                error!("wasi::stack_restore - failed to get the memory stack offset - {}", err);
+                WasiError::Exit(__WASI_EFAULT as u32)
+            })
+    ) as usize;
+    
+    // Check that it matches
+    let new_memory_stack_offset = snapshot.memory_offset as usize;
+    let new_host_stack_offset = snapshot.host_offset as usize;
+    if new_memory_stack_offset > memory_stack_offset {
+        error!("wasi::stack_restore - failed to restore stack: snapshot mismatch on memory stack size ({} > {})", new_memory_stack_offset, memory_stack_offset);
+        return YieldingResult::Result(Err(WasiError::Exit(__WASI_EFAULT as u32)));
+    }
+    if new_host_stack_offset != host_stack.len() {
+        error!("wasi::stack_restore - failed to restore stack: snapshot mismatch on host stack size ({} > {})", new_host_stack_offset, host_stack.len());
+        return YieldingResult::Result(Err(WasiError::Exit(__WASI_EFAULT as u32)));
+    }
+    
+    // We compute the hash again for two reasons... integrity so if there
+    // is a long jump that goes to the wrong place it will fail gracefully.
+    // and security so that the stack can not be used to attempt to break
+    // out of the sandbox
+    let hash = {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&secret[..]);
+        hasher.update(&host_stack[..]);
+        let hash: [u8; 16] = hasher.finalize()[..16].try_into().unwrap();
+        u128::from_le_bytes(hash)
+    };
+    if hash != snapshot.hash {
+        error!("snapshot hash failed - the snapshot can not be restored ({} vs {})", hash, snapshot.hash);
+        return YieldingResult::Result(Err(WasiError::Exit(__WASI_EFAULT as u32)));
+    }
+
+    // Set the memory stack pointer and then do a longjump
+    wasi_try_yielding!(
+        set_memory_stack_offset(&mut ctx, new_memory_stack_offset as u64)
+            .map_err(|err| {
+                error!("wasi::stack_restore - failed to update the memory stack offset - {}", err);
+                WasiError::Exit(__WASI_EFAULT as u32)
+            })
+    );
+    
+    // Now we restore the stack
+    trace!("-- restoring stack --");
+    YieldingResult::RestoreStack(host_stack)
+}
+
+/// ### `fork()`
+/// Forks the current process into a new subprocess. If the function
+/// returns a zero then its the new subprocess. If it returns a positive
+/// number then its the current process and the $pid represents the child.
+pub fn fork(ctx: FunctionEnvMut<'_, WasiEnv>) -> YieldingResult<__wasi_pid_t> {
+    trace!("wasi::fork");
+    panic!("fork not yet implemented")
+}
+
 /// ### `random_get()`
 /// Fill buffer with high-quality random data.  This function may be slow and block
 /// Inputs:
@@ -3538,10 +3854,11 @@ pub fn chdir<M: MemorySize>(
 pub fn thread_spawn<M: MemorySize>(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     user_data: u64,
+    stack_base: u64,
     reactor: __wasi_bool_t,
     ret_tid: WasmPtr<__wasi_tid_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::thread_spawn (reactor={}, thread_id={}, caller_id={})", reactor, ctx.data().id.raw(), current_caller_id().raw());
+    debug!("wasi::thread_spawn (reactor={}, thread_id={}, stack_base={}, caller_id={})", reactor, ctx.data().id.raw(), stack_base, current_caller_id().raw());
     
     // Now we use the environment and memory references
     let env = ctx.data();
@@ -3589,7 +3906,11 @@ pub fn thread_spawn<M: MemorySize>(
 
             // Build the context object and import the memory
             let mut ctx = WasiFunctionEnv::new(&mut store, wasi_env.clone());
-            ctx.data_mut(&mut store).id = thread_id;
+            {
+                let env = ctx.data_mut(&mut store);
+                env.id = thread_id;
+                env.stack_base = stack_base;
+            }
 
             let mut import_object = import_object_for_all_wasi_versions(&mut store, &ctx.env);
             import_object.define("env", "memory", memory.clone());
@@ -3607,6 +3928,7 @@ pub fn thread_spawn<M: MemorySize>(
                 WasiEnvInner {
                     module,
                     memory,
+                    stack_pointer: instance.exports.get_global("__stack_pointer").map(|a| a.clone()).ok(),
                     thread_spawn: instance.exports.get_typed_function(&store, "_start_thread").ok(),
                     react: instance.exports.get_typed_function(&store, "_react").ok(),
                     thread_local_destroy: instance.exports.get_typed_function(&store, "_thread_local_destroy").ok(),

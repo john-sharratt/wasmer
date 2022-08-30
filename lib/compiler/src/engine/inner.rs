@@ -237,7 +237,7 @@ impl EngineInner {
     #[allow(clippy::type_complexity)]
     pub(crate) fn allocate(
         &mut self,
-        _module: &ModuleInfo,
+        module: &ModuleInfo,
         functions: &PrimaryMap<LocalFunctionIndex, FunctionBody>,
         function_call_trampolines: &PrimaryMap<SignatureIndex, FunctionBody>,
         dynamic_function_trampolines: &PrimaryMap<FunctionIndex, FunctionBody>,
@@ -269,6 +269,7 @@ impl EngineInner {
                     function_bodies.as_slice(),
                     executable_sections.as_slice(),
                     data_sections.as_slice(),
+                    module.module_start,
                 )
                 .map_err(|message| {
                     CompileError::Resource(format!(
