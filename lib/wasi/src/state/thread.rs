@@ -7,12 +7,15 @@ use std::{
     time::Duration
 };
 
+use wasmer_wasi_types::__wasi_signal_t;
+
 /// Represents a running thread which allows a joiner to
 /// wait for the thread to exit
 #[derive(Debug, Clone)]
 pub struct WasiThread
 {
     finished: Arc<(Mutex<bool>, Condvar)>,
+    signals: Arc<Mutex<Vec<__wasi_signal_t>>>,
 }
 
 impl Default
@@ -22,6 +25,7 @@ for WasiThread
     {
         Self {
             finished: Arc::new((Mutex::new(false), Condvar::default())),
+            signals: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -52,5 +56,19 @@ impl WasiThread
                 return true;
             }
         }
+    }
+
+    /// Adds a signal for this thread to process
+    pub fn signal(&self, signal: __wasi_signal_t) {
+        let mut guard = self.signals.lock().unwrap();
+        if guard.contains(&signal) == false {
+            guard.push(signal);
+        }
+    }
+
+    /// Returns all the signals that are waiting to be processed
+    pub fn pop_signals(&self) -> Vec<__wasi_signal_t> {
+        let mut guard = self.signals.lock().unwrap();
+        guard.drain(..).collect()
     }
 }

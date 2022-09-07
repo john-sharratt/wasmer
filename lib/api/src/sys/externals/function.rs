@@ -1356,8 +1356,8 @@ mod inner {
                                     raise_capture_stack();
                                     continue;
                                 },
-                                Ok(YieldingResult::RestoreStack(stack)) => {
-                                    raise_restore_stack(stack);
+                                Ok(YieldingResult::RestoreStack(stack, val)) => {
+                                    raise_restore_stack(stack, val);
                                     unreachable!("stack restore should have restarted func_wrapper");
                                 },
                                 Err(panic) => resume_panic(panic),
@@ -1443,8 +1443,8 @@ mod inner {
                                     raise_capture_stack();
                                     continue;
                                 },
-                                Ok(YieldingResult::RestoreStack(stack)) => {
-                                    raise_restore_stack(stack);
+                                Ok(YieldingResult::RestoreStack(stack, val)) => {
+                                    raise_restore_stack(stack, val);
                                     unreachable!("stack restore should have restarted func_wrapper");
                                 },
                                 Err(panic) => resume_panic(panic),

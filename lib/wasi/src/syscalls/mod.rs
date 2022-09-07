@@ -43,6 +43,7 @@ use std::convert::{Infallible, TryInto};
 use std::io::{self, Read, Seek, Write};
 use std::mem::transmute;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicU32};
@@ -55,7 +56,7 @@ use tracing::{debug, error, trace, warn};
 use wasmer::{
     AsStoreMut, FunctionEnvMut, Memory, Memory32, Memory64, MemorySize, RuntimeError, Value,
     WasmPtr, WasmSlice, FunctionEnv, Instance, Module, Extern, MemoryView, TypedFunction, Store, Pages, Global, AsStoreRef,
-    wasm_capture_stack, wasm_is_stack_restored, YieldingResult,
+    wasm_capture_stack, wasm_stack_restored, YieldingResult, MemoryAccessError,
 };
 use wasmer_vbus::{FileDescriptor, StdioMode, BusDataFormat, BusInvocationEvent};
 use wasmer_vfs::{FsError, VirtualFile};
@@ -1172,145 +1173,160 @@ pub fn fd_pwrite<M: MemorySize>(
 ///     Number of bytes read
 ///
 pub fn fd_read<M: MemorySize>(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     fd: __wasi_fd_t,
     iovs: WasmPtr<__wasi_iovec_t<M>, M>,
     iovs_len: M::Offset,
     nread: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::fd_read: fd={}", fd);
-    let env = ctx.data();
-    let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
+    let mut env = ctx.data();
+    let mut memory = env.memory_view(&ctx);
+    let state = env.state.clone();
+    let inodes = state.inodes.clone();
     //let iovs_len = if iovs_len > M::Offset::from(1u32) { M::Offset::from(1u32) } else { iovs_len };
-    let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-    let nread_ref = nread.deref(&memory);
-
+    
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
-    let bytes_read = match fd {
-        __WASI_STDIN_FILENO => {
-            let mut guard = wasi_try_ok!(
-                inodes
-                    .stdin_mut(&state.fs.fd_map)
-                    .map_err(fs_error_into_wasi_err),
-                env
-            );
-            if let Some(ref mut stdin) = guard.deref_mut() {
-                wasi_try_ok!(read_bytes(stdin, &memory, iovs_arr), env)
-            } else {
-                return Ok(__WASI_EBADF);
-            }
-        }
-        __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
-        _ => {
-            if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
-                // TODO: figure out the error to return when lacking rights
-                return Ok(__WASI_EACCES);
-            }
-
-            let is_non_blocking = fd_entry.flags & __WASI_FDFLAG_NONBLOCK != 0;
-            let offset = fd_entry.offset as usize;
-            let inode_idx = fd_entry.inode;
-            let inode = &inodes.arena[inode_idx];
-
-            let bytes_read = {
-                let mut guard = inode.write();
-                match guard.deref_mut() {
-                    Kind::File { handle, .. } => {
-                        if let Some(handle) = handle {
-                            wasi_try_ok!(
-                                handle
-                                    .seek(std::io::SeekFrom::Start(offset as u64))
-                                    .map_err(map_io_err),
-                                env
-                            );
-                            wasi_try_ok!(read_bytes(handle, &memory, iovs_arr), env)
-                        } else {
-                            return Ok(__WASI_EINVAL);
-                        }
-                    }
-                    Kind::Socket { socket } => {
-                        wasi_try_ok!(socket.recv(&memory, iovs_arr), env)
-                    }
-                    Kind::Pipe { pipe } => {
-                        wasi_try_ok!(pipe.recv(&memory, iovs_arr), env)
-                    }
-                    Kind::Dir { .. } | Kind::Root { .. } => {
-                        // TODO: verify
-                        return Ok(__WASI_EISDIR);
-                    }
-                    Kind::EventNotifications {
-                        counter,
-                        is_semaphore,
-                        wakers,
-                    } => {
-                        let counter = Arc::clone(counter);
-                        let is_semaphore: bool = *is_semaphore;
-                        let wakers = Arc::clone(wakers);
-                        drop(guard);
-                        drop(inodes);
-
-                        let (tx, rx) = mpsc::channel();
-                        {
-                            let mut guard = wakers.lock().unwrap();
-                            guard.push_front(tx);
-                        }
-
-                        let ret;
-                        loop {
-                            let val = counter.load(Ordering::Acquire);
-                            if val > 0 {
-                                let new_val = if is_semaphore { val - 1 } else { 0 };
-                                if counter
-                                    .compare_exchange(
-                                        val,
-                                        new_val,
-                                        Ordering::AcqRel,
-                                        Ordering::Acquire,
-                                    )
-                                    .is_ok()
-                                {
-                                    let reader = val.to_ne_bytes();
-                                    ret = wasi_try_ok!(
-                                        read_bytes(&reader[..], &memory, iovs_arr),
-                                        env
-                                    );
-                                    break;
-                                } else {
-                                    continue;
-                                }
-                            }
-
-                            // If its none blocking then exit
-                            if is_non_blocking {
-                                return Ok(__WASI_EAGAIN);
-                            }
-
-                            // Yield for a fixed period of time and then check again
-                            env.yield_now()?;
-                            if rx.recv_timeout(Duration::from_millis(5)).is_err() {
-                                env.sleep(Duration::from_millis(5))?;
-                            }
-                        }
-                        ret
-                    }
-                    Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
-                    Kind::Buffer { buffer } => {
-                        wasi_try_ok!(read_bytes(&buffer[offset..], &memory, iovs_arr), env)
-                    }
+    let bytes_read = {
+        let inodes = inodes.read().unwrap();
+        match fd {
+            __WASI_STDIN_FILENO => {
+                let mut guard = wasi_try_ok!(
+                    inodes
+                        .stdin_mut(&state.fs.fd_map)
+                        .map_err(fs_error_into_wasi_err),
+                    env
+                );
+                if let Some(ref mut stdin) = guard.deref_mut() {
+                    let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                    wasi_try_ok!(read_bytes(stdin, &memory, iovs_arr), env)
+                } else {
+                    return Ok(__WASI_EBADF);
                 }
-            };
+            }
+            __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
+            _ => {
+                if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
+                    // TODO: figure out the error to return when lacking rights
+                    return Ok(__WASI_EACCES);
+                }
 
-            // reborrow
-            let mut fd_map = state.fs.fd_map.write().unwrap();
-            let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
-            fd_entry.offset += bytes_read as u64;
+                let is_non_blocking = fd_entry.flags & __WASI_FDFLAG_NONBLOCK != 0;
+                let offset = fd_entry.offset as usize;
+                let inode_idx = fd_entry.inode;
+                let inode = &inodes.arena[inode_idx];
 
-            bytes_read
+                let bytes_read = {
+                    let mut guard = inode.write();
+                    match guard.deref_mut() {
+                        Kind::File { handle, .. } => {
+                            if let Some(handle) = handle {
+                                wasi_try_ok!(
+                                    handle
+                                        .seek(std::io::SeekFrom::Start(offset as u64))
+                                        .map_err(map_io_err),
+                                    env
+                                );
+                                let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                                wasi_try_ok!(read_bytes(handle, &memory, iovs_arr), env)
+                            } else {
+                                return Ok(__WASI_EINVAL);
+                            }
+                        }
+                        Kind::Socket { socket } => {
+                            let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                            wasi_try_ok!(socket.recv(&memory, iovs_arr), env)
+                        }
+                        Kind::Pipe { pipe } => {
+                            let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                            wasi_try_ok!(pipe.recv(&memory, iovs_arr), env)
+                        }
+                        Kind::Dir { .. } | Kind::Root { .. } => {
+                            // TODO: verify
+                            return Ok(__WASI_EISDIR);
+                        }
+                        Kind::EventNotifications {
+                            counter,
+                            is_semaphore,
+                            wakers,
+                        } => {
+                            let counter = Arc::clone(counter);
+                            let is_semaphore: bool = *is_semaphore;
+                            let wakers = Arc::clone(wakers);
+                            drop(guard);
+                            drop(inodes);
+
+                            let (tx, rx) = mpsc::channel();
+                            {
+                                let mut guard = wakers.lock().unwrap();
+                                guard.push_front(tx);
+                            }
+
+                            let ret;
+                            loop {
+                                let val = counter.load(Ordering::Acquire);
+                                if val > 0 {
+                                    let new_val = if is_semaphore { val - 1 } else { 0 };
+                                    if counter
+                                        .compare_exchange(
+                                            val,
+                                            new_val,
+                                            Ordering::AcqRel,
+                                            Ordering::Acquire,
+                                        )
+                                        .is_ok()
+                                    {
+                                        let reader = val.to_ne_bytes();
+                                        let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                                        ret = wasi_try_ok!(
+                                            read_bytes(&reader[..], &memory, iovs_arr),
+                                            env
+                                        );
+                                        break;
+                                    } else {
+                                        continue;
+                                    }
+                                }
+
+                                // If its none blocking then exit
+                                if is_non_blocking {
+                                    return Ok(__WASI_EAGAIN);
+                                }
+
+                                // Yield for a fixed period of time and then check again
+                                env.yield_now()?;
+                                if rx.recv_timeout(Duration::from_millis(5)).is_err() {
+                                    env.clone().sleep(&mut ctx, Duration::from_millis(5))?;
+                                }
+                                env = ctx.data();
+                                memory = env.memory_view(&ctx);
+                            }
+                            ret
+                        }
+                        Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
+                        Kind::Buffer { buffer } => {
+                            let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                            wasi_try_ok!(read_bytes(&buffer[offset..], &memory, iovs_arr), env)
+                        }
+                    }
+                };
+
+                // reborrow
+                let mut fd_map = state.fs.fd_map.write().unwrap();
+                let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
+                fd_entry.offset += bytes_read as u64;
+
+                bytes_read
+            }
         }
     };
 
     let bytes_read: M::Offset = wasi_try_ok!(bytes_read.try_into().map_err(|_| __WASI_EOVERFLOW));
     trace!("wasi::fd_read: bytes_read={}", bytes_read);
+    
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let nread_ref = nread.deref(&memory);
     wasi_try_mem_ok!(nread_ref.write(bytes_read));
 
     Ok(__WASI_ESUCCESS)
@@ -3061,7 +3077,7 @@ pub fn path_unlink_file<M: MemorySize>(
 /// - `u32 nevents`
 ///     The number of events seen
 pub fn poll_oneoff<M: MemorySize>(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     in_: WasmPtr<__wasi_subscription_t, M>,
     out_: WasmPtr<__wasi_event_t, M>,
     nsubscriptions: M::Offset,
@@ -3069,129 +3085,132 @@ pub fn poll_oneoff<M: MemorySize>(
 ) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::poll_oneoff");
     trace!("  => nsubscriptions = {}", nsubscriptions);
-    let env = ctx.data();
-    let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
-
-    let subscription_array = wasi_try_mem_ok!(in_.slice(&memory, nsubscriptions));
-    let event_array = wasi_try_mem_ok!(out_.slice(&memory, nsubscriptions));
+    
     let mut events_seen: u32 = 0;
-    let out_ptr = nevents.deref(&memory);
-
-    let mut fd_guards = vec![];
+    
     let mut clock_subs = vec![];
     let mut in_events = vec![];
     let mut time_to_sleep = Duration::from_millis(5);
 
-    for sub in subscription_array.iter() {
-        let s: WasiSubscription = wasi_try_ok!(wasi_try_mem_ok!(sub.read()).try_into());
-        let mut peb = PollEventBuilder::new();
-
-        let fd = match s.event_type {
-            EventType::Read(__wasi_subscription_fs_readwrite_t { fd }) => {
-                match fd {
-                    __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
-                    _ => {
-                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), env);
-                        if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
-                            return Ok(__WASI_EACCES);
-                        }
-                    }
-                }
-                in_events.push(peb.add(PollEvent::PollIn).build());
-                Some(fd)
-            }
-            EventType::Write(__wasi_subscription_fs_readwrite_t { fd }) => {
-                match fd {
-                    __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
-                    _ => {
-                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), env);
-                        if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE) {
-                            return Ok(__WASI_EACCES);
-                        }
-                    }
-                }
-                in_events.push(peb.add(PollEvent::PollOut).build());
-                Some(fd)
-            }
-            EventType::Clock(clock_info) => {
-                if clock_info.clock_id == __WASI_CLOCK_REALTIME
-                    || clock_info.clock_id == __WASI_CLOCK_MONOTONIC
-                {
-                    // this is a hack
-                    // TODO: do this properly
-                    time_to_sleep = Duration::from_nanos(clock_info.timeout);
-                    clock_subs.push((clock_info, s.user_data));
-                    None
-                } else {
-                    unimplemented!("Polling not implemented for clocks yet");
-                }
-            }
-        };
-
-        if let Some(fd) = fd {
-            let wasi_file_ref = match fd {
-                __WASI_STDERR_FILENO => {
-                    wasi_try_ok!(
-                        inodes
-                            .stderr(&state.fs.fd_map)
-                            .map_err(fs_error_into_wasi_err),
-                        env
-                    )
-                }
-                __WASI_STDIN_FILENO => {
-                    wasi_try_ok!(
-                        inodes
-                            .stdin(&state.fs.fd_map)
-                            .map_err(fs_error_into_wasi_err),
-                        env
-                    )
-                }
-                __WASI_STDOUT_FILENO => {
-                    wasi_try_ok!(
-                        inodes
-                            .stdout(&state.fs.fd_map)
-                            .map_err(fs_error_into_wasi_err),
-                        env
-                    )
-                }
-                _ => {
-                    let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), env);
-                    let inode = fd_entry.inode;
-                    if !has_rights(fd_entry.rights, __WASI_RIGHT_POLL_FD_READWRITE) {
-                        return Ok(__WASI_EACCES);
-                    }
-
-                    {
-                        let guard = inodes.arena[inode].read();
-                        match guard.deref() {
-                            Kind::File { handle, .. } => {
-                                if let Some(h) = handle {
-                                    crate::state::InodeValFileReadGuard { guard }
-                                } else {
-                                    return Ok(__WASI_EBADF);
-                                }
-                            }
-                            Kind::Socket { .. }
-                            | Kind::Pipe { .. }
-                            | Kind::EventNotifications { .. } => {
-                                return Ok(__WASI_EBADF);
-                            }
-                            Kind::Dir { .. }
-                            | Kind::Root { .. }
-                            | Kind::Buffer { .. }
-                            | Kind::Symlink { .. } => {
-                                unimplemented!("polling read on non-files not yet supported")
-                            }
-                        }
-                    }
-                }
-            };
-            fd_guards.push(wasi_file_ref);
-        }
-    }
+    let inodes = ctx.data().state.inodes.clone();
+    let inodes = inodes.read().unwrap();
+    let mut fd_guards = vec![];
 
     #[allow(clippy::significant_drop_in_scrutinee)]
     let fds = {
+        let env = ctx.data();
+        let memory = env.memory_view(&ctx);
+        let state = env.state.deref();
+        
+        let subscription_array = wasi_try_mem_ok!(in_.slice(&memory, nsubscriptions));
+        for sub in subscription_array.iter() {
+            let s: WasiSubscription = wasi_try_ok!(wasi_try_mem_ok!(sub.read()).try_into());
+            let mut peb = PollEventBuilder::new();
+
+            let fd = match s.event_type {
+                EventType::Read(__wasi_subscription_fs_readwrite_t { fd }) => {
+                    match fd {
+                        __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
+                        _ => {
+                            let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), env);
+                            if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
+                                return Ok(__WASI_EACCES);
+                            }
+                        }
+                    }
+                    in_events.push(peb.add(PollEvent::PollIn).build());
+                    Some(fd)
+                }
+                EventType::Write(__wasi_subscription_fs_readwrite_t { fd }) => {
+                    match fd {
+                        __WASI_STDIN_FILENO | __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => (),
+                        _ => {
+                            let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), env);
+                            if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE) {
+                                return Ok(__WASI_EACCES);
+                            }
+                        }
+                    }
+                    in_events.push(peb.add(PollEvent::PollOut).build());
+                    Some(fd)
+                }
+                EventType::Clock(clock_info) => {
+                    if clock_info.clock_id == __WASI_CLOCK_REALTIME
+                        || clock_info.clock_id == __WASI_CLOCK_MONOTONIC
+                    {
+                        // this is a hack
+                        // TODO: do this properly
+                        time_to_sleep = Duration::from_nanos(clock_info.timeout);
+                        clock_subs.push((clock_info, s.user_data));
+                        None
+                    } else {
+                        unimplemented!("Polling not implemented for clocks yet");
+                    }
+                }
+            };
+
+            if let Some(fd) = fd {
+                let wasi_file_ref = match fd {
+                    __WASI_STDERR_FILENO => {
+                        wasi_try_ok!(
+                            inodes
+                                .stderr(&state.fs.fd_map)
+                                .map_err(fs_error_into_wasi_err),
+                            env
+                        )
+                    }
+                    __WASI_STDIN_FILENO => {
+                        wasi_try_ok!(
+                            inodes
+                                .stdin(&state.fs.fd_map)
+                                .map_err(fs_error_into_wasi_err),
+                            env
+                        )
+                    }
+                    __WASI_STDOUT_FILENO => {
+                        wasi_try_ok!(
+                            inodes
+                                .stdout(&state.fs.fd_map)
+                                .map_err(fs_error_into_wasi_err),
+                            env
+                        )
+                    }
+                    _ => {
+                        let fd_entry = wasi_try_ok!(state.fs.get_fd(fd), env);
+                        let inode = fd_entry.inode;
+                        if !has_rights(fd_entry.rights, __WASI_RIGHT_POLL_FD_READWRITE) {
+                            return Ok(__WASI_EACCES);
+                        }
+
+                        {
+                            let guard = inodes.arena[inode].read();
+                            match guard.deref() {
+                                Kind::File { handle, .. } => {
+                                    if let Some(h) = handle {
+                                        crate::state::InodeValFileReadGuard { guard }
+                                    } else {
+                                        return Ok(__WASI_EBADF);
+                                    }
+                                }
+                                Kind::Socket { .. }
+                                | Kind::Pipe { .. }
+                                | Kind::EventNotifications { .. } => {
+                                    return Ok(__WASI_EBADF);
+                                }
+                                Kind::Dir { .. }
+                                | Kind::Root { .. }
+                                | Kind::Buffer { .. }
+                                | Kind::Symlink { .. } => {
+                                    unimplemented!("polling read on non-files not yet supported")
+                                }
+                            }
+                        }
+                    }
+                };
+                fd_guards.push(wasi_file_ref);
+            }
+        }
+    
         let mut f = vec![];
         for fd in fd_guards.iter() {
             f.push(wasi_try_ok!(fd.as_ref().ok_or(__WASI_EBADF)).deref());
@@ -3216,13 +3235,13 @@ pub fn poll_oneoff<M: MemorySize>(
             Duration::from_millis(1),
         ) {
             Ok(0) => {
-                env.yield_now()?;
+                ctx.data().clone().yield_now_with_signals(&mut ctx)?;
             }
             Ok(a) => {
                 triggered = a;
             }
             Err(FsError::WouldBlock) => {
-                env.sleep(Duration::from_millis(1))?;
+                ctx.data().clone().sleep(&mut ctx, Duration::from_millis(1))?;
             }
             Err(err) => {
                 return Ok(fs_error_into_wasi_err(err));
@@ -3234,6 +3253,7 @@ pub fn poll_oneoff<M: MemorySize>(
     }
 
     for (i, seen_event) in seen_events.into_iter().enumerate() {
+        let mut env = ctx.data();
         let mut flags = 0;
         let mut error = __WASI_EAGAIN;
         let mut bytes_available = 0;
@@ -3265,6 +3285,10 @@ pub fn poll_oneoff<M: MemorySize>(
                 }
             }
         }
+        let memory = env.memory_view(&ctx);
+        let subscription_array = wasi_try_mem_ok!(in_.slice(&memory, nsubscriptions));
+        let event_array = wasi_try_mem_ok!(out_.slice(&memory, nsubscriptions));
+
         let event = __wasi_event_t {
             userdata: wasi_try_mem_ok!(subscription_array.index(i as u64).read()).userdata,
             error,
@@ -3296,11 +3320,20 @@ pub fn poll_oneoff<M: MemorySize>(
                     }
                 },
             };
+            
+            let mut env = ctx.data();
+            let memory = env.memory_view(&ctx);
+            let event_array = wasi_try_mem_ok!(out_.slice(&memory, nsubscriptions));
+
             wasi_try_mem_ok!(event_array.index(events_seen as u64).write(event));
             events_seen += 1;
         }
     }
     let events_seen: M::Offset = wasi_try_ok!(events_seen.try_into().map_err(|_| __WASI_EOVERFLOW));
+
+    let mut env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let out_ptr = nevents.deref(&memory);
     wasi_try_mem_ok!(out_ptr.write(events_seen));
     Ok(__WASI_ESUCCESS)
 }
@@ -3320,23 +3353,60 @@ pub fn proc_exit(
     Err(WasiError::Exit(code))
 }
 
+/// ### `thread_signal()`
+/// Send a signal to a particular thread in the current process.
+/// Note: This is similar to `signal` in POSIX.
+/// Inputs:
+/// - `__wasi_signal_t`
+///   Signal to be raised for this process
+pub fn thread_signal(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    tid: __wasi_tid_t,
+    sig: __wasi_signal_t
+) -> Result<__wasi_errno_t, WasiError> {
+    debug!("wasi::thread_signal(tid={}, sig={})", tid, sig);
+    {
+        let guard = ctx.data().state().threading.read().unwrap();
+        let tid = WasiThreadId(tid);
+        guard.signal(&tid, sig);
+    }
+    
+    let env = ctx.data();
+    env.clone().yield_now_with_signals(&mut ctx)?;
+
+    Ok(__WASI_ESUCCESS)
+}
+
 /// ### `proc_raise()`
 /// Send a signal to the process of the calling thread.
 /// Note: This is similar to `raise` in POSIX.
 /// Inputs:
 /// - `__wasi_signal_t`
 ///   Signal to be raised for this process
-pub fn proc_raise(ctx: FunctionEnvMut<'_, WasiEnv>, sig: __wasi_signal_t) -> __wasi_errno_t {
-    debug!("wasi::proc_raise");
-    unimplemented!("wasi::proc_raise")
+pub fn proc_raise(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    sig: __wasi_signal_t
+) -> Result<__wasi_errno_t, WasiError> {
+    debug!("wasi::proc_raise (sig={})", sig);
+    {
+        let guard = ctx.data().state().threading.read().unwrap();
+        guard.signal_all(sig);
+    }
+
+    let env = ctx.data();
+    env.clone().yield_now_with_signals(&mut ctx)?;
+
+    Ok(__WASI_ESUCCESS)
 }
 
 /// ### `sched_yield()`
 /// Yields execution of the thread
-pub fn sched_yield(ctx: FunctionEnvMut<'_, WasiEnv>) -> Result<__wasi_errno_t, WasiError> {
+pub fn sched_yield(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>
+) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::sched_yield");
     let env = ctx.data();
-    env.yield_now()?;
+    env.clone().yield_now_with_signals(&mut ctx)?;
     Ok(__WASI_ESUCCESS)
 }
 
@@ -3465,14 +3535,20 @@ fn set_memory_stack<M: MemorySize>(
 pub fn stack_checkpoint<M: MemorySize>(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     snapshot_ptr: WasmPtr<__wasi_stack_snaphost_t, M>,
-    mut val: u64,
-) -> YieldingResult<u64, WasiError> {
+    ret_val: WasmPtr<__wasi_longsize_t, M>,
+) -> YieldingResult<__wasi_errno_t, WasiError> {
     // If we were just restored then we need to return the value instead
-    if wasm_is_stack_restored() {
-        if val == 0 {
-            val = 1;
-        }
-        return YieldingResult::Result(Ok(val));
+    if let Some(val) = wasm_stack_restored() {
+        let env = ctx.data();
+        let memory = env.memory_view(&ctx);
+        wasi_try_yielding!(
+            ret_val.write(&memory, val.get())
+                .map_err(|err| {
+                    error!("failed to write the return value - {}", err);
+                    WasiError::Exit(__WASI_EFAULT as u32)
+                })
+        );
+        return YieldingResult::Result(Ok(__WASI_ESUCCESS));
     }
 
     // Capture the wasm stack (if there is no stack to
@@ -3537,7 +3613,14 @@ pub fn stack_checkpoint<M: MemorySize>(
     );
 
     // Return zero to indicate we have saved the snapshot
-    YieldingResult::Result(Ok(0))
+    wasi_try_yielding!(
+        ret_val.write(&memory, 0)
+            .map_err(|err| {
+                error!("failed to write the return value - {}", err);
+                WasiError::Exit(__WASI_EFAULT as u32)
+            })
+    );
+    YieldingResult::Result(Ok(__WASI_ESUCCESS))
 }
 
 /// ### `stack_restore()`
@@ -3550,7 +3633,8 @@ pub fn stack_checkpoint<M: MemorySize>(
 pub fn stack_restore<M: MemorySize>(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     snapshot_ptr: WasmPtr<__wasi_stack_snaphost_t, M>,
-) -> YieldingResult<u64, WasiError> {
+    mut val: __wasi_longsize_t,
+) -> YieldingResult<(), WasiError> {
     // Capture the wasm stack (if there is no stack to
     // be saved then we have already resumed the stack
     // from where it left off)
@@ -3606,10 +3690,14 @@ pub fn stack_restore<M: MemorySize>(
     // Check that it matches
     let new_memory_stack_offset = snapshot.memory_offset as usize;
     let new_host_stack_offset = snapshot.host_offset as usize;
+    /*
+     * TODO: Apparently the memory stack is not being preserved properly - need to look into why
+     * 
     if new_memory_stack_offset > memory_stack_offset {
         error!("wasi::stack_restore - failed to restore stack: snapshot mismatch on memory stack size ({} > {})", new_memory_stack_offset, memory_stack_offset);
         return YieldingResult::Result(Err(WasiError::Exit(__WASI_EFAULT as u32)));
     }
+    */
     if new_host_stack_offset != host_stack.len() {
         error!("wasi::stack_restore - failed to restore stack: snapshot mismatch on host stack size ({} > {})", new_host_stack_offset, host_stack.len());
         return YieldingResult::Result(Err(WasiError::Exit(__WASI_EFAULT as u32)));
@@ -3640,18 +3728,82 @@ pub fn stack_restore<M: MemorySize>(
                 WasiError::Exit(__WASI_EFAULT as u32)
             })
     );
+
+    // Compute the value we will return
+    let val = unsafe {
+        if val == 0 {
+            val = 1;
+        };
+        NonZeroU64::new_unchecked(val)
+    };
     
     // Now we restore the stack
     trace!("-- restoring stack --");
-    YieldingResult::RestoreStack(host_stack)
+    YieldingResult::RestoreStack(host_stack, val)
 }
 
-/// ### `fork()`
+/// ### `proc_fork()`
 /// Forks the current process into a new subprocess. If the function
 /// returns a zero then its the new subprocess. If it returns a positive
 /// number then its the current process and the $pid represents the child.
-pub fn fork(ctx: FunctionEnvMut<'_, WasiEnv>) -> YieldingResult<__wasi_pid_t> {
-    trace!("wasi::fork");
+pub fn proc_fork<M: MemorySize>(
+    ctx: FunctionEnvMut<'_, WasiEnv>,
+    pid: WasmPtr<__wasi_pid_t, M>,
+) -> YieldingResult<__wasi_errno_t> {
+    trace!("wasi::proc_fork");
+    panic!("fork not yet implemented")
+}
+
+/// ### `proc_join()`
+/// Joins the child process,blocking this one until the other finishes
+///
+/// ## Parameters
+///
+/// * `pid` - Handle of the child process to wait on
+pub fn proc_join<M: MemorySize>(
+    ctx: FunctionEnvMut<'_, WasiEnv>,
+    pid: __wasi_pid_t,
+    exit_code: WasmPtr<__wasi_exitcode_t, M>,
+) -> Result<__wasi_errno_t, WasiError> {
+    trace!("wasi::proc_join");
+    panic!("join not yet implemented")
+}
+
+/// ### `proc_signal()`
+/// Sends a signal to a child process
+///
+/// ## Parameters
+///
+/// * `pid` - Handle of the child process to wait on
+/// * `sig` - Signal to send the child process
+pub fn proc_signal<M: MemorySize>(
+    ctx: FunctionEnvMut<'_, WasiEnv>,
+    pid: __wasi_pid_t,
+    sig: __wasi_signal_t,
+) -> Result<__wasi_errno_t, WasiError> {
+    trace!("wasi::proc_signal");
+    panic!("child signal not yet implemented")
+}
+
+/// Replaces the current process with a new process
+///
+/// ## Parameters
+///
+/// * `name` - Name of the process to be spawned
+/// * `args` - List of the arguments to pass the process
+///   (entries are separated by line feeds)
+///
+/// ## Return
+///
+/// Returns a bus process id that can be used to invoke calls
+pub fn proc_exec<M: MemorySize>(
+    ctx: FunctionEnvMut<'_, WasiEnv>,
+    name: WasmPtr<u8, M>,
+    name_len: M::Offset,
+    args: WasmPtr<u8, M>,
+    args_len: M::Offset,
+) -> Result<(), WasiError> {
+    trace!("wasi::proc_exec");
     panic!("fork not yet implemented")
 }
 
@@ -3833,6 +3985,110 @@ pub fn chdir<M: MemorySize>(
     __WASI_ESUCCESS
 }
 
+/// ### `callback_spawn()`
+/// Sets the callback to invoke upon spawning of new threads
+/// 
+/// ### Parameters
+/// 
+/// * `name` - Name of the function that will be invoked
+pub fn callback_thread<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    name: WasmPtr<u8, M>,
+    name_len: M::Offset,
+) -> Result<(), MemoryAccessError> {
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let name = unsafe { name.read_utf8_string(&memory, name_len)? };
+    debug!("wasi::callback_spawn (name={})", name);
+
+    let funct = env.inner().exports
+        .get_typed_function(&ctx, &name).ok();
+
+    ctx.data_mut().inner_mut().thread_spawn = funct;
+    Ok(())
+}
+
+/// ### `callback_signal()`
+/// Sets the callback to invoke signals
+/// 
+/// ### Parameters
+/// 
+/// * `name` - Name of the function that will be invoked
+pub fn callback_signal<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    name: WasmPtr<u8, M>,
+    name_len: M::Offset,
+) -> Result<(), WasiError> {
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let name = unsafe {
+        match name.read_utf8_string(&memory, name_len) {
+            Ok(a) => a,
+            Err(err) => {
+                warn!("failed to access memory that holds the name of the signal callback: {}", err);
+                return Ok(());
+            }
+        }
+    };
+    debug!("wasi::callback_signal (name={})", name);
+
+    let funct = env.inner().exports
+        .get_typed_function(&ctx, &name).ok();
+
+    ctx.data_mut().inner_mut().signal = funct;
+
+    let env = ctx.data();
+    env.clone().yield_now_with_signals(&mut ctx)?;
+
+    Ok(())
+}
+
+/// ### `callback_reactor()`
+/// Sets the callback to invoke for reactors
+/// 
+/// ### Parameters
+/// 
+/// * `name` - Name of the function that will be invoked
+pub fn callback_reactor<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    name: WasmPtr<u8, M>,
+    name_len: M::Offset,
+) -> Result<(), MemoryAccessError> {
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let name = unsafe { name.read_utf8_string(&memory, name_len)? };
+    debug!("wasi::callback_reactor (name={})", name);
+
+    let funct = env.inner().exports
+        .get_typed_function(&ctx, &name).ok();
+
+    ctx.data_mut().inner_mut().react = funct;
+    Ok(())
+}
+
+/// ### `callback_thread_local_destroy()`
+/// Sets the callback to invoke for the destruction of thread local variables
+/// 
+/// ### Parameters
+/// 
+/// * `name` - Name of the function that will be invoked
+pub fn callback_thread_local_destroy<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    name: WasmPtr<u8, M>,
+    name_len: M::Offset,
+) -> Result<(), MemoryAccessError> {
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    let name = unsafe { name.read_utf8_string(&memory, name_len)? };
+    debug!("wasi::callback_thread_local_destroy (name={})", name);
+
+    let funct = env.inner().exports
+        .get_typed_function(&ctx, &name).ok();
+
+    ctx.data_mut().inner_mut().thread_local_destroy = funct;
+    Ok(())
+}
+
 /// ### `thread_spawn()`
 /// Creates a new thread by spawning that shares the same
 /// memory address space, file handles and main event loops.
@@ -3928,9 +4184,11 @@ pub fn thread_spawn<M: MemorySize>(
                 WasiEnvInner {
                     module,
                     memory,
+                    exports: instance.exports.clone(),
                     stack_pointer: instance.exports.get_global("__stack_pointer").map(|a| a.clone()).ok(),
                     thread_spawn: instance.exports.get_typed_function(&store, "_start_thread").ok(),
                     react: instance.exports.get_typed_function(&store, "_react").ok(),
+                    signal: instance.exports.get_typed_function(&store, "__wasm_signal").ok(),
                     thread_local_destroy: instance.exports.get_typed_function(&store, "_thread_local_destroy").ok(),
                 }
             );
@@ -4226,14 +4484,14 @@ pub fn thread_local_get<M: MemorySize>(
 ///
 /// * `duration` - Amount of time that the thread should sleep
 pub fn thread_sleep(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     duration: __wasi_timestamp_t,
 ) -> Result<__wasi_errno_t, WasiError> {
     //trace!("wasi::thread_sleep");
 
     let env = ctx.data();
     let duration = Duration::from_nanos(duration as u64);
-    env.sleep(duration)?;
+    env.clone().sleep(&mut ctx, duration)?;
     Ok(__WASI_ESUCCESS)
 }
 
@@ -4462,7 +4720,7 @@ pub fn futex_wake_all<M: MemorySize>(
 
 /// ### `getpid()`
 /// Returns the handle of the current process
-pub fn getpid<M: MemorySize>(
+pub fn proc_id<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ret_pid: WasmPtr<__wasi_pid_t, M>,
 ) -> __wasi_errno_t {
@@ -4481,7 +4739,7 @@ pub fn getpid<M: MemorySize>(
 
 /// ### `getppid()`
 /// Returns the parent handle of the supplied process
-pub fn getppid<M: MemorySize>(
+pub fn proc_parent<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     pid: __wasi_pid_t,
     ret_parent: WasmPtr<__wasi_pid_t, M>,
@@ -4513,7 +4771,7 @@ pub fn getppid<M: MemorySize>(
 pub fn thread_exit(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     exitcode: __wasi_exitcode_t,
-) -> Result<__wasi_errno_t, WasiError> {
+) -> Result<(), WasiError> {
     debug!("wasi::thread_exit");
     Err(WasiError::Exit(exitcode))
 }
@@ -4537,7 +4795,7 @@ pub fn thread_exit(
 /// ## Return
 ///
 /// Returns a bus process id that can be used to invoke calls
-pub fn process_spawn<M: MemorySize>(
+pub fn proc_spawn<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     name: WasmPtr<u8, M>,
     name_len: M::Offset,
@@ -4655,9 +4913,9 @@ pub fn process_spawn<M: MemorySize>(
     // Add the process to the environment state
     let bid = {
         let mut guard = env.state.threading.write().unwrap();
-        guard.process_seed += 1;
-        let bid = guard.process_seed;
-        guard.processes.insert(bid.into(), Box::new(process));
+        guard.bus_process_seed += 1;
+        let bid = guard.bus_process_seed;
+        guard.bus_processes.insert(bid.into(), Box::new(process));
         bid
     };
 
@@ -4758,8 +5016,8 @@ fn bus_open_internal<M: MemorySize>(
     // Check if it already exists
     if reuse {
         let guard = env.state.threading.read().unwrap();
-        if let Some(bid) = guard.process_reuse.get(&name) {
-            if guard.processes.contains_key(bid) {
+        if let Some(bid) = guard.bus_process_reuse.get(&name) {
+            if guard.bus_processes.contains_key(bid) {
                 wasi_try_mem_bus_ok!(ret_bid.write(&memory, bid.clone().into()));
                 return Ok(__BUS_ESUCCESS);
             }
@@ -4789,10 +5047,10 @@ fn bus_open_internal<M: MemorySize>(
     // Add the process to the environment state
     let bid = {
         let mut guard = env.state.threading.write().unwrap();
-        guard.process_seed += 1;
-        let bid: WasiBusProcessId = guard.process_seed.into();
-        guard.processes.insert(bid, Box::new(process));
-        guard.process_reuse.insert(name, bid);
+        guard.bus_process_seed += 1;
+        let bid: WasiBusProcessId = guard.bus_process_seed.into();
+        guard.bus_processes.insert(bid, Box::new(process));
+        guard.bus_process_reuse.insert(name, bid);
         bid
     };
 
@@ -4812,9 +5070,9 @@ pub fn bus_close(ctx: FunctionEnvMut<'_, WasiEnv>, bid: __wasi_bid_t) -> __bus_e
 
     let env = ctx.data();
     let mut guard = env.state.threading.write().unwrap();
-    if let Some(process) = guard.processes.remove(&bid) {
+    if let Some(process) = guard.bus_processes.remove(&bid) {
         let name: Cow<'static, str> = process.name.clone().into();
-        guard.process_reuse.remove(&name);
+        guard.bus_process_reuse.remove(&name);
     }
 
     __BUS_ESUCCESS
@@ -4855,7 +5113,7 @@ pub fn bus_call<M: MemorySize>(
     let mut guard = env.state.threading.read().unwrap();
     let bid: WasiBusProcessId = bid.into();
     let process = if let Some(process) = {
-        guard.processes.get(&bid).map(|p| p.clone())
+        guard.bus_processes.get(&bid).map(|p| p.clone())
     } { process } else {
         return Ok(__BUS_EBADHANDLE);
     };
@@ -5106,14 +5364,14 @@ pub fn bus_poll<M: MemorySize>(
         let mut exited_bids = HashSet::new();
         {
             let mut guard = env.state.threading.write().unwrap();
-            for (pid, process) in guard.processes.iter_mut() {
+            for (pid, process) in guard.bus_processes.iter_mut() {
                 let pinned_process = Pin::new(process.inst.as_mut());
                 if pinned_process.poll_finished(&mut cx) == Poll::Ready(()) {
                     exited_bids.insert(*pid);
                 }
             }
             for pid in exited_bids.iter() {
-                guard.processes.remove(pid);
+                guard.bus_processes.remove(pid);
             }
         }
 
@@ -6566,7 +6824,7 @@ pub fn sock_listen<M: MemorySize>(
 ///
 /// New socket connection
 pub fn sock_accept<M: MemorySize>(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     sock: __wasi_fd_t,
     fd_flags: __wasi_fdflags_t,
     ro_fd: WasmPtr<__wasi_fd_t, M>,
@@ -6574,7 +6832,7 @@ pub fn sock_accept<M: MemorySize>(
 ) -> Result<__wasi_errno_t, WasiError> {
     debug!("wasi::sock_accept");
 
-    let env = ctx.data();
+    let mut env = ctx.data();
     let (child, addr) = {
         let mut ret;
         let (_, state) = env.get_memory_and_wasi_state(&ctx, 0);
@@ -6592,7 +6850,8 @@ pub fn sock_accept<M: MemorySize>(
                         continue;
                     }
                     Err(__WASI_EAGAIN) => {
-                        env.sleep(Duration::from_millis(5))?;
+                        env.clone().sleep(&mut ctx, Duration::from_millis(5))?;
+                        env = ctx.data();
                         continue;
                     }
                     Err(err) => Err(err),

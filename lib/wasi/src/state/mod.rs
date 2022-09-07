@@ -1832,21 +1832,41 @@ unsafe impl Sync for WasiThreadContext { }
 /// These internal implementation details are hidden away from the
 /// consumer who should instead implement the vbus trait on the runtime
 
-#[derive(Derivative, Default)]
+#[derive(Derivative)]
 #[derivative(Debug)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub(crate) struct WasiStateThreading {
     threads: Arc<RwLock<HashMap<WasiThreadId, WasiThread>>>,
     thread_count: Arc<AtomicU32>,
-    pub processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess>>,
-    pub process_reuse: HashMap<Cow<'static, str>, WasiBusProcessId>,
-    pub process_seed: u32,
+    pub bus_processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess>>,
+    pub bus_process_reuse: HashMap<Cow<'static, str>, WasiBusProcessId>,
+    pub bus_process_seed: u32,
     pub thread_seed: WasiThreadId,
     pub thread_local: HashMap<(WasiThreadId, u32), u64>,
     pub thread_local_user_data: HashMap<u32, u64>,
     pub thread_local_seed: u32,
     #[derivative(Debug = "ignore")]
     pub thread_ctx: HashMap<WasiCallingId, Arc<WasiThreadContext>>,
+}
+
+impl WasiStateThreading
+{
+    fn new() -> (Self, WasiThreadHandle) {
+        let mut ret = Self {
+            threads: Default::default(),
+            thread_count: Default::default(),
+            bus_processes: Default::default(),
+            bus_process_reuse: Default::default(),
+            bus_process_seed: 1,
+            thread_seed: Default::default(),
+            thread_local: Default::default(),
+            thread_local_user_data: Default::default(),
+            thread_local_seed: Default::default(),
+            thread_ctx: Default::default(),
+        };
+        let handle = ret.new_thread();
+        (ret, handle)
+    }
 }
 
 impl WasiStateThreading
@@ -1871,6 +1891,31 @@ impl WasiStateThreading
     pub fn get(&self, tid: &WasiThreadId) -> Option<WasiThread> {
         let guard = self.threads.read().unwrap();
         guard.get(tid).map(|a| a.clone())
+    }
+
+    pub fn signal(&self, tid: &WasiThreadId, signal: __wasi_signal_t) {
+        let guard = self.threads.read().unwrap();
+        if let Some(thread) = guard.get(tid) {
+            thread.signal(signal);
+        } else {
+            trace!("lost-signal(tid={}, sig={})", tid.0, signal);
+        }
+    }
+
+    pub fn signal_all(&self, signal: __wasi_signal_t) {
+        let guard = self.threads.read().unwrap();
+        for thread in guard.values() {
+            thread.signal(signal);
+        }
+    }
+
+    pub fn pop_signals(&self, tid: &WasiThreadId) -> Vec<__wasi_signal_t> {
+        let guard = self.threads.read().unwrap();
+        if let Some(thread) = guard.get(tid) {
+            thread.pop_signals()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn active_threads(&self) -> u32 {
@@ -2004,6 +2049,7 @@ pub struct WasiState {
     pub(crate) bus: WasiBusState,
     pub args: Vec<Vec<u8>>,
     pub envs: Vec<Vec<u8>>,
+    pub main_thread: Mutex<WasiThreadHandle>
 }
 
 impl WasiState {

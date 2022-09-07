@@ -1,6 +1,6 @@
 //! Builder system for configuring a [`WasiState`] and creating it.
 
-use crate::state::{default_fs_backing, WasiFs, WasiState};
+use crate::state::{default_fs_backing, WasiFs, WasiState, WasiStateThreading};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes};
 use generational_arena::Arena;
@@ -8,7 +8,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::RwLock;
 use thiserror::Error;
 use wasmer::AsStoreMut;
@@ -464,15 +464,18 @@ impl WasiStateBuilder {
             wasi_fs
         };
 
+        let (threading, main_handle) = WasiStateThreading::new();
+
         Ok(WasiState {
             fs: wasi_fs,
             secret: rand::thread_rng().gen::<[u8; 32]>(),
             inodes: Arc::new(inodes),
             args: self.args.clone(),
-            threading: Default::default(),
+            threading: RwLock::new(threading),
             futexs: Default::default(),
             clock_offset: Default::default(),
             bus: Default::default(),
+            main_thread: Mutex::new(main_handle),
             envs: self
                 .envs
                 .iter()

@@ -9,6 +9,8 @@ pub struct __wasi_stack_snaphost_t {
     pub hash: u128,
 }
 
+pub type __wasi_longsize_t = u64;
+
 pub type __wasi_signal_t = u8;
 pub const __WASI_SIGHUP: u8 = 1;
 pub const __WASI_SIGINT: u8 = 2;

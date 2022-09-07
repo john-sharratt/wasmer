@@ -52,7 +52,7 @@ pub use wasmer_types::{
 };
 
 // TODO: should those be moved into wasmer::vm as well?
-pub use wasmer_vm::{raise_user_trap, wasm_capture_stack, wasm_is_stack_restored, MemoryError};
+pub use wasmer_vm::{raise_user_trap, wasm_capture_stack, wasm_stack_restored, MemoryError};
 pub mod vm {
     //! The `vm` module re-exports wasmer-vm types.
 

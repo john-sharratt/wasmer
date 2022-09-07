@@ -1,6 +1,6 @@
 //! The WebAssembly possible errors
 use crate::{ExternType, Pages};
-use core::convert::Infallible;
+use core::{convert::Infallible, num::NonZeroU64};
 use std::io;
 use thiserror::Error;
 
@@ -237,7 +237,7 @@ pub enum YieldingResult<T, E = Infallible> {
     /// Capture the current stack
     CaptureStack,
     /// Restores the stack to a previous state
-    RestoreStack(Vec<u8>),
+    RestoreStack(Vec<u8>, NonZeroU64),
 }
 
 /// The error that can happen while parsing a `str`

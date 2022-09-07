@@ -8,6 +8,7 @@ use crate::vmcontext::{VMFunctionContext, VMTrampoline};
 use crate::{Trap, VMFunctionBody};
 use backtrace::Backtrace;
 use core::ptr::{read, read_unaligned};
+use std::num::NonZeroU64;
 use corosensei::stack::DefaultStack;
 use corosensei::trap::{CoroutineTrapHandler, TrapHandlerRegs};
 use corosensei::{CoroutineResult, ScopedCoroutine, Yielder};
@@ -574,8 +575,8 @@ pub unsafe fn raise_capture_stack() {
 }
 
 /// Raise a trap that will long jump to another stack offset
-pub unsafe fn raise_restore_stack(stack: Vec<u8>) {
-    yield_with(UnwindReason::RestoreStack(stack));
+pub unsafe fn raise_restore_stack(stack: Vec<u8>, val: NonZeroU64) {
+    yield_with(UnwindReason::RestoreStack(stack, val));
 }
 
 /// Raises a trap from inside library code immediately.
@@ -665,7 +666,7 @@ thread_local! {
     static YIELDER: Cell<Option<NonNull<Yielder<(), UnwindReason>>>> = Cell::new(None);
     static TRAP_HANDLER: AtomicPtr<TrapHandlerContext> = AtomicPtr::new(ptr::null_mut());
     static CAPTURED_STACK: Cell<Option<Vec<u8>>> = Cell::new(None);
-    static STACK_RESTORED: Cell<bool> = Cell::new(false);
+    static STACK_RESTORED: Cell<u64> = Cell::new(0);
 }
 
 /// Read-only information that is used by signal handlers to handle and recover
@@ -834,7 +835,7 @@ enum UnwindReason {
     /// Captures the current stack
     CaptureStack,
     /// Restores the stack to a particular offset into the current stack
-    RestoreStack(Vec<u8>),
+    RestoreStack(Vec<u8>, NonZeroU64),
     /// A trap caused by the Wasm generated code
     WasmTrap {
         backtrace: Backtrace,
@@ -854,7 +855,7 @@ impl UnwindReason {
                 signal_trap,
             } => Trap::wasm(pc, backtrace, signal_trap),
             UnwindReason::CaptureStack => std::panic::resume_unwind(Box::new(format!("unhandled capturestack"))),
-            UnwindReason::RestoreStack(_) => std::panic::resume_unwind(Box::new(format!("unhandled restorestack"))),
+            UnwindReason::RestoreStack(_, _) => std::panic::resume_unwind(Box::new(format!("unhandled restorestack"))),
             UnwindReason::Panic(panic) => std::panic::resume_unwind(panic),
         }
     }
@@ -912,7 +913,7 @@ fn on_wasm_stack<F: FnOnce() -> T, T>(
     // Set up metadata for the trap handler for the duration of the coroutine
     // execution. This is restored to its previous value afterwards.
     TrapHandlerContext::install(trap_handler, coro.trap_handler(), || {
-        STACK_RESTORED.with(|cell| cell.set(false));
+        STACK_RESTORED.with(|cell| cell.set(0));
         loop {
             return match coro.resume(()) {
                 CoroutineResult::Yield(trap) => {
@@ -924,8 +925,8 @@ fn on_wasm_stack<F: FnOnce() -> T, T>(
                             });
                             continue;
                         },
-                        UnwindReason::RestoreStack(stack) => {
-                            STACK_RESTORED.with(|cell| cell.set(true));
+                        UnwindReason::RestoreStack(stack, val) => {
+                            STACK_RESTORED.with(|cell| cell.set(val.get()));
                             unsafe {
                                 coro.deserialize(&stack[..])
                                     .map_err(|_| {
@@ -988,7 +989,7 @@ pub fn on_host_stack<F: FnOnce() -> T, T>(f: F) -> T {
     yielder.on_parent_stack(move || (wrapped.0)())
 }
 
-/// Captures the current WASM stack offset and returns it
+/// Captures the current WASM stack and returns it
 pub fn wasm_capture_stack<T, E>() -> Result<Vec<u8>, YieldingResult<T, E>> {
     let stack = CAPTURED_STACK.with(|cell| {
         cell.replace(None)
@@ -999,9 +1000,11 @@ pub fn wasm_capture_stack<T, E>() -> Result<Vec<u8>, YieldingResult<T, E>> {
     }
 }
 
-/// Captures the current WASM stack offset and returns it
-pub fn wasm_is_stack_restored() -> bool {
-    STACK_RESTORED.with(|cell| cell.replace(false))
+/// Returns true if the stack was just recently restored and resets the flag
+pub fn wasm_stack_restored() -> Option<NonZeroU64> {
+    NonZeroU64::new(
+        STACK_RESTORED.with(|cell| cell.replace(0))
+    )
 }
 
 #[cfg(windows)]

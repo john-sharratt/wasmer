@@ -2,6 +2,7 @@
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::num::NonZeroU64;
 use wasm_bindgen::convert::FromWasmAbi;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
@@ -175,6 +176,6 @@ pub fn wasm_capture_stack<T, E>() -> Result<Vec<u8>, YieldingResult<T, E>> {
 }
 
 /// Returns true if the stack was just recently restored and resets the flag
-pub fn wasm_is_stack_restored() -> bool {
-    false
+pub fn wasm_stack_restored() -> Option<NonZeroU64> {
+    None
 }
