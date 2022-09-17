@@ -8,11 +8,15 @@
 //! let add_one_native: TypedFunction<i32, i32> = add_one.native().unwrap();
 //! ```
 use std::marker::PhantomData;
+use std::cell::Cell;
 
+use crate::StoreMut;
 use crate::sys::{
     AsStoreMut, FromToNativeWasmType, Function, NativeWasmTypeInto, RuntimeError, WasmTypeList,
 };
-use wasmer_types::RawValue;
+use wasmer_types::{
+    RawValue, OnCalledAction
+};
 
 /// A WebAssembly function that can be called natively
 /// (using the Native ABI).
@@ -53,6 +57,10 @@ where
     fn from(other: TypedFunction<Args, Rets>) -> Self {
         other.func
     }
+}
+
+thread_local! {
+    static ON_CALLED: Cell<Option<Box<dyn FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>>>>> = Cell::new(None);
 }
 
 macro_rules! impl_native_traits {
@@ -97,15 +105,31 @@ macro_rules! impl_native_traits {
                     }
                     rets_list.as_mut()
                 };
-                unsafe {
-                    wasmer_vm::wasmer_call_trampoline(
-                        store.as_store_ref().signal_handler(),
-                        anyfunc.vmctx,
-                        anyfunc.call_trampoline,
-                        anyfunc.func_ptr,
-                        args_rets.as_mut_ptr() as *mut u8,
-                    )
-                }?;
+
+                let mut r;
+                loop {
+                    r = unsafe {
+                        wasmer_vm::wasmer_call_trampoline(
+                            store.as_store_ref().signal_handler(),
+                            anyfunc.vmctx,
+                            anyfunc.call_trampoline,
+                            anyfunc.func_ptr,
+                            args_rets.as_mut_ptr() as *mut u8,
+                        )
+                    };
+                    let store_mut = store.as_store_mut();
+                    if let Some(callback) = store_mut.inner.on_called.take() {
+                        match callback(store_mut) {
+                            Ok(wasmer_types::OnCalledAction::InvokeAgain) => { continue; }
+                            Ok(wasmer_types::OnCalledAction::Finish) => { break; }
+                            Ok(wasmer_types::OnCalledAction::Trap(trap)) => { return Err(RuntimeError::user(trap)) },
+                            Err(trap) => { return Err(RuntimeError::user(trap)) },
+                        }
+                    }
+                    break;
+                }
+                r?;
+
                 let num_rets = rets_list.len();
                 if !using_rets_array && num_rets > 0 {
                     let src_pointer = params_list.as_ptr();

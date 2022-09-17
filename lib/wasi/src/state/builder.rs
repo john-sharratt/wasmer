@@ -526,7 +526,7 @@ pub struct PreopenDirBuilder {
 }
 
 /// The built version of `PreopenDirBuilder`
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PreopenedDir {
     pub(crate) path: PathBuf,
     pub(crate) alias: Option<String>,

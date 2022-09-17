@@ -14,7 +14,7 @@ use std::sync::{RwLock, Arc};
 use wasmer_types::{Bytes, MemoryStyle, MemoryType, Pages, MemoryError, LinearMemory, VMMemoryDefinition, MemoryRole};
 
 // Represents a region of memory that plays a particular role
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VMMemoryRegion {
     // Start of the memory region
     start: u64,
@@ -150,6 +150,14 @@ impl WasmMmap
             }
         }
         MemoryRole::default()
+    }
+
+    /// Copies the memory
+    /// (in this case it performs a copy-on-write to save memory)
+    pub fn fork(&mut self) -> Result<(), MemoryError>
+    {
+        self.alloc.fork(Some(self.size.bytes().0))
+            .map_err(|err| MemoryError::Generic(err))
     }
 }
 
@@ -368,6 +376,11 @@ for VMOwnedMemory
         None
     }
 
+    /// Copies this memory to a new memory
+    fn fork(&mut self) -> Result<(), MemoryError> {
+        self.mmap.fork()
+    }
+
     /// Marks a region of the memory for a particular role
     fn mark_region(&mut self, start: u64, end: u64, role: MemoryRole) {
         self.mmap.mark_region(start, end, role);
@@ -460,6 +473,12 @@ for VMSharedMemory
         Some(Box::new(self.clone()))
     }
 
+    /// Copies this memory to a new memory
+    fn fork(&mut self) -> Result<(), MemoryError> {
+        let mut guard = self.mmap.write().unwrap();
+        guard.fork()
+    }
+
     /// Marks a region of the memory for a particular role
     fn mark_region(&mut self, start: u64, end: u64, role: MemoryRole) {
         let mut guard = self.mmap.write().unwrap();
@@ -483,7 +502,7 @@ for VMSharedMemory
 
 /// Represents linear memory that can be either owned or shared
 #[derive(Debug)]
-pub struct VMMemory(Box<dyn LinearMemory + 'static>);
+pub struct VMMemory(pub Box<dyn LinearMemory + 'static>);
 
 impl Into<VMMemory>
 for Box<dyn LinearMemory + 'static>
@@ -527,6 +546,11 @@ for VMMemory
     /// Attempts to clone this memory (if its clonable)
     fn try_clone(&self) -> Option<Box<dyn LinearMemory + 'static>> {
         self.0.try_clone()
+    }
+
+    /// Copies this memory to a new memory
+    fn fork(&mut self) -> Result<(), MemoryError> {
+        self.0.fork()
     }
 
     /// Marks a region of the memory for a particular role

@@ -221,4 +221,35 @@ impl<'a> MemoryView<'a> {
         view.set_index(offset, val);
         Ok(())
     }
+
+    /// Copies the memory and returns it as a vector of bytes
+    pub fn copy_to_vec(&self) -> Result<Vec<u8>, MemoryAccessError> {
+        let mut new_memory = Vec::new();
+        let mut offset = 0;
+        let mut chunk = [0u8; 40960];
+        while offset < self.data_size() {
+            let remaining = self.data_size() - offset;
+            let sublen = remaining.min(chunk.len() as u64) as usize;
+            self.read(offset, &mut chunk[..sublen])?;
+            new_memory.extend_from_slice(&chunk[..sublen]);
+            offset += sublen as u64;
+        }
+        Ok(new_memory)
+    }
+
+    /// Copies the memory to another new memory object
+    pub fn copy_to_memory(&self, new_memory: &Self) -> Result<(), MemoryAccessError> {
+        let mut offset = 0;
+        let mut chunk = [0u8; 40960];
+        while offset < self.data_size() {
+            let remaining = self.data_size() - offset;
+            let sublen = remaining.min(chunk.len() as u64) as usize;
+            self.read(offset, &mut chunk[..sublen])?;
+
+            new_memory.write(offset, &chunk[..sublen])?;
+            
+            offset += sublen as u64;
+        }
+        Ok(())
+    }
 }

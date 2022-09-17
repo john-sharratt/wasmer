@@ -8,7 +8,6 @@ use crate::vmcontext::{VMFunctionContext, VMTrampoline};
 use crate::{Trap, VMFunctionBody};
 use backtrace::Backtrace;
 use core::ptr::{read, read_unaligned};
-use std::num::NonZeroU64;
 use corosensei::stack::DefaultStack;
 use corosensei::trap::{CoroutineTrapHandler, TrapHandlerRegs};
 use corosensei::{CoroutineResult, ScopedCoroutine, Yielder};
@@ -23,7 +22,7 @@ use std::mem::MaybeUninit;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{compiler_fence, AtomicPtr, Ordering};
 use std::sync::{Mutex, Once};
-use wasmer_types::{TrapCode, YieldingResult};
+use wasmer_types::TrapCode;
 
 // TrapInformation can be stored in the "Undefined Instruction" itself.
 // On x86_64, 0xC? select a "Register" for the Mod R/M part of "ud1" (so with no other bytes after)
@@ -569,16 +568,6 @@ pub unsafe fn raise_user_trap(data: Box<dyn Error + Send + Sync>) -> ! {
     unwind_with(UnwindReason::UserTrap(data))
 }
 
-/// Raise a trap that will capture the current stack
-pub unsafe fn raise_capture_stack() {
-    yield_with(UnwindReason::CaptureStack);
-}
-
-/// Raise a trap that will long jump to another stack offset
-pub unsafe fn raise_restore_stack(stack: Vec<u8>, val: NonZeroU64) {
-    yield_with(UnwindReason::RestoreStack(stack, val));
-}
-
 /// Raises a trap from inside library code immediately.
 ///
 /// This function performs as-if a wasm trap was just executed. This trap
@@ -665,8 +654,6 @@ where
 thread_local! {
     static YIELDER: Cell<Option<NonNull<Yielder<(), UnwindReason>>>> = Cell::new(None);
     static TRAP_HANDLER: AtomicPtr<TrapHandlerContext> = AtomicPtr::new(ptr::null_mut());
-    static CAPTURED_STACK: Cell<Option<Vec<u8>>> = Cell::new(None);
-    static STACK_RESTORED: Cell<u64> = Cell::new(0);
 }
 
 /// Read-only information that is used by signal handlers to handle and recover
@@ -832,10 +819,6 @@ enum UnwindReason {
     UserTrap(Box<dyn Error + Send + Sync>),
     /// A Trap triggered by a wasm libcall
     LibTrap(Trap),
-    /// Captures the current stack
-    CaptureStack,
-    /// Restores the stack to a particular offset into the current stack
-    RestoreStack(Vec<u8>, NonZeroU64),
     /// A trap caused by the Wasm generated code
     WasmTrap {
         backtrace: Backtrace,
@@ -854,8 +837,6 @@ impl UnwindReason {
                 pc,
                 signal_trap,
             } => Trap::wasm(pc, backtrace, signal_trap),
-            UnwindReason::CaptureStack => std::panic::resume_unwind(Box::new(format!("unhandled capturestack"))),
-            UnwindReason::RestoreStack(_, _) => std::panic::resume_unwind(Box::new(format!("unhandled restorestack"))),
             UnwindReason::Panic(panic) => std::panic::resume_unwind(panic),
         }
     }
@@ -870,14 +851,6 @@ unsafe fn unwind_with(reason: UnwindReason) -> ! {
 
     // on_wasm_stack will forcibly reset the coroutine stack after yielding.
     unreachable!();
-}
-
-unsafe fn yield_with(reason: UnwindReason) {
-    let yielder = YIELDER
-        .with(|cell| cell.get())
-        .expect("not running on Wasm stack");
-
-    yielder.as_ref().suspend(reason);
 }
 
 /// Runs the given function on a separate stack so that its stack usage can be
@@ -913,41 +886,16 @@ fn on_wasm_stack<F: FnOnce() -> T, T>(
     // Set up metadata for the trap handler for the duration of the coroutine
     // execution. This is restored to its previous value afterwards.
     TrapHandlerContext::install(trap_handler, coro.trap_handler(), || {
-        STACK_RESTORED.with(|cell| cell.set(0));
-        loop {
-            return match coro.resume(()) {
-                CoroutineResult::Yield(trap) => {
-                    match trap {
-                        UnwindReason::CaptureStack => {
-                            CAPTURED_STACK.with(|cell| unsafe {
-                                let stack = coro.serialize().to_vec();
-                                cell.set(Some(stack))
-                            });
-                            continue;
-                        },
-                        UnwindReason::RestoreStack(stack, val) => {
-                            STACK_RESTORED.with(|cell| cell.set(val.get()));
-                            unsafe {
-                                coro.deserialize(&stack[..])
-                                    .map_err(|_| {
-                                        coro.force_reset();
-                                        UnwindReason::Panic(Box::new(format!("restore stack failed with stack.len={}", stack.len())))
-                                    })?;
-                            }
-                            continue;
-                        },
-                        trap => {
-                            // This came from unwind_with which requires that there be only
-                            // Wasm code on the stack.
-                            unsafe {
-                                coro.force_reset();
-                            }
-                            Err(trap)
-                        }
-                    }
+        match coro.resume(()) {
+            CoroutineResult::Yield(trap) => {
+                // This came from unwind_with which requires that there be only
+                // Wasm code on the stack.
+                unsafe {
+                    coro.force_reset();
                 }
-                CoroutineResult::Return(result) => result,
+                Err(trap)
             }
+            CoroutineResult::Return(result) => result,
         }
     })
 }
@@ -960,9 +908,6 @@ fn on_wasm_stack<F: FnOnce() -> T, T>(
 /// the control of untrusted code. Malicious code could artificially induce a
 /// stack overflow in the middle of a sensitive host operations (e.g. growing
 /// a memory) which would be hard to recover from.
-/// 
-/// Flag determines if the stack is first captured before it is modified
-/// by the host function (which allows it to be restored)
 pub fn on_host_stack<F: FnOnce() -> T, T>(f: F) -> T {
     // Reset YIEDER to None for the duration of this call to indicate that we
     // are no longer on the Wasm stack.
@@ -975,7 +920,7 @@ pub fn on_host_stack<F: FnOnce() -> T, T>(f: F) -> T {
         None => return f(),
     };
 
-    // Restore YIELDER upon exiting normally or unwinding.    
+    // Restore YIELDER upon exiting normally or unwinding.
     defer! {
         YIELDER.with(|cell| cell.set(yielder_ptr));
     }
@@ -987,24 +932,6 @@ pub fn on_host_stack<F: FnOnce() -> T, T>(f: F) -> T {
     unsafe impl<T> Send for SendWrapper<T> {}
     let wrapped = SendWrapper(f);
     yielder.on_parent_stack(move || (wrapped.0)())
-}
-
-/// Captures the current WASM stack and returns it
-pub fn wasm_capture_stack<T, E>() -> Result<Vec<u8>, YieldingResult<T, E>> {
-    let stack = CAPTURED_STACK.with(|cell| {
-        cell.replace(None)
-    });
-    match stack {
-        Some(a) => Ok(a),
-        None => Err(YieldingResult::CaptureStack)
-    }
-}
-
-/// Returns true if the stack was just recently restored and resets the flag
-pub fn wasm_stack_restored() -> Option<NonZeroU64> {
-    NonZeroU64::new(
-        STACK_RESTORED.with(|cell| cell.replace(0))
-    )
 }
 
 #[cfg(windows)]

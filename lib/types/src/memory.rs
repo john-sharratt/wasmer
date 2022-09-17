@@ -78,6 +78,8 @@ pub unsafe trait MemorySize: Copy {
         + PartialOrd<Self::Offset>
         + Clone
         + Copy
+        + Sync
+        + Send
         + ValueType
         + Into<u64>
         + From<u32>
@@ -95,7 +97,8 @@ pub unsafe trait MemorySize: Copy {
         + TryFrom<usize>
         + Add<Self::Offset>
         + Sum<Self::Offset>
-        + AddAssign<Self::Offset>;
+        + AddAssign<Self::Offset>
+        + 'static;
 
     /// Type used to pass this value as an argument or return value for a Wasm function.
     type Native: super::NativeWasmType;
@@ -190,6 +193,9 @@ where Self: std::fmt::Debug + Send
 
     /// Attempts to clone this memory (if its clonable)
     fn try_clone(&self) -> Option<Box<dyn LinearMemory + 'static>>;
+
+    /// Copies this memory to a new memory
+    fn fork(&mut self) -> Result<(), MemoryError>;
 
     /// Marks a region of the memory for a particular role
     fn mark_region(&mut self, start: u64, end: u64, role: MemoryRole);

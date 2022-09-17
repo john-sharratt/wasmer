@@ -396,11 +396,27 @@ impl Function {
             let js_value = param.as_jsvalue(&store.as_store_ref());
             arr.set(i as u32, js_value);
         }
-        let result = js_sys::Reflect::apply(
-            &self.handle.get(store.as_store_ref().objects()).function,
-            &wasm_bindgen::JsValue::NULL,
-            &arr,
-        )?;
+        let result = {
+            let mut r;
+            loop {
+                r = js_sys::Reflect::apply(
+                    &self.handle.get(store.as_store_ref().objects()).function,
+                    &wasm_bindgen::JsValue::NULL,
+                    &arr,
+                );
+                let store_mut = store.as_store_mut();
+                if let Some(callback) = store_mut.inner.on_called.take() {
+                    match callback(store_mut) {
+                        Ok(wasmer_types::OnCalledAction::InvokeAgain) => { continue; }
+                        Ok(wasmer_types::OnCalledAction::Finish) => { break; }
+                        Ok(wasmer_types::OnCalledAction::Trap(trap)) => { return Err(RuntimeError::user(trap)) },
+                        Err(trap) => { return Err(RuntimeError::user(trap)) },
+                    }
+                }
+                break;
+            }
+            r?
+        };
 
         let result_types = self.handle.get(store.as_store_ref().objects()).ty.results();
         match result_types.len() {
@@ -607,7 +623,7 @@ mod inner {
     use std::marker::PhantomData;
     use std::panic::{self, AssertUnwindSafe};
 
-    use wasmer_types::{FunctionType, NativeWasmType, Type, YieldingResult};
+    use wasmer_types::{FunctionType, NativeWasmType, Type};
     // use wasmer::{raise_user_trap, resume_panic};
 
     /// A trait to convert a Rust value to a `WasmNativeType` value,
@@ -798,62 +814,6 @@ mod inner {
     ///
     /// It is mostly used to turn result values of a Wasm function
     /// call into a `Result`.
-    pub trait IntoYieldingResult<T>
-    where
-        T: WasmTypeList,
-    {
-        /// The error type for this trait.
-        type Error: Error + Sync + Send + 'static;
-
-        /// Transforms `Self` into a `Result`.
-        fn into_yielding_result(self) -> YieldingResult<T, Self::Error>;
-    }
-
-    impl<T> IntoYieldingResult<T> for T
-    where
-        T: WasmTypeList,
-    {
-        // `T` is not a `Result`, it's already a value, so no error
-        // can be built.
-        type Error = Infallible;
-
-        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
-            YieldingResult::Result(Ok(self))
-        }
-    }
-
-    impl<T, E> IntoYieldingResult<T> for Result<T, E>
-    where
-        T: WasmTypeList,
-        E: Error + Sync + Send + 'static,
-    {
-        type Error = E;
-
-        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
-            match self {
-                Ok(a) => YieldingResult::Result(Ok(a)),
-                Err(err) => YieldingResult::Result(Err(err))
-            }
-        }
-    }
-
-    impl<T, E> IntoYieldingResult<T> for YieldingResult<T, E>
-    where
-        T: WasmTypeList,
-        E: Error + Sync + Send + 'static,
-    {
-        type Error = E;
-
-        fn into_yielding_result(self) -> YieldingResult<T, Self::Error> {
-            self
-        }
-    }
-
-    /// The `IntoResult` trait turns a `WasmTypeList` into a
-    /// `Result<WasmTypeList, Self::Error>`.
-    ///
-    /// It is mostly used to turn result values of a Wasm function
-    /// call into a `Result`.
     pub trait IntoResult<T>
     where
         T: WasmTypeList,
@@ -865,21 +825,28 @@ mod inner {
         fn into_result(self) -> Result<T, Self::Error>;
     }
 
-    impl<T, E, Y> IntoResult<T>
-    for Y
-    where T: WasmTypeList,
-          Y: IntoYieldingResult<T, Error = E>,
-          E: Error + Sync + Send + 'static
+    impl<T> IntoResult<T> for T
+    where
+        T: WasmTypeList,
+    {
+        // `T` is not a `Result`, it's already a value, so no error
+        // can be built.
+        type Error = Infallible;
+
+        fn into_result(self) -> Result<Self, Infallible> {
+            Ok(self)
+        }
+    }
+
+    impl<T, E> IntoResult<T> for Result<T, E>
+    where
+        T: WasmTypeList,
+        E: Error + Sync + Send + 'static,
     {
         type Error = E;
 
-        fn into_result(self) -> Result<T, Self::Error> {
-            match self.into_yielding_result() {
-                YieldingResult::Result(r) => r,
-                _ => {
-                    panic!("can not convert a yielding error into a result");
-                }
-            }
+        fn into_result(self) -> Self {
+            self
         }
     }
 
@@ -1146,7 +1113,7 @@ mod inner {
             where
                 $( $x: FromToNativeWasmType, )*
                 Rets: WasmTypeList,
-                RetsAsResult: IntoYieldingResult<Rets>,
+                RetsAsResult: IntoResult<Rets>,
                 T: Send + 'static,
                 Func: Fn(FunctionEnvMut<'_, T>, $( $x , )*) -> RetsAsResult + 'static,
             {
@@ -1159,20 +1126,22 @@ mod inner {
                     where
                         $( $x: FromToNativeWasmType, )*
                         Rets: WasmTypeList,
-                        RetsAsResult: IntoYieldingResult<Rets>,
+                        RetsAsResult: IntoResult<Rets>,
                         T: Send + 'static,
                         Func: Fn(FunctionEnvMut<'_, T>, $( $x , )*) -> RetsAsResult + 'static,
                     {
-                        // let env: &Env = unsafe { &*(ptr as *const u8 as *const Env) };
-                        let func: &Func = &*(&() as *const () as *const Func);
                         let mut store = StoreMut::from_raw(store_ptr as *mut _);
                         let mut store2 = StoreMut::from_raw(store_ptr as *mut _);
 
-                        let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                            let handle: StoreHandle<VMFunctionEnvironment> = StoreHandle::from_internal(store2.objects_mut().id(), InternalStoreHandle::from_index(handle_index).unwrap());
-                            let env: FunctionEnvMut<T> = FunctionEnv::from_handle(handle).into_mut(&mut store2);
-                            func(env, $( FromToNativeWasmType::from_native(NativeWasmTypeInto::from_abi(&mut store, $x)) ),* ).into_result()
-                        }));
+                        let result = {
+                            // let env: &Env = unsafe { &*(ptr as *const u8 as *const Env) };
+                            let func: &Func = &*(&() as *const () as *const Func);
+                            panic::catch_unwind(AssertUnwindSafe(|| {
+                                let handle: StoreHandle<VMFunctionEnvironment> = StoreHandle::from_internal(store2.objects_mut().id(), InternalStoreHandle::from_index(handle_index).unwrap());
+                                let env: FunctionEnvMut<T> = FunctionEnv::from_handle(handle).into_mut(&mut store2);
+                                func(env, $( FromToNativeWasmType::from_native(NativeWasmTypeInto::from_abi(&mut store, $x)) ),* ).into_result()
+                            }))
+                        };
 
                         match result {
                             Ok(Ok(result)) => return result.into_c_struct(&mut store),
@@ -1195,7 +1164,7 @@ mod inner {
             where
                 $( $x: FromToNativeWasmType, )*
                 Rets: WasmTypeList,
-                RetsAsResult: IntoYieldingResult<Rets>,
+                RetsAsResult: IntoResult<Rets>,
                 Func: Fn($( $x , )*) -> RetsAsResult + 'static,
             {
                 #[allow(non_snake_case)]
@@ -1207,7 +1176,7 @@ mod inner {
                     where
                         $( $x: FromToNativeWasmType, )*
                         Rets: WasmTypeList,
-                        RetsAsResult: IntoYieldingResult<Rets>,
+                        RetsAsResult: IntoResult<Rets>,
                         Func: Fn($( $x , )*) -> RetsAsResult + 'static,
                     {
                         // let env: &Env = unsafe { &*(ptr as *const u8 as *const Env) };

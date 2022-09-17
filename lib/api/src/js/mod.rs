@@ -60,7 +60,7 @@ pub use crate::js::module::{Module, ModuleTypeHints};
 pub use crate::js::native::TypedFunction;
 pub use crate::js::native_type::NativeWasmTypeInto;
 pub use crate::js::ptr::{Memory32, Memory64, MemorySize, WasmPtr, WasmPtr64};
-pub use crate::js::trap::{RuntimeError, wasm_capture_stack, wasm_stack_restored};
+pub use crate::js::trap::RuntimeError;
 
 pub use crate::js::store::{
     AsStoreMut, AsStoreRef, Store, StoreHandle, StoreMut, StoreObject, StoreObjects, StoreRef,
@@ -81,9 +81,8 @@ pub mod vm {
 
 pub use wasmer_types::is_wasm;
 pub use wasmer_types::{
-    YieldingResult,
     Bytes, ExportIndex, GlobalInit, LocalFunctionIndex, Pages, ValueType, WASM_MAX_PAGES,
-    WASM_MIN_PAGES, WASM_PAGE_SIZE,
+    WASM_MIN_PAGES, WASM_PAGE_SIZE, OnCalledAction
 };
 
 #[cfg(feature = "wat")]

@@ -52,7 +52,7 @@ pub use crate::utils::{
 #[cfg(feature = "js")]
 use bytes::Bytes;
 use derivative::Derivative;
-use tracing::{trace, warn};
+use tracing::{trace, warn, error};
 pub use wasmer_vbus::{UnsupportedVirtualBus, VirtualBus};
 #[deprecated(since = "2.1.0", note = "Please use `wasmer_vfs::FsError`")]
 pub use wasmer_vfs::FsError as WasiFsError;
@@ -68,7 +68,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 use wasmer::{
     imports, namespace, AsStoreMut, Exports, Function, FunctionEnv, Imports, Memory, Memory32,
-    MemoryAccessError, MemorySize, Module, TypedFunction, Memory64, MemoryView, AsStoreRef, Instance, ExportError, Global, Value
+    MemoryAccessError, MemorySize, Module, TypedFunction, Memory64, MemoryView, AsStoreRef, Instance, ExportError, Global, Value,
 };
 
 pub use runtime::{
@@ -181,6 +181,37 @@ pub struct WasiEnvInner
     /// Represents the callback for destroying a local thread variable (name = "_thread_local_destroy")
     /// [this takes a pointer to the destructor and the data to be destroyed]
     thread_local_destroy: Option<TypedFunction<(i32, i32, i32, i32), ()>>,
+    /// asyncify_start_unwind(data : i32): call this to start unwinding the
+    /// stack from the current location. "data" must point to a data
+    /// structure as described above (with fields containing valid data).
+    #[allow(dead_code)]
+    asyncify_start_unwind: Option<TypedFunction<i32, ()>>,
+    /// asyncify_stop_unwind(): call this to note that unwinding has
+    /// concluded. If no other code will run before you start to rewind,
+    /// this is not strictly necessary, however, if you swap between
+    /// coroutines, or even just want to run some normal code during a
+    /// "sleep", then you must call this at the proper time. Otherwise,
+    /// the code will think it is still unwinding when it should not be,
+    /// which means it will keep unwinding in a meaningless way.
+    #[allow(dead_code)]
+    asyncify_stop_unwind: Option<TypedFunction<(), ()>>,
+    /// asyncify_start_rewind(data : i32): call this to start rewinding the
+    /// stack vack up to the location stored in the provided data. This prepares
+    /// for the rewind; to start it, you must call the first function in the
+    /// call stack to be unwound.
+    #[allow(dead_code)]
+    asyncify_start_rewind: Option<TypedFunction<i32, ()>>,
+    /// asyncify_stop_rewind(): call this to note that rewinding has
+    /// concluded, and normal execution can resume.
+    #[allow(dead_code)]
+    asyncify_stop_rewind: Option<TypedFunction<(), ()>>,
+    /// asyncify_get_state(): call this to get the current value of the
+    /// internal "__asyncify_state" variable as described above.
+    /// It can be used to distinguish between unwinding/rewinding and normal
+    /// calls, so that you know when to start an asynchronous operation and
+    /// when to propagate results back.
+    #[allow(dead_code)]
+    asyncify_get_state: Option<TypedFunction<(), i32>>,
 }
 
 /// The code itself makes safe use of the struct so multiple threads don't access
@@ -203,6 +234,8 @@ where
     id: WasiThreadId,
     /// Base stack pointer for the memory stack
     pub stack_base: u64,
+    /// Start of the stack memory that is allocated for this thread
+    pub stack_start: u64,
     /// Shared state of the WASI system. Manages all the data that the
     /// executing WASI program can see.
     pub state: Arc<WasiState>,
@@ -214,7 +247,8 @@ where
 }
 
 // Represents the current thread ID for the executing method
-thread_local!(static CALLER_ID: RefCell<u32> = RefCell::new(0));
+thread_local!(pub(crate) static CALLER_ID: RefCell<u32> = RefCell::new(0));
+thread_local!(pub(crate) static REWIND: RefCell<Option<Vec<u8>>> = RefCell::new(None));
 lazy_static::lazy_static! {
     static ref CALLER_ID_SEED: Arc<AtomicU32> = Arc::new(AtomicU32::new(1));
 }
@@ -239,7 +273,8 @@ impl WasiEnv {
     fn new_ext(state: Arc<WasiState>) -> Self {
         let ret = Self {
             id: 0u32.into(),
-            stack_base: 0,
+            stack_base: DEFAULT_STACK_SIZE,
+            stack_start: 0,
             state,
             inner: None,
             runtime: Arc::new(PluggableRuntimeImplementation::default()),
@@ -465,6 +500,11 @@ impl WasiFunctionEnv {
             thread_spawn: instance.exports.get_typed_function(store, "_start_thread").ok(),
             react: instance.exports.get_typed_function(store, "_react").ok(),
             signal: instance.exports.get_typed_function(&store, "__wasm_signal").ok(),
+            asyncify_start_unwind: instance.exports.get_typed_function(store, "asyncify_start_unwind").ok(),
+            asyncify_stop_unwind: instance.exports.get_typed_function(store, "asyncify_stop_unwind").ok(),
+            asyncify_start_rewind: instance.exports.get_typed_function(store, "asyncify_start_rewind").ok(),
+            asyncify_stop_rewind: instance.exports.get_typed_function(store, "asyncify_stop_rewind").ok(),
+            asyncify_get_state: instance.exports.get_typed_function(store, "asyncify_get_state").ok(),
             thread_local_destroy: instance.exports.get_typed_function(store, "_thread_local_destroy").ok(),
         };
 

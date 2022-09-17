@@ -301,6 +301,16 @@ impl VMTable {
         Ok(())
     }
 
+    /// Copies the table into a new table
+    pub fn copy_on_write(&self) -> Result<Self, String> {
+        let mut ret = Self::new(&self.table, &self.style)?;
+        ret.copy(self, 0, 0, self.size())
+            .map_err(|trap| {
+                format!("failed to copy the table - {:?}", trap)
+            })?;
+        Ok(ret)
+    }
+
     /// Copy `len` elements from `table[src_index..]` to `table[dst_index..]`.
     ///
     /// # Errors

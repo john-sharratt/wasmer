@@ -10,7 +10,7 @@ mod traphandlers;
 
 pub use trap::Trap;
 pub use traphandlers::{
-    catch_traps, on_host_stack, wasm_capture_stack, wasm_stack_restored, raise_lib_trap, raise_user_trap, raise_restore_stack, raise_capture_stack, wasmer_call_trampoline,
+    catch_traps, on_host_stack, raise_lib_trap, raise_user_trap, wasmer_call_trampoline,
     TrapHandler, TrapHandlerFn,
 };
 pub use traphandlers::{init_traps, resume_panic};

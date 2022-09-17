@@ -5,7 +5,9 @@ use wasmer_derive::ValueType;
 pub struct __wasi_stack_snaphost_t {
     pub memory_offset: u32,
     pub host_offset: u32,
-    pub upper_stack: [u8; 1024],
+    pub user: u64,
+    pub upper_rewind_stack: [u8; 256],
+    pub upper_memory_stack: [u8; 256],
     pub hash: u128,
 }
 

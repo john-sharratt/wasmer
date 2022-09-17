@@ -30,4 +30,16 @@ impl VMGlobal {
     pub fn vmglobal(&self) -> NonNull<VMGlobalDefinition> {
         self.vm_global_definition.as_ptr()
     }
+
+    /// Copies this global
+    pub fn copy_on_write(&self) -> Self {
+        unsafe {
+            Self {
+                ty: self.ty,
+                vm_global_definition: MaybeInstanceOwned::Host(Box::new(UnsafeCell::new(
+                    self.vm_global_definition.as_ptr().as_ref().clone()
+                ))),
+            }
+        }
+    }
 }

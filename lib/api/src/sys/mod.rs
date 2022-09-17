@@ -42,17 +42,17 @@ pub use wasmer_derive::ValueType;
 pub use wasmer_types::is_wasm;
 pub use wasmer_types::{
     CpuFeature, ExportType, ExternType, FunctionType, GlobalType, ImportType, MemoryType,
-    Mutability, TableType, Target, Type,
+    Mutability, TableType, Target, Type, OnCalledAction
 };
 
 pub use wasmer_types::{
     Bytes, CompileError, DeserializeError, ExportIndex, GlobalInit, LocalFunctionIndex,
-    MiddlewareError, Pages, ParseCpuFeatureError, SerializeError, ValueType, YieldingResult, WasmError, WasmResult,
+    MiddlewareError, Pages, ParseCpuFeatureError, SerializeError, ValueType, WasmError, WasmResult,
     WASM_MAX_PAGES, WASM_MIN_PAGES, WASM_PAGE_SIZE,
 };
 
 // TODO: should those be moved into wasmer::vm as well?
-pub use wasmer_vm::{raise_user_trap, wasm_capture_stack, wasm_stack_restored, MemoryError};
+pub use wasmer_vm::{raise_user_trap, MemoryError};
 pub mod vm {
     //! The `vm` module re-exports wasmer-vm types.
 

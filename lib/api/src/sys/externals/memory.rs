@@ -133,6 +133,30 @@ impl Memory {
         self.handle.get_mut(store.objects_mut()).grow(delta.into())
     }
 
+    /// Copies the memory to a new store and returns a memory reference to it
+    pub fn copy_to_store(
+        &self,
+        store: &impl AsStoreRef,
+        new_store: &mut impl AsStoreMut,
+    ) -> Result<Self, MemoryError>
+    {
+        // Create the new memory using the parameters of the existing memory
+        let view = self.view(store);
+        let ty = self.ty(store);
+
+        let new_memory = Self::new(new_store, ty)?;
+        let new_view = new_memory.view(&new_store);
+
+        // Copy the bytes
+        view.copy_to_memory(&new_view)
+            .map_err(|err| {
+                MemoryError::Generic(err.to_string())
+            })?;
+
+        // Return the new memory
+        Ok(new_memory)
+    }
+
     pub(crate) fn from_vm_extern(
         store: &impl AsStoreRef,
         internal: InternalStoreHandle<VMMemory>,

@@ -1,10 +1,12 @@
 use std::fmt;
+use wasmer_types::OnCalledAction;
 
 /// We require the context to have a fixed memory address for its lifetime since
 /// various bits of the VM have raw pointers that point back to it. Hence we
 /// wrap the actual context in a box.
 pub(crate) struct StoreInner {
     pub(crate) objects: StoreObjects,
+    pub(crate) on_called: Option<Box<dyn FnOnce(StoreMut) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>>>>,
 }
 
 /// The store represents all global state that can be manipulated by
@@ -27,6 +29,7 @@ impl Store {
         Self {
             inner: Box::new(StoreInner {
                 objects: Default::default(),
+                on_called: None,
             }),
         }
     }
@@ -123,6 +126,16 @@ impl<'a> StoreMut<'a> {
 
     pub(crate) unsafe fn from_raw(raw: *mut StoreInner) -> Self {
         Self { inner: &mut *raw }
+    }
+
+    /// Sets the unwind callback which will be invoked when the call finishes
+    pub fn on_called<F>(
+        &mut self,
+        callback: F,
+    )
+    where F: FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+    {
+        self.inner.on_called.replace(Box::new(callback));
     }
 }
 

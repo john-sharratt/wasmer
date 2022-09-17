@@ -2,6 +2,7 @@ use crate::sys::tunables::BaseTunables;
 use std::fmt;
 #[cfg(feature = "compiler")]
 use wasmer_compiler::{Engine, EngineBuilder, Tunables};
+use wasmer_types::{MemoryError, OnCalledAction};
 use wasmer_vm::{init_traps, TrapHandler, TrapHandlerFn};
 
 use wasmer_vm::StoreObjects;
@@ -16,6 +17,15 @@ pub(crate) struct StoreInner {
     #[cfg(feature = "compiler")]
     pub(crate) tunables: Box<dyn Tunables + Send + Sync>,
     pub(crate) trap_handler: Option<Box<TrapHandlerFn<'static>>>,
+    pub(crate) on_called: Option<Box<dyn FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>>>>,
+}
+
+impl StoreInner
+{
+    /// Makes a copy of this store
+    pub fn fork(&mut self) -> Result<(), MemoryError> {
+        self.objects.fork()
+    }
 }
 
 /// The store represents all global state that can be manipulated by
@@ -76,6 +86,7 @@ impl Store {
                 engine: engine.cloned(),
                 tunables: Box::new(tunables),
                 trap_handler: None,
+                on_called: None
             }),
             engine: engine.cloned(),
         }
@@ -99,6 +110,11 @@ impl Store {
     /// tunables are excluded from the logic.
     pub fn same(a: &Self, b: &Self) -> bool {
         a.engine.id() == b.engine.id()
+    }
+
+    /// Copies the store and all the data held within it
+    pub fn fork(&mut self) -> Result<(), MemoryError> {
+        self.inner.fork()
     }
 }
 
@@ -279,7 +295,24 @@ impl<'a> StoreMut<'a> {
     }
 
     pub(crate) unsafe fn from_raw(raw: *mut StoreInner) -> Self {
-        Self { inner: &mut *raw }
+        Self {
+            inner: &mut *raw,
+        }
+    }
+
+    /// Copies the store and returns it
+    pub fn fork(&mut self) -> Result<(), MemoryError> {
+        self.inner.fork()
+    }
+
+    /// Sets the unwind callback which will be invoked when the call finishes
+    pub fn on_called<F>(
+        &mut self,
+        callback: F,
+    )
+    where F: FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+    {
+        self.inner.on_called.replace(Box::new(callback));
     }
 }
 
@@ -311,7 +344,9 @@ impl AsStoreRef for StoreMut<'_> {
 }
 impl AsStoreMut for StoreMut<'_> {
     fn as_store_mut(&mut self) -> StoreMut<'_> {
-        StoreMut { inner: self.inner }
+        StoreMut {
+            inner: self.inner,
+        }
     }
     fn objects_mut(&mut self) -> &mut StoreObjects {
         &mut self.inner.objects
