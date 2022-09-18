@@ -176,6 +176,11 @@ impl<T: StoreObject> StoreHandle<T> {
         self.id
     }
 
+    /// Overrides the store id with a new ID
+    pub fn set_store_id(&mut self, id: StoreId) {
+        self.id = id;
+    }
+
     /// Constructs a `StoreHandle` from a `StoreId` and an `InternalStoreHandle`.
     ///
     /// # Safety

@@ -41,6 +41,16 @@ pub struct Function {
     pub(crate) handle: StoreHandle<VMFunction>,
 }
 
+impl Into<Function>
+for StoreHandle<VMFunction>
+{
+    fn into(self) -> Function {
+        Function {
+            handle: self
+        }
+    }
+}
+
 impl Function {
     /// Creates a new host `Function` (dynamic) with the provided signature.
     ///
@@ -401,6 +411,11 @@ impl Function {
             *slot = arg.as_raw(store);
         }
 
+        // We set the function we are calling
+        store.as_store_mut().inner.is_calling.replace(
+            self.handle.clone()
+        );
+        
         // Call the trampoline.
         let result = {
             let mut r;

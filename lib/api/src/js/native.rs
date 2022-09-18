@@ -64,6 +64,8 @@ macro_rules! impl_native_traits {
             pub fn call(&self, mut store: &mut impl AsStoreMut, $( $x: $x, )* ) -> Result<Rets, RuntimeError> where
             $( $x: FromToNativeWasmType + crate::js::NativeWasmTypeInto, )*
             {
+                store.as_store_mut().inner.is_calling.replace(self.handle.clone());
+
                 let params_list: Vec<JsValue> = vec![ $( JsValue::from_f64($x.into_raw(&mut store))),* ];
                 let results = {
                     let mut r;

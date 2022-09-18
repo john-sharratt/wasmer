@@ -214,6 +214,28 @@ pub struct WasiEnvInner
     asyncify_get_state: Option<TypedFunction<(), i32>>,
 }
 
+impl WasiEnvInner
+{
+    pub fn new(module: Module, memory: Memory, store: &impl AsStoreRef, instance: &Instance) -> Self
+    {
+        WasiEnvInner {
+            module,
+            memory,
+            exports: instance.exports.clone(),
+            stack_pointer: instance.exports.get_global("__stack_pointer").map(|a| a.clone()).ok(),
+            thread_spawn: instance.exports.get_typed_function(store, "_start_thread").ok(),
+            react: instance.exports.get_typed_function(store, "_react").ok(),
+            signal: instance.exports.get_typed_function(store, "__wasm_signal").ok(),
+            asyncify_start_unwind: instance.exports.get_typed_function(store, "asyncify_start_unwind").ok(),
+            asyncify_stop_unwind: instance.exports.get_typed_function(store, "asyncify_stop_unwind").ok(),
+            asyncify_start_rewind: instance.exports.get_typed_function(store, "asyncify_start_rewind").ok(),
+            asyncify_stop_rewind: instance.exports.get_typed_function(store, "asyncify_stop_rewind").ok(),
+            asyncify_get_state: instance.exports.get_typed_function(store, "asyncify_get_state").ok(),
+            thread_local_destroy: instance.exports.get_typed_function(store, "_thread_local_destroy").ok(),
+        }
+    }
+}
+
 /// The code itself makes safe use of the struct so multiple threads don't access
 /// it (without this the JS code prevents the reference to the module from being stored
 /// which is needed for the multithreading mode)
@@ -226,7 +248,6 @@ pub const DEFAULT_STACK_BASE: u64 = DEFAULT_STACK_SIZE;
 
 /// The environment provided to the WASI imports.
 #[derive(Derivative, Clone)]
-#[derivative(Debug)]
 pub struct WasiEnv
 where
 {
@@ -240,7 +261,6 @@ where
     /// executing WASI program can see.
     pub state: Arc<WasiState>,
     /// Inner functions and references that are loaded before the environment starts
-    #[derivative(Debug = "ignore")]
     pub inner: Option<WasiEnvInner>,
     /// Implementation of the WASI runtime.
     pub(crate) runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,

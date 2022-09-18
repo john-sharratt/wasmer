@@ -7,6 +7,7 @@ use wasmer_types::OnCalledAction;
 pub(crate) struct StoreInner {
     pub(crate) objects: StoreObjects,
     pub(crate) on_called: Option<Box<dyn FnOnce(StoreMut) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>>>>,
+    pub(crate) is_calling: Option<StoreHandle<VMFunction>>,
 }
 
 /// The store represents all global state that can be manipulated by
@@ -39,6 +40,11 @@ impl Store {
     /// tunables are excluded from the logic.
     pub fn same(_a: &Self, _b: &Self) -> bool {
         true
+    }
+    
+    /// Returns the ID of this store
+    pub fn id(&self) -> StoreId {
+        self.inner.objects.id()
     }
 }
 
@@ -136,6 +142,12 @@ impl<'a> StoreMut<'a> {
     where F: FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
     {
         self.inner.on_called.replace(Box::new(callback));
+    }
+
+    /// Returns a reference to the current function thats being invoked
+    pub fn is_calling(&self) -> Option<StoreHandle<VMFunction>>
+    {
+        self.inner.is_calling.clone()
     }
 }
 
@@ -370,6 +382,11 @@ mod objects {
         /// Returns the ID of the context associated with the handle.
         pub fn store_id(&self) -> StoreId {
             self.id
+        }
+
+        /// Overrides the store id with a new ID
+        pub fn set_store_id(&mut self, id: StoreId) {
+            self.id = id;
         }
 
         /// Constructs a `StoreHandle` from a `StoreId` and an `InternalStoreHandle`.

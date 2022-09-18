@@ -1836,8 +1836,8 @@ unsafe impl Sync for WasiThreadContext { }
 #[derivative(Debug)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub(crate) struct WasiStateThreading {
-    threads: Arc<RwLock<HashMap<WasiThreadId, WasiThread>>>,
-    thread_count: Arc<AtomicU32>,
+    pub(crate) threads: Arc<RwLock<HashMap<WasiThreadId, WasiThread>>>,
+    pub(crate) thread_count: Arc<AtomicU32>,
     pub bus_processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess>>,
     pub bus_process_fork: HashMap<WasiBusProcessId, WasiThreadId>,
     pub bus_process_reuse: HashMap<Cow<'static, str>, WasiBusProcessId>,

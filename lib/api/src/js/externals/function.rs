@@ -60,6 +60,16 @@ pub struct Function {
     pub(crate) handle: StoreHandle<VMFunction>,
 }
 
+impl Into<Function>
+for StoreHandle<VMFunction>
+{
+    fn into(self) -> Function {
+        Function {
+            handle: self
+        }
+    }
+}
+
 impl Function {
     /// Creates a new host `Function` (dynamic) with the provided signature.
     ///
@@ -396,6 +406,9 @@ impl Function {
             let js_value = param.as_jsvalue(&store.as_store_ref());
             arr.set(i as u32, js_value);
         }
+
+        store.as_store_mut().inner.is_calling.replace(self.handle.clone());
+
         let result = {
             let mut r;
             loop {

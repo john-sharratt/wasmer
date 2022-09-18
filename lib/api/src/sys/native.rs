@@ -106,6 +106,10 @@ macro_rules! impl_native_traits {
                     rets_list.as_mut()
                 };
 
+                store.as_store_mut().inner.is_calling.replace(
+                    self.func.handle.clone()
+                );
+
                 let mut r;
                 loop {
                     r = unsafe {
