@@ -86,6 +86,11 @@ impl Memory {
     /// let m = Memory::new(&store, MemoryType::new(1, None, false)).unwrap();
     /// ```
     pub fn new(store: &mut impl AsStoreMut, ty: MemoryType) -> Result<Self, MemoryError> {
+        let vm_memory = VMMemory::new(Self::new_internal(ty.clone())?, ty);
+        Ok(Self::from_vm_export(store, vm_memory))
+    }
+
+    pub(crate) fn new_internal(ty: MemoryType) -> Result<js_sys::WebAssembly::Memory, MemoryError> {
         let descriptor = js_sys::Object::new();
         js_sys::Reflect::set(&descriptor, &"initial".into(), &ty.minimum.0.into()).unwrap();
         if let Some(max) = ty.maximum {
@@ -96,8 +101,9 @@ impl Memory {
         let js_memory = js_sys::WebAssembly::Memory::new(&descriptor)
             .map_err(|_e| MemoryError::Generic("Error while creating the memory".to_owned()))?;
 
-        let vm_memory = VMMemory::new(js_memory, ty);
-        Ok(Self::from_vm_export(store, vm_memory))
+        Ok(
+            js_memory
+        )
     }
 
     /// Creates a new host `Memory` from provided JavaScript memory.
@@ -233,6 +239,12 @@ impl Memory {
     pub fn try_clone(&self, store: &impl AsStoreRef) -> Option<VMMemory> {
         let mem = self.handle.get(store.as_store_ref().objects());
         mem.try_clone()
+    }
+
+    /// Copies this memory to a new memory
+    pub fn fork(&mut self, store: &impl AsStoreRef) -> Result<VMMemory, MemoryError> {
+        let mem = self.handle.get(store.as_store_ref().objects());
+        mem.fork()
     }
 
     /// Checks whether this `Global` can be used with the given context.

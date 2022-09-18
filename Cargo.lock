@@ -3396,6 +3396,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "wasmer",
+ "wasmer-types",
  "wasmer-vbus",
  "wasmer-vfs",
  "wasmer-vnet",

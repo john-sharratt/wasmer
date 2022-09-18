@@ -7,8 +7,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use wasmer_types::{LinearMemory, MemoryError};
-
 use crate::VMExternObj;
 
 use crate::{InstanceHandle, VMFunction, VMFunctionEnvironment, VMGlobal, VMMemory, VMTable};
@@ -102,14 +100,6 @@ impl StoreObjects {
             let (low, high) = list.split_at_mut(a.index());
             (&mut high[0], &mut low[a.index()])
         }
-    }
-
-    /// Copies the store objects
-    pub fn fork(&mut self) -> Result<(), MemoryError> {
-        for memory in self.memories.iter_mut() {
-            memory.fork()?
-        }
-        Ok(())
     }
 }
 

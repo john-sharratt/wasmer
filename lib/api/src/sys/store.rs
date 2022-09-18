@@ -2,7 +2,7 @@ use crate::sys::tunables::BaseTunables;
 use std::fmt;
 #[cfg(feature = "compiler")]
 use wasmer_compiler::{Engine, EngineBuilder, Tunables};
-use wasmer_types::{MemoryError, OnCalledAction};
+use wasmer_types::OnCalledAction;
 use wasmer_vm::{init_traps, TrapHandler, TrapHandlerFn};
 
 use wasmer_vm::StoreObjects;
@@ -18,14 +18,6 @@ pub(crate) struct StoreInner {
     pub(crate) tunables: Box<dyn Tunables + Send + Sync>,
     pub(crate) trap_handler: Option<Box<TrapHandlerFn<'static>>>,
     pub(crate) on_called: Option<Box<dyn FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>>>>,
-}
-
-impl StoreInner
-{
-    /// Makes a copy of this store
-    pub fn fork(&mut self) -> Result<(), MemoryError> {
-        self.objects.fork()
-    }
 }
 
 /// The store represents all global state that can be manipulated by
@@ -110,11 +102,6 @@ impl Store {
     /// tunables are excluded from the logic.
     pub fn same(a: &Self, b: &Self) -> bool {
         a.engine.id() == b.engine.id()
-    }
-
-    /// Copies the store and all the data held within it
-    pub fn fork(&mut self) -> Result<(), MemoryError> {
-        self.inner.fork()
     }
 }
 
@@ -298,11 +285,6 @@ impl<'a> StoreMut<'a> {
         Self {
             inner: &mut *raw,
         }
-    }
-
-    /// Copies the store and returns it
-    pub fn fork(&mut self) -> Result<(), MemoryError> {
-        self.inner.fork()
     }
 
     /// Sets the unwind callback which will be invoked when the call finishes

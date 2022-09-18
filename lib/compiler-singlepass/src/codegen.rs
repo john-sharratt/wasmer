@@ -1012,7 +1012,6 @@ impl<'a, M: Machine> FuncGen<'a, M> {
     ) -> Result<(), CodegenError> {
         let need_check = match self.memory_styles[MemoryIndex::new(0)] {
             MemoryStyle::Static { .. } => false,
-            MemoryStyle::Prescribed { .. } => false,
             MemoryStyle::Dynamic { .. } => true,
         };
 

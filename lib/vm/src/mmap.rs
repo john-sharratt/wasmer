@@ -76,18 +76,11 @@ impl Mmap {
         }
     }
 
-    /// Create a new `Mmap` pointing to a specific address space of page-aligned accessible memory.
-    pub fn with_static(start: usize, size: usize) -> Result<Self, String> {
-        let page_size = region::page::size();
-        let rounded_size = round_up_to_page_size(size, page_size);
-        Self::accessible_reserved(rounded_size, rounded_size, Some(start))
-    }
-
     /// Create a new `Mmap` pointing to at least `size` bytes of page-aligned accessible memory.
     pub fn with_at_least(size: usize) -> Result<Self, String> {
         let page_size = region::page::size();
         let rounded_size = round_up_to_page_size(size, page_size);
-        Self::accessible_reserved(rounded_size, rounded_size, None)
+        Self::accessible_reserved(rounded_size, rounded_size)
     }
 
     /// Create a new `Mmap` pointing to `accessible_size` bytes of page-aligned accessible memory,
@@ -97,7 +90,6 @@ impl Mmap {
     pub fn accessible_reserved(
         accessible_size: usize,
         mapping_size: usize,
-        mapping_start: Option<usize>,
     ) -> Result<Self, String> {
         
         let page_size = region::page::size();
@@ -110,11 +102,6 @@ impl Mmap {
         if mapping_size == 0 {
             return Ok(Self::new());
         }
-
-        let addr = match mapping_start {
-            Some(addr) => addr as *mut libc::c_void,
-            None => ptr::null_mut()
-        };
 
         // Open a temporary file (which is used for swapping)
         let fd = unsafe {
@@ -137,16 +124,13 @@ impl Mmap {
         }
 
         // Compute the flags
-        let mut flags = libc::MAP_FILE | libc::MAP_SHARED;
-        if mapping_start.is_some() {
-            flags |= libc::MAP_FIXED_NOREPLACE;
-        }
+        let flags = libc::MAP_FILE | libc::MAP_SHARED;
 
         Ok(if accessible_size == mapping_size {
             // Allocate a single read-write region at once.
             let ptr = unsafe {
                 libc::mmap(
-                    addr,
+                    ptr::null_mut(),
                     mapping_size,
                     libc::PROT_READ | libc::PROT_WRITE,
                     flags,
@@ -156,11 +140,6 @@ impl Mmap {
             };
             if ptr as isize == -1_isize {
                 return Err(io::Error::last_os_error().to_string());
-            }
-            if addr != ptr::null_mut() && ptr != addr {
-                let r = unsafe { libc::munmap(ptr as *mut libc::c_void, mapping_size) };
-                assert_eq!(r, 0, "munmap failed: {}", io::Error::last_os_error());
-                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
             }
 
             Self {
@@ -172,7 +151,7 @@ impl Mmap {
             // Reserve the mapping size.
             let ptr = unsafe {
                 libc::mmap(
-                    addr,
+                    ptr::null_mut(),
                     mapping_size,
                     libc::PROT_NONE,
                     flags,
@@ -182,11 +161,6 @@ impl Mmap {
             };
             if ptr as isize == -1_isize {
                 return Err(io::Error::last_os_error().to_string());
-            }
-            if addr != ptr::null_mut() && ptr != addr {
-                let r = unsafe { libc::munmap(ptr as *mut libc::c_void, mapping_size) };
-                assert_eq!(r, 0, "munmap failed: {}", io::Error::last_os_error());
-                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
             }
 
             let mut result = Self {
@@ -210,7 +184,6 @@ impl Mmap {
     #[cfg(target_os = "windows")]
     pub fn accessible_reserved(
         accessible_size: usize,
-        mapping_start: Option<usize>,
         mapping_size: usize,
     ) -> Result<Self, String> {
         use winapi::um::memoryapi::VirtualAlloc;
@@ -227,16 +200,11 @@ impl Mmap {
             return Ok(Self::new());
         }
 
-        let addr = match mapping_start {
-            Some(addr) => addr as *mut libc::c_void,
-            None => ptr::null_mut()
-        };
-
         Ok(if accessible_size == mapping_size {
             // Allocate a single read-write region at once.
             let ptr = unsafe {
                 VirtualAlloc(
-                    addr,
+                    ptr::null_mut(),
                     mapping_size,
                     MEM_RESERVE | MEM_COMMIT,
                     PAGE_READWRITE,
@@ -244,14 +212,6 @@ impl Mmap {
             };
             if ptr.is_null() {
                 return Err(io::Error::last_os_error().to_string());
-            }
-            if addr != ptr::null_mut() && ptr != addr {
-                use winapi::ctypes::c_void;
-                use winapi::um::memoryapi::VirtualFree;
-                use winapi::um::winnt::MEM_RELEASE;
-                let r = unsafe { VirtualFree(self.ptr as *mut c_void, 0, MEM_RELEASE) };
-                assert_ne!(r, 0);
-                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
             }
 
             Self {
@@ -261,17 +221,9 @@ impl Mmap {
         } else {
             // Reserve the mapping size.
             let ptr =
-                unsafe { VirtualAlloc(addr, mapping_size, MEM_RESERVE, PAGE_NOACCESS) };
+                unsafe { VirtualAlloc(ptr::null_mut(), mapping_size, MEM_RESERVE, PAGE_NOACCESS) };
             if ptr.is_null() {
                 return Err(io::Error::last_os_error().to_string());
-            }
-            if addr != ptr::null_mut() && ptr != addr {
-                use winapi::ctypes::c_void;
-                use winapi::um::memoryapi::VirtualFree;
-                use winapi::um::winnt::MEM_RELEASE;
-                let r = unsafe { VirtualFree(self.ptr as *mut c_void, 0, MEM_RELEASE) };
-                assert_ne!(r, 0);
-                return Err(format!("The requested virtual address ({}) is not available.", addr as usize));
             }
 
             let mut result = Self {
@@ -369,18 +321,18 @@ impl Mmap {
 
     /// Copies the memory to a new swap file (using copy-on-write if available)
     #[cfg(not(target_os = "windows"))]
-    pub fn fork(&mut self, hint_used: Option<usize>) -> Result<(), String>
+    pub fn fork(&mut self, hint_used: Option<usize>) -> Result<Self, String>
     {
         // Empty memory is an edge case
         if self.len == 0 {
-            return Ok(());
+            return Ok(Self::new());
         }
 
         // First we sync all the data to the backing file
         unsafe { libc::fdatasync(self.fd.0); }
 
         // Open a new temporary file (which is used for swapping for the forked memory)
-        let mut fd = unsafe {
+        let fd = unsafe {
             let file = if self.len > (u32::MAX as usize) {
                 libc::tmpfile64()
             } else {
@@ -418,41 +370,61 @@ impl Mmap {
             }
         }
 
-        // Now we need to unmmap the existing virtual address space and remap it using the
-        // the new file descriptor
-        {
-            let r = unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
-            assert_eq!(r, 0, "munmap failed: {}", io::Error::last_os_error());
-            if r != 0 {
-                return Err(format!("The allocated virtual address ({}) could not be unmapped.", self.ptr));
-            }
-        }
+        // Compute the flags
+        let flags = libc::MAP_FILE | libc::MAP_SHARED;
 
-        // Allocate the memory at the exact same place that it was
-        // (this ensures any memory references are still valid)
-        let flags = libc::MAP_FILE | libc::MAP_SHARED | libc::MAP_FIXED_NOREPLACE;
+        // Allocate a single read-write region at once.
         let ptr = unsafe {
             libc::mmap(
-                self.ptr as *mut libc::c_void,
+                ptr::null_mut(),
                 self.len,
                 libc::PROT_READ | libc::PROT_WRITE,
                 flags,
                 fd.0,
                 0,
-            ) as usize
+            )
         };
         if ptr as isize == -1_isize {
             return Err(io::Error::last_os_error().to_string());
         }
-        if ptr != self.ptr {
-            let r = unsafe { libc::munmap(ptr as *mut libc::c_void, self.len) };
-            assert_eq!(r, 0, "munmap failed: {}", io::Error::last_os_error());
-            return Err(format!("The requested virtual address ({}) is not available.", ptr));
+
+        Ok(
+            Self {
+                ptr: ptr as usize,
+                len: self.len,
+                fd,
+            }
+        )
+    }
+
+    /// Copies the memory to a new swap file (using copy-on-write if available)
+    #[cfg(target_os = "windows")]
+    pub fn fork(&mut self, hint_used: Option<usize>) -> Result<Self, String>
+    {
+        // Create a new memory which we will copy to
+        let new_mmap = Self::with_at_least(self.len)?;
+
+        #[cfg(feature="tracing")]
+        trace!("memory copy started");
+
+        // Determine host much to copy
+        let len = match hint_used {
+            Some(a) => a,
+            None => self.len
+        };
+
+        // Copy the data to the new memory
+        let dst = new_mmap.ptr as *mut u8;
+        let src = self.ptr as *const u8;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dst, len);
         }
-        
-        // Success (replace the file descriptor)
-        std::mem::swap(&mut self.fd, &mut fd);
-        Ok(())
+
+        #[cfg(feature="tracing")]
+        trace!("memory copy finished (size={})", len);
+        Ok(
+            new_mmap
+        )
     }
 }
 

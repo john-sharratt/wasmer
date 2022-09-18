@@ -6,6 +6,9 @@ use js_sys::WebAssembly::{Memory, Table};
 use std::fmt;
 use wasm_bindgen::{JsCast, JsValue};
 use wasmer_types::{ExternType, FunctionType, GlobalType, MemoryType, TableType};
+use crate::MemoryView;
+#[cfg(feature="tracing")]
+use tracing::trace;
 
 /// Represents linear memory that is managed by the javascript runtime
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +29,31 @@ impl VMMemory {
     /// Attempts to clone this memory (if its clonable)
     pub(crate) fn try_clone(&self) -> Option<VMMemory> {
         Some(self.clone())
+    }
+
+    /// Copies this memory to a new memory
+    pub fn fork(&self) -> Result<VMMemory, wasmer_types::MemoryError> {
+        let new_memory = crate::Memory::new_internal(self.ty.clone())?;
+
+        #[cfg(feature="tracing")]
+        trace!("memory copy started");
+
+        let src = MemoryView::new_raw(&self.memory);
+        let dst = MemoryView::new_raw(&new_memory);
+        src.copy_to_memory(&dst)
+            .map_err(|err| {
+                wasmer_types::MemoryError::Generic(format!("failed to copy the memory - {}", err))
+            })?;
+
+        #[cfg(feature="tracing")]
+        trace!("memory copy finished (size={})", dst.size().bytes().0);
+
+        Ok(
+            Self {
+                memory: new_memory,
+                ty: self.ty.clone(),
+            }
+        )
     }
 }
 

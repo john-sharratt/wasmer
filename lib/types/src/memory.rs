@@ -33,18 +33,6 @@ pub enum MemoryStyle {
         /// to optimize loads and stores with constant offsets.
         offset_guard_size: u64,
     },
-    /// Address space is allocated up front.
-    Prescribed {
-        /// The start of the virtual address space (as a multiple of pages)
-        start: Pages,
-        /// The size of the virtual addess space
-        size: Pages,
-        /// Our chosen offset-guard size.
-        ///
-        /// It represents the size in bytes of extra guard pages after the end
-        /// to optimize loads and stores with constant offsets.
-        offset_guard_size: u64,
-    },
 }
 
 impl MemoryStyle {
@@ -55,9 +43,6 @@ impl MemoryStyle {
             Self::Static {
                 offset_guard_size, ..
             } => *offset_guard_size,
-            Self::Prescribed {
-                offset_guard_size, ..
-            } => *offset_guard_size
         }
     }
 }
@@ -195,7 +180,7 @@ where Self: std::fmt::Debug + Send
     fn try_clone(&self) -> Option<Box<dyn LinearMemory + 'static>>;
 
     /// Copies this memory to a new memory
-    fn fork(&mut self) -> Result<(), MemoryError>;
+    fn fork(&mut self) -> Result<Box<dyn LinearMemory + 'static>, MemoryError>;
 
     /// Marks a region of the memory for a particular role
     fn mark_region(&mut self, start: u64, end: u64, role: MemoryRole);

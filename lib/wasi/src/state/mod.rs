@@ -1839,7 +1839,7 @@ pub(crate) struct WasiStateThreading {
     threads: Arc<RwLock<HashMap<WasiThreadId, WasiThread>>>,
     thread_count: Arc<AtomicU32>,
     pub bus_processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess>>,
-    pub bus_process_fork: HashMap<WasiBusProcessId, i32>,
+    pub bus_process_fork: HashMap<WasiBusProcessId, WasiThreadId>,
     pub bus_process_reuse: HashMap<Cow<'static, str>, WasiBusProcessId>,
     pub bus_process_seed: u32,
     pub thread_seed: WasiThreadId,
@@ -2051,6 +2051,7 @@ pub struct WasiState {
     pub(crate) bus: WasiBusState,
     pub args: Vec<Vec<u8>>,
     pub envs: Vec<Vec<u8>>,
+    pub preopen: Vec<String>,
     pub main_thread: Mutex<WasiThreadHandle>
 }
 

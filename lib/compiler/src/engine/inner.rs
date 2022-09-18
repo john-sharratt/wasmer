@@ -165,6 +165,7 @@ impl Engine {
     /// # Safety
     ///
     /// The file's content must represent a serialized WebAssembly module.
+    #[allow(dead_code, unused)]
     pub unsafe fn deserialize_from_file(
         &self,
         file_ref: &Path,
@@ -237,7 +238,7 @@ impl EngineInner {
     #[allow(clippy::type_complexity)]
     pub(crate) fn allocate(
         &mut self,
-        module: &ModuleInfo,
+        _module: &ModuleInfo,
         functions: &PrimaryMap<LocalFunctionIndex, FunctionBody>,
         function_call_trampolines: &PrimaryMap<SignatureIndex, FunctionBody>,
         dynamic_function_trampolines: &PrimaryMap<FunctionIndex, FunctionBody>,
@@ -269,7 +270,6 @@ impl EngineInner {
                     function_bodies.as_slice(),
                     executable_sections.as_slice(),
                     data_sections.as_slice(),
-                    module.module_start,
                 )
                 .map_err(|message| {
                     CompileError::Resource(format!(

@@ -3,7 +3,7 @@
 
 //! Memory management for executable code.
 use super::unwind::UnwindRegistry;
-use wasmer_types::{CompiledFunctionUnwindInfo, CustomSection, FunctionBody, Pages};
+use wasmer_types::{CompiledFunctionUnwindInfo, CustomSection, FunctionBody};
 use wasmer_vm::{Mmap, VMFunctionBody};
 
 /// The optimal alignment for functions.
@@ -46,7 +46,6 @@ impl CodeMemory {
         functions: &[&FunctionBody],
         executable_sections: &[&CustomSection],
         data_sections: &[&CustomSection],
-        module_start: Option<Pages>,
     ) -> Result<(Vec<&mut [VMFunctionBody]>, Vec<&mut [u8]>, Vec<&mut [u8]>), String> {
         let mut function_result = vec![];
         let mut data_section_result = vec![];
@@ -80,10 +79,7 @@ impl CodeMemory {
 
         // 2. Allocate the pages. Mark them all read-write.
 
-        self.mmap = match module_start {
-            Some(start) => Mmap::with_static(start.bytes().0, total_len)?,
-            None => Mmap::with_at_least(total_len)?
-        };
+        self.mmap = Mmap::with_at_least(total_len)?;
 
         // 3. Determine where the pointers to each function, executable section
         // or data section are. Copy the functions. Collect the addresses of each and return them.

@@ -471,6 +471,7 @@ impl WasiStateBuilder {
             secret: rand::thread_rng().gen::<[u8; 32]>(),
             inodes: Arc::new(inodes),
             args: self.args.clone(),
+            preopen: self.vfs_preopens.clone(),
             threading: RwLock::new(threading),
             futexs: Default::default(),
             clock_offset: Default::default(),

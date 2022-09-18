@@ -56,11 +56,12 @@ use tracing::{debug, error, trace, warn};
 use wasmer::{
     AsStoreMut, FunctionEnvMut, Memory, Memory32, Memory64, MemorySize, RuntimeError, Value,
     WasmPtr, WasmSlice, FunctionEnv, Instance, Module, Extern, MemoryView, TypedFunction, Store, Pages, Global, AsStoreRef,
-    MemoryAccessError, OnCalledAction
+    MemoryAccessError, OnCalledAction, MemoryError
 };
 use wasmer_vbus::{FileDescriptor, StdioMode, BusDataFormat, BusInvocationEvent};
 use wasmer_vfs::{FsError, VirtualFile};
 use wasmer_vnet::{SocketHttpRequest, StreamSecurity};
+use wasmer_types::LinearMemory;
 
 #[cfg(any(
     target_os = "freebsd",
@@ -3791,7 +3792,7 @@ pub fn stack_checkpoint<M: MemorySize>(
         let memory = env.memory_view(&ctx);
         let snapshot_ptr: WasmPtr<__wasi_stack_snaphost_t, M> = WasmPtr::new(snapshot_offset);
         if let Err(err) = snapshot_ptr.write(&memory, snapshot) {
-            warn!("failed to save stack snapshot - {}", err);
+            warn!("failed checkpoint - could not save stack snapshot - {}", err);
             return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
         }
 
@@ -3799,8 +3800,8 @@ pub fn stack_checkpoint<M: MemorySize>(
         match rewind::<M>(ctx, memory_stack, rewind_stack) {
             __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
             err => {
-                warn!("failed to rewind the stack - errno={}", err);
-                OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)))
+                warn!("failed checkpoint - could not rewind the stack - errno={}", err);
+                OnCalledAction::Trap(Box::new(WasiError::Exit(err as u32)))
             }
         }
     })
@@ -3846,7 +3847,7 @@ pub fn stack_restore<M: MemorySize>(
             if snapshot.host_offset as usize > upper {
                 let remainder = snapshot.host_offset as usize - upper;
                 if remainder >= rewind_stack.len() {
-                    error!("wasi::stack_restore - current rewind stack is too small to restore the snapshot");
+                    warn!("wasi::stack_restore - current rewind stack is too small to restore the snapshot");
                     return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
                 }
                 let lower = rewind_stack.len() - remainder;
@@ -3863,7 +3864,7 @@ pub fn stack_restore<M: MemorySize>(
             if snapshot.memory_offset as usize > upper {
                 let remainder = snapshot.memory_offset as usize - upper;
                 if remainder >= memory_stack.len() {
-                    error!("wasi::stack_restore - current memory stack is too small to restore the snapshot");
+                    warn!("wasi::stack_restore - current memory stack is too small to restore the snapshot");
                     return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
                 }
                 let lower = memory_stack.len() - remainder;
@@ -3886,7 +3887,7 @@ pub fn stack_restore<M: MemorySize>(
             u128::from_le_bytes(hash)
         };
         if hash != snapshot.hash {
-            error!("snapshot hash failed - the snapshot can not be restored ({} vs {})", hash, snapshot.hash);
+            warn!("snapshot hash failed - the snapshot can not be restored ({} vs {})", hash, snapshot.hash);
             return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
         }
 
@@ -3898,7 +3899,7 @@ pub fn stack_restore<M: MemorySize>(
             // Make sure its within the "active" part of the memory stack
             let offset = env.stack_base - ret_val_offset;
             if offset as usize > memory_stack.len() {
-                error!("snapshot hash failed - the return value is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
+                warn!("snapshot failed - the return value is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
                 return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
             }
             
@@ -3909,23 +3910,10 @@ pub fn stack_restore<M: MemorySize>(
             let pbytes = &mut memory_stack[pstart..pend];
             pbytes.clone_from_slice(&val_bytes);
         } else {
-            // The return value is somewhere else - lets update it there
-
-            // Then we need to override the return value with the one
-            // we passed into this restore call - the pointer needs
-            // to be stored in the snapshot
-            let ret_val_offset: M::Offset = match ret_val_offset.try_into() {
-                Ok(a) => a,
-                Err(err) => {
-                    warn!("failed to compute longjmp return offset");
-                    return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
-                }
-            };
-            let ret_val: WasmPtr<__wasi_longsize_t, M> = WasmPtr::new(ret_val_offset);
-            if let Err(err) = ret_val.write(&memory, val) {
-                warn!("failed to set the longjmp return value - {}", err);
-                return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
-            }
+            // Return return value must be on the stack otherwise it will cause
+            // multithreading issues
+            warn!("snapshot failed - the return value is not being returned on the stack - which is not supported");
+            return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
         }
 
         // Rewind the stack - after this point we must immediately return
@@ -4965,151 +4953,120 @@ pub fn thread_exit(
 pub fn proc_fork<M: MemorySize>(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     pid_ptr: WasmPtr<__wasi_pid_t, M>,
-) -> Result<__wasi_errno_t, MemoryAccessError> {
+) -> Result<__wasi_errno_t, WasiError> {
+    // If we were just restored then we need to return the value instead
+    if handle_rewind::<M>(&mut ctx) {
+        let env = ctx.data();
+        let memory = env.memory_view(&ctx);
+        let pid = wasi_try_mem_ok!(
+            pid_ptr.read(&memory)
+        );
+        trace!("wasi::proc_fork - restored - (pid={})", pid);
+        return Ok(__WASI_ESUCCESS);
+    }
+    trace!("wasi::proc_fork - capturing");
 
-    trace!("wasi::proc_fork");
-    panic!("fork not yet implemented");
-
-    /*
+    // We write a zero to the PID before we capture the stack
+    // so that this is what will be returned to the child
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
-
-    // Now we are ready to fork the process
-    let host_pid = unsafe { libc::fork() };
-
-    // This branch will be the child
-    if host_pid == 0 {
-        trace!("child-branch");
-
-        // We need to fork the store (and all its memory so that
-        // it is not corrupted by the newly forked process)
-        if let Err(err) = ctx.as_store_mut().fork() {
-            warn!("failed to fork the store - {}", err);
-            return Ok(__WASI_EFAULT);
-        }
-        let env = ctx.data();
-        let memory = env.memory_view(&ctx);
-
-        // We are ready to return execution to the caller
-        wasi_try_mem_ok!(
-            pid_ptr.write(&memory, 0)
-        );
-        return Ok(__WASI_ESUCCESS);
-    }
-    
-    // This branch will be the parent branch
-    let pid = {
-        let mut guard = env.state.threading.write().unwrap();
-        guard.bus_process_seed += 1;
-        let pid = guard.bus_process_seed.into();
-        guard.bus_process_fork.insert(pid, host_pid);
-        pid.0 as __wasi_pid_t
-    };
-    trace!("parent-branch (child={})", pid);
-
-    // Return the new process
     wasi_try_mem_ok!(
-        pid_ptr.write(&memory, pid)
+        pid_ptr.write(&memory, 0)
     );
-    Ok(__WASI_ESUCCESS)
-    */    
 
-    /*
-    // If we were just restored then we need to return zero
-    if let Some(val) = wasm_stack_restored() {
-        let env = ctx.data();
-        let memory = env.memory_view(&ctx);
-        wasi_try_yielding!(
-            pid_ptr.write(&memory, 0)
-        );
-        return Ok(__WASI_ESUCCESS);
-    }
+    // Pass some offsets to the unwind function
+    let pid_offset = pid_ptr.offset();
 
-    // Capture the wasm stack (if there is no stack to
-    // be saved then we have already resumed the stack
-    // from where it left off)
-    let host_stack = match wasm_capture_stack() {
-        Ok(a) => a,
-        Err(err) => {
-            trace!("-- stack_capture for fork --");
-            return err
-        }
-    };
-    trace!("wasi::proc_fork");
-
-    // Copy the store
-    let new_store = match ctx.as_store_ref().copy_on_write() {
-        Ok(a) => a,
-        Err(err) => {
-            warn!("failed to copy the store - {}", err);
-            return Ok(__WASI_EFAULT);
-        }
-    };
-
-    let env = ctx.data();
-    let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
-    let bus = env.runtime.bus();
-
-    // Convert the arguments to vectors
-    let args = state.args
-        .clone()
-        .into_iter()
-        .map(|a| unsafe { String::from_utf8_unchecked(a) })
-        .collect();
-
-    // Convert the preopen directories
-    let preopen = state.preopen
-        .clone()
-        .into_iter()
-        .map(|a| a.path.to_string_lossy().to_string())
-        .collect();
-    
-    // Get the current working directory
-    let (_, cur_dir) = match state
-        .fs
-        .get_current_dir(inodes.deref_mut(), crate::VIRTUAL_ROOT_FD,)
-    {
-        Ok(a) => a,
-        Err(err) => {
-            return Ok(err);
-        }
-    };
-
-    // Extract the currently running module
-    let module = env.inner().module.clone();
-
-    // First we create a new process
-    let mut process = match bus
-        .new_spawn()
-        .args(args)
-        .preopen(preopen)
-        .stdin_mode(StdioMode::Inherit)
-        .stdout_mode(StdioMode::Inherit)
-        .stderr_mode(StdioMode::Inherit)
-        .working_dir(cur_dir)
-        .spawn_resume(module, new_store, &host_stack[..])
-    {
-        Ok(a) => a,
-        Err(err) => {
-            warn!("failed to create subprocess for fork - {}", err);
-            return Ok(__WASI_EFAULT);
-        }
-    };
-
-    // Add the process to the environment state
-    let pid = {
-        let mut guard = env.state.threading.write().unwrap();
+    // Create the thread that will back this forked process
+    let state = env.state.clone();
+    let (pid, thread) = {
+        let mut guard = state.threading.write().unwrap();
+        let thread = guard.new_thread();
         guard.bus_process_seed += 1;
-        let bid = guard.bus_process_seed;
-        guard.bus_processes.insert(bid.into(), Box::new(process));
-        bid
+        let pid = guard.bus_process_seed;
+        guard.bus_process_fork.insert(pid.into(), thread.id());
+        (pid, thread)
     };
 
-    wasi_try_yielding!(
-        pid_ptr.write(&memory, pid)
-    );
-    Ok(__WASI_ESUCCESS)
-    */
+    // Perform the unwind action
+    unwind::<M, _>(ctx, move |mut ctx, mut memory_stack, rewind_stack|
+    {
+        // Fork the memory and copy the module (compiled code)
+        let env = ctx.data();
+        let fork_memory = match env
+                .memory()
+                .try_clone(&ctx)
+                .ok_or_else(|| {
+                    error!("thread failed - the memory could not be cloned");
+                    MemoryError::Generic(format!("the memory could not be cloned"))
+                })
+                .and_then(|mut memory| memory.fork())
+        {
+            Ok(memory) => {
+                 memory.into()
+            },
+            Err(err) => {
+                warn!("fork failed - could not fork the memory - {}", err);
+                return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
+            }
+        };
+        let fork_module = env.inner().module.clone();
+
+        #[cfg(feature = "compiler")]
+        let engine = ctx.as_store_ref().engine().clone();
+
+        // Build a new store that will be passed to the thread
+        #[cfg(feature = "compiler")]
+        let mut fork_store = Store::new(engine);
+        #[cfg(not(feature = "compiler"))]
+        let mut fork_store = Store::default();
+
+        // Spawn the process
+        let runtime = env.runtime.clone();
+        if let Err(error) = runtime
+            .thread_spawn(Box::new(move |store: Store, module: Module, thread_memory: VMMemory| {
+                error!("not yet implemented");
+            }),
+            fork_store,
+            fork_module,
+            fork_memory)
+        {
+            warn!("fork failed - could not spawn thread that will represent this forked process");
+            return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
+        }
+
+        // If the return value offset is within the memory stack then we need
+        // to update it here rather than in the real memory
+        let pid_offset: u64 = pid_offset.into();
+        if pid_offset >= env.stack_start && pid_offset < env.stack_base
+        {
+            // Make sure its within the "active" part of the memory stack
+            let offset = env.stack_base - pid_offset;
+            if offset as usize > memory_stack.len() {
+                warn!("fork failed - the return value (pid) is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
+                return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
+            }
+            
+            // Update the memory stack with the new PID
+            let val_bytes = pid.to_ne_bytes();
+            let pstart = memory_stack.len() - offset as usize;
+            let pend = pstart + val_bytes.len();
+            let pbytes = &mut memory_stack[pstart..pend];
+            pbytes.clone_from_slice(&val_bytes);
+        } else {
+            warn!("fork failed - the return value (pid) is not being returned on the stack - which is not supported");
+            return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
+        }
+
+        // Rewind the stack and carry on
+        match rewind::<M>(ctx, memory_stack, rewind_stack) {
+            __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
+            err => {
+                warn!("fork failed - could not rewind the stack - errno={}", err);
+                OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)))
+            }
+        }
+    })
 }
 
 /// Spawns a new process within the context of this machine

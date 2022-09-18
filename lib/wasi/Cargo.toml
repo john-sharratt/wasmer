@@ -21,6 +21,7 @@ tracing = "0.1"
 getrandom = "0.2"
 wasmer-wasi-types = { path = "../wasi-types", version = "=3.0.0-beta" }
 wasmer = { path = "../api", version = "=3.0.0-beta", default-features = false }
+wasmer-types = { path = "../types", version = "=3.0.0-beta" }
 wasmer-vfs = { path = "../vfs", version = "=3.0.0-beta", default-features = false }
 wasmer-vbus = { path = "../vbus", version = "=3.0.0-beta", default-features = false }
 wasmer-vnet = { path = "../vnet", version = "=3.0.0-beta", default-features = false }

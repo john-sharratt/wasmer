@@ -27,11 +27,14 @@ pub struct MemoryView<'a> {
 
 impl<'a> MemoryView<'a> {
     pub(crate) fn new(memory: &Memory, store: &impl AsStoreRef) -> Self {
-        let buffer = memory
+        let memory = memory
             .handle
-            .get(store.as_store_ref().objects())
-            .memory
-            .buffer();
+            .get(store.as_store_ref().objects());
+        Self::new_raw(&memory.memory)
+    }
+
+    pub(crate) fn new_raw(memory: &js_sys::WebAssembly::Memory) -> Self {
+        let buffer = memory.buffer();
 
         let size = js_sys::Reflect::get(&buffer, &"byteLength".into())
             .unwrap()

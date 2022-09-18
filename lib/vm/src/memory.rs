@@ -103,7 +103,7 @@ impl WasmMmap
                     })?;
 
             let mut new_mmap =
-                Mmap::accessible_reserved(new_bytes, request_bytes, None).map_err(MemoryError::Region)?;
+                Mmap::accessible_reserved(new_bytes, request_bytes).map_err(MemoryError::Region)?;
 
             let copy_len = self.alloc.len() - conf.offset_guard_size;
             new_mmap.as_mut_slice()[..copy_len]
@@ -154,10 +154,24 @@ impl WasmMmap
 
     /// Copies the memory
     /// (in this case it performs a copy-on-write to save memory)
-    pub fn fork(&mut self) -> Result<(), MemoryError>
+    pub fn fork(&mut self) -> Result<WasmMmap, MemoryError>
     {
-        self.alloc.fork(Some(self.size.bytes().0))
-            .map_err(|err| MemoryError::Generic(err))
+        let mem_length = self.size.bytes().0;
+        let mut alloc = self.alloc
+            .fork(Some(mem_length))
+            .map_err(|err| MemoryError::Generic(err))?;
+        let base_ptr = alloc.as_mut_ptr();
+        Ok(
+            Self {
+                vm_memory_definition: MaybeInstanceOwned::Host(Box::new(UnsafeCell::new(VMMemoryDefinition {
+                    base: base_ptr,
+                    current_length: mem_length,
+                }))),
+                alloc,
+                size: self.size,
+                regions: self.regions.clone(),
+            }
+        )
     }
 }
 
@@ -275,23 +289,13 @@ impl VMOwnedMemory {
                 assert_ge!(*bound, memory.minimum);
                 *bound
             },
-            MemoryStyle::Prescribed { size, .. } => {
-                assert_ge!(*size, memory.minimum);
-                *size
-            }
-        };
-        let memory_start = match style {
-            MemoryStyle::Prescribed { start, .. } => {
-                Some(start.bytes().0)
-            },
-            _ => None
         };
         let minimum_bytes = minimum_pages.bytes().0;
         let request_bytes = minimum_bytes.checked_add(offset_guard_bytes).unwrap();
         let mapped_pages = memory.minimum;
         let mapped_bytes = mapped_pages.bytes();
 
-        let mut alloc = Mmap::accessible_reserved(mapped_bytes.0, request_bytes, memory_start)
+        let mut alloc = Mmap::accessible_reserved(mapped_bytes.0, request_bytes)
             .map_err(MemoryError::Region)?;
         let base_ptr = alloc.as_mut_ptr();
         let mem_length = memory.minimum.bytes().0;
@@ -377,8 +381,15 @@ for VMOwnedMemory
     }
 
     /// Copies this memory to a new memory
-    fn fork(&mut self) -> Result<(), MemoryError> {
-        self.mmap.fork()
+    fn fork(&mut self) -> Result<Box<dyn LinearMemory + 'static>, MemoryError> {
+        Ok(
+            Box::new(
+                Self {
+                    mmap: self.mmap.fork()?,
+                    config: self.config.clone(),
+                }
+            )
+        )
     }
 
     /// Marks a region of the memory for a particular role
@@ -474,9 +485,18 @@ for VMSharedMemory
     }
 
     /// Copies this memory to a new memory
-    fn fork(&mut self) -> Result<(), MemoryError> {
+    fn fork(&mut self) -> Result<Box<dyn LinearMemory + 'static>, MemoryError> {
         let mut guard = self.mmap.write().unwrap();
-        guard.fork()
+        Ok(
+            Box::new(
+                Self {
+                    mmap: Arc::new(RwLock::new(
+                        guard.fork()?
+                    )),
+                    config: self.config.clone(),
+                }
+            )
+        )
     }
 
     /// Marks a region of the memory for a particular role
@@ -549,7 +569,7 @@ for VMMemory
     }
 
     /// Copies this memory to a new memory
-    fn fork(&mut self) -> Result<(), MemoryError> {
+    fn fork(&mut self) -> Result<Box<dyn LinearMemory + 'static>, MemoryError> {
         self.0.fork()
     }
 
