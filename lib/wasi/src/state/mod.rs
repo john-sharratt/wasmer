@@ -354,7 +354,25 @@ pub struct WasiFs {
     pub current_dir: Mutex<String>,
     pub is_wasix: AtomicBool,
     #[cfg_attr(feature = "enable-serde", serde(skip, default = "default_fs_backing"))]
-    pub fs_backing: Box<dyn FileSystem>,
+    pub fs_backing: Arc<Box<dyn FileSystem>>,
+}
+
+impl WasiFs
+{
+    /// Forking the WasiState is used when either fork or vfork is called
+    pub fn fork(&self) -> Self
+    {
+        Self {
+            preopen_fds: RwLock::new(self.preopen_fds.read().unwrap().clone()),
+            name_map: self.name_map.clone(),
+            fd_map: RwLock::new(self.fd_map.read().unwrap().clone()),
+            next_fd: AtomicU32::new(self.next_fd.load(Ordering::Acquire)),
+            inode_counter: AtomicU64::new(self.inode_counter.load(Ordering::Acquire)),
+            current_dir: Mutex::new(self.current_dir.lock().unwrap().clone()),
+            is_wasix: AtomicBool::new(self.is_wasix.load(Ordering::Acquire)),
+            fs_backing: self.fs_backing.clone(),
+        }
+    }
 }
 
 /// Returns the default filesystem backing
@@ -602,7 +620,7 @@ impl WasiFs {
             inode_counter: AtomicU64::new(1024),
             current_dir: Mutex::new("/".to_string()),
             is_wasix: AtomicBool::new(false),
-            fs_backing,
+            fs_backing: Arc::new(fs_backing),
         };
         wasi_fs.create_stdin(inodes);
         wasi_fs.create_stdout(inodes);
@@ -2132,6 +2150,25 @@ impl WasiState {
                 ret
             });
         Ok(ret)
+    }
+
+    /// Forking the WasiState is used when either fork or vfork is called
+    pub fn fork(&self) -> Self
+    {
+        let (threading, main_handle) = WasiStateThreading::new();
+        WasiState {
+            fs: self.fs.fork(),
+            secret: self.secret.clone(),
+            inodes: self.inodes.clone(),
+            threading: RwLock::new(threading),
+            futexs: Default::default(),
+            clock_offset: Mutex::new(self.clock_offset.lock().unwrap().clone()),
+            bus: Default::default(),
+            args: self.args.clone(),
+            envs: self.envs.clone(),
+            preopen: self.preopen.clone(),
+            main_thread: Mutex::new(main_handle)
+        }
     }
 }
 

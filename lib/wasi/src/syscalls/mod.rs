@@ -4954,7 +4954,7 @@ pub fn proc_fork<M: MemorySize>(
 
     // We need a copy of the function that was originally executed so
     // that we can run it again with the existing stack
-    let mut funct = match ctx.as_store_mut().is_calling() {
+    let (mut funct, funct_params) = match ctx.as_store_mut().is_calling() {
         Some(a) => a,
         None => {
             trace!("wasi::proc_fork - failed as the running function could not be identified");
@@ -4975,7 +4975,7 @@ pub fn proc_fork<M: MemorySize>(
 
     // Create the thread that will back this forked process
     let state = env.state.clone();
-    let (pid, handle) = {
+    let (pid, mut handle) = {
         let mut guard = state.threading.write().unwrap();
         let thread = guard.new_thread();
         guard.bus_process_seed += 1;
@@ -4990,19 +4990,21 @@ pub fn proc_fork<M: MemorySize>(
     };
 
     // Perform the unwind action
-    let wasi_env = env.clone();
+    let wasi_env = env.fork();
     unwind::<M, _>(ctx, move |mut ctx, mut memory_stack, rewind_stack|
     {
         // Fork the memory and copy the module (compiled code)
         let env = ctx.data();
-        let fork_memory = match env
+        let fork_memory: VMMemory = match env
                 .memory()
                 .try_clone(&ctx)
                 .ok_or_else(|| {
-                    error!("thread failed - the memory could not be cloned");
+                    error!("fork failed - the memory could not be cloned");
                     MemoryError::Generic(format!("the memory could not be cloned"))
                 })
-                .and_then(|mut memory| memory.fork())
+                .and_then(|mut memory| 
+                    memory.fork()
+                )
         {
             Ok(memory) => {
                  memory.into()
@@ -5022,59 +5024,205 @@ pub fn proc_fork<M: MemorySize>(
         let mut fork_store = Store::new(engine);
         #[cfg(not(feature = "compiler"))]
         let mut fork_store = Store::default();
+        let stack_base = env.stack_base;
+        let stack_start = env.stack_start;
 
-        // Spawn the process
+        // Now we use the environment and memory references
+        let env = ctx.data();
+        let memory = env.memory_view(&ctx);
         let runtime = env.runtime.clone();
-        if let Err(error) = runtime
-            .thread_spawn(Box::new(move |mut store: Store, module: Module, thread_memory: VMMemory|
+        let child_memory_stack = memory_stack.clone();
+        let child_rewind_stack = rewind_stack.clone();
+        let thread_id: __wasi_tid_t = handle.id().into();        
+
+        // Build a new store that will be passed to the thread
+        #[cfg(feature = "compiler")]
+        let engine = ctx.as_store_ref().engine().clone();
+        #[cfg(feature = "compiler")]
+        let mut store = Store::new(engine);
+        #[cfg(not(feature = "compiler"))]
+        let mut store = Store::default();
+
+        // This function takes in memory and a store and creates a context that
+        // can be used to call back into the process
+        let create_ctx = {
+            let state = env.state.clone();
+            let wasi_env = env.clone();
+            let thread_id = handle.id();
+            move |mut store: Store, module: Module, memory: VMMemory|
             {
+                // We need to reconstruct some things
+                let module = module.clone();
+                let memory = Memory::new_from_existing(&mut store, memory);
+
                 // Build the context object and import the memory
-                let stack_base = wasi_env.stack_base;
-                let stack_start = wasi_env.stack_start;
-                let mut ctx = WasiFunctionEnv::new(&mut store, wasi_env);
+                let mut ctx = WasiFunctionEnv::new(&mut store, wasi_env.clone());
                 {
                     let env = ctx.data_mut(&mut store);
-                    env.id = handle.id();
+                    env.id = thread_id;
                     env.stack_base = stack_base;
                     env.stack_start = stack_start;
                 }
 
-                // Import the functions and the memory
-                let thread_memory = Memory::new_from_existing(&mut store, thread_memory);
                 let mut import_object = import_object_for_all_wasi_versions(&mut store, &ctx.env);
-                import_object.define("env", "memory", thread_memory.clone());
+                import_object.define("env", "memory", memory.clone());
                 
                 let instance = match Instance::new(&mut store, &module, &import_object) {
                     Ok(a) => a,
                     Err(err) => {
                         error!("fork failed - create instance failed: {}", err);
-                        return;
+                        return Err(__WASI_ENOEXEC as u32);
                     }
                 };
-
+                
                 // Set the current thread ID
                 ctx.data_mut(&mut store).inner = Some(
-                    WasiEnvInner::new(module, thread_memory, &store, &instance)
+                    WasiEnvInner::new(module, memory, &store, &instance)
                 );
-                
-                let store_id = store.id();
-                let mut store = store.as_store_mut();
-                
-                // We invoke the function
-                funct.set_store_id(store_id);
-                let funct: Function = funct.into();
-                funct.call(&mut store, &[]);
+                trace!("fork: new context created for thread_id = {}", thread_id.raw());
+                Ok(WasiThreadContext {
+                    ctx,
+                    store: RefCell::new(store)
+                })
+            }
+        };
 
-                // This drop will wake anyone thats joining on the process
-                drop(handle);
-            }),
-            fork_store,
-            fork_module,
-            fork_memory)
+        // This function calls into the module
+        let call_module = move |ctx: &WasiFunctionEnv, mut store: &mut Store|
         {
-            warn!("fork failed - could not spawn thread that will represent this forked process");
-            return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
-        }
+            // Rewind the stack and carry on
+            {
+                let ctx = ctx.env.clone().into_mut(&mut store);
+                match rewind::<M>(ctx, child_memory_stack, child_rewind_stack) {
+                    __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
+                    err => {
+                        warn!("fork failed - could not rewind the stack - errno={}", err);
+                        return __WASI_ENOEXEC as u32;
+                    }
+                };
+            }
+
+            // We invoke the function
+            let store_id = store.id();
+            funct.set_store_id(store_id);
+            let funct: Function = funct.into();
+            
+            let mut ret = __WASI_ESUCCESS;
+            if let Err(err) = funct.call_raw(store, funct_params) {
+                debug!("fork failed - start: {}", err);
+                ret = __WASI_ENOEXEC;
+            }
+
+            trace!("fork: cleaning up local thread variables");
+
+            // Destroy all the local thread variables that were allocated for this thread
+            let to_local_destroy = {
+                let thread_id = ctx.data(store).id;
+                let mut to_local_destroy = Vec::new();
+                let mut guard = ctx.data(store).state.threading.write().unwrap();
+                for ((thread, key), val) in guard.thread_local.iter() {
+                    if *thread == thread_id {
+                        if let Some(user_data) = guard.thread_local_user_data.get(key) {
+                            to_local_destroy.push((*user_data, *val))
+                        }
+                    }
+                }
+                guard.thread_local.retain(|(t, _), _| *t != thread_id);
+                to_local_destroy
+            };
+            if to_local_destroy.len() > 0 {
+                if let Some(thread_local_destroy) = ctx.data(store).inner().thread_local_destroy.as_ref().map(|a| a.clone()) {
+                    for (user_data, val) in to_local_destroy {
+                        let user_data_low: u32 = (user_data & 0xFFFFFFFF) as u32;
+                        let user_data_high: u32 = (user_data >> 32) as u32;
+
+                        let val_low: u32 = (val & 0xFFFFFFFF) as u32;
+                        let val_high: u32 = (val >> 32) as u32;
+
+                        let _ = thread_local_destroy.call(store, user_data_low as i32, user_data_high as i32, val_low as i32, val_high as i32);
+                    }
+                }
+            }
+
+            // Return the result
+            ret as u32
+        };
+
+        // This next function gets a context for the local thread and then
+        // calls into the process    
+        let mut execute_module = {
+            let state = env.state.clone();
+            move |store: &mut Option<Store>, module: Module, memory: &mut Option<VMMemory>|
+            {
+                // We capture the thread handle here, it is used to notify
+                // anyone that is interested when this thread has terminated
+                let _captured_handle = Box::new(&mut handle);
+
+                // Given that it is not safe to assume this delegate will run on the
+                // same thread we need to capture a simple process that will create
+                // context objects on demand and reuse them
+                let caller_id = current_caller_id();
+
+                // We loop because read locks are held while functions run which need
+                // to be relocked in the case of a miss hit.
+                loop {
+                    let thread = {
+                        let guard = state.threading.read().unwrap();
+                        guard.thread_ctx.get(&caller_id).map(|a| a.clone())
+                    };
+                    if let Some(thread) = thread
+                    {
+                        let mut store = thread.store.borrow_mut();
+                        let ret = call_module(&thread.ctx, store.deref_mut());
+                        return ret;
+                    }
+
+                    // Otherwise we need to create a new context under a write lock
+                    debug!("encountered a new caller (ref={}) - creating WASM execution context...", caller_id.raw());
+
+                    // We can only create the context once per thread
+                    let memory = match memory.take() {
+                        Some(m) => m,
+                        None => {
+                            debug!("fork failed - memory can only be consumed once per context creation");
+                            return __WASI_ENOEXEC as u32;
+                        }
+                    };
+                    let store = match store.take() {
+                        Some(s) => s,
+                        None => {
+                            debug!("fork failed - store can only be consumed once per context creation");
+                            return __WASI_ENOEXEC as u32;
+                        }
+                    };
+
+                    // Now create the context and hook it up
+                    let mut guard = state.threading.write().unwrap();
+                    let ctx = match create_ctx(store, module.clone(), memory) {
+                        Ok(c) => c,
+                        Err(err) => {
+                            return err;
+                        }
+                    };
+                    guard.thread_ctx.insert(caller_id, Arc::new(ctx));
+                }
+            }
+        };
+
+        // Now spawn a thread
+        trace!("fork: spawning background thread");
+        let thread_module = env.inner().module.clone();
+        runtime
+            .thread_spawn(Box::new(move |store: Store, module: Module, thread_memory: VMMemory| {
+                let mut thread_memory = Some(thread_memory);
+                let mut store = Some(store);
+                execute_module(&mut store, module, &mut thread_memory);
+            }), store, thread_module, fork_memory)
+            .map_err(|err| {
+                let err: __wasi_errno_t = err.into();
+                err
+            })
+            .unwrap();
 
         // If the return value offset is within the memory stack then we need
         // to update it here rather than in the real memory
@@ -5116,7 +5264,7 @@ pub fn proc_vfork<M: MemorySize>(
     pid_ptr: WasmPtr<__wasi_pid_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
     trace!("wasi::proc_vfork");
-    panic!("join not yet implemented")
+    panic!("vfork not yet implemented")
     /*
     // If we were just restored then we need to return the value instead
     if handle_rewind::<M>(&mut ctx) {

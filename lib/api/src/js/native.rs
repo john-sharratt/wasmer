@@ -15,9 +15,11 @@ use crate::js::{FromToNativeWasmType, RuntimeError, WasmTypeList};
 // use std::panic::{catch_unwind, AssertUnwindSafe};
 use crate::js::export::VMFunction;
 use crate::js::types::param_from_js;
+use crate::js::types::AsJs;
 use js_sys::Array;
 use std::iter::FromIterator;
 use wasm_bindgen::JsValue;
+use wasmer_types::RawValue;
 
 /// A WebAssembly function that can be called natively
 /// (using the Native ABI).
@@ -61,12 +63,33 @@ macro_rules! impl_native_traits {
         {
             /// Call the typed func and return results.
             #[allow(clippy::too_many_arguments)]
-            pub fn call(&self, mut store: &mut impl AsStoreMut, $( $x: $x, )* ) -> Result<Rets, RuntimeError> where
+            pub fn call(&self, store: &mut impl AsStoreMut, $( $x: $x, )* ) -> Result<Rets, RuntimeError> where
             $( $x: FromToNativeWasmType + crate::js::NativeWasmTypeInto, )*
             {
-                store.as_store_mut().inner.is_calling.replace(self.handle.clone());
+                #[allow(unused_unsafe)]
+                let params_list = unsafe {
+                    vec![ $( RawValue { f64: $x.into_raw(store) } ),* ]
+                };
+                self.call_raw(store, params_list)
+            }
 
-                let params_list: Vec<JsValue> = vec![ $( JsValue::from_f64($x.into_raw(&mut store))),* ];
+            #[doc(hidden)]
+            #[allow(missing_docs)]
+            #[allow(clippy::too_many_arguments)]
+            pub fn call_raw(&self, mut store: &mut impl AsStoreMut, params_list: Vec<RawValue> ) -> Result<Rets, RuntimeError> where
+            $( $x: FromToNativeWasmType + crate::js::NativeWasmTypeInto, )*
+            {
+                store.as_store_mut().inner.is_calling.replace(
+                    (
+                        self.handle.clone(),
+                        params_list.clone(),
+                    )
+                );
+
+                let params_list: Vec<JsValue> = params_list
+                    .into_iter()
+                    .map(|a| a.as_jsvalue(&store.as_store_ref()))
+                    .collect();
                 let results = {
                     let mut r;
                     loop {
@@ -110,7 +133,6 @@ macro_rules! impl_native_traits {
                 }
                 Ok(unsafe { Rets::from_array(store, rets_list_array) })
             }
-
         }
 
         #[allow(unused_parens)]

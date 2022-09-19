@@ -411,9 +411,26 @@ impl Function {
             *slot = arg.as_raw(store);
         }
 
+        // Invoke the call
+        self.call_wasm_raw(store, trampoline, values_vec, results)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "compiler")]
+    fn call_wasm_raw(
+        &self,
+        store: &mut impl AsStoreMut,
+        trampoline: VMTrampoline,
+        mut params: Vec<RawValue>,
+        results: &mut [Value],
+    ) -> Result<(), RuntimeError> {
+
         // We set the function we are calling
         store.as_store_mut().inner.is_calling.replace(
-            self.handle.clone()
+            (
+                self.handle.clone(),
+                Vec::new()
+            )
         );
         
         // Call the trampoline.
@@ -427,7 +444,7 @@ impl Function {
                         vm_function.anyfunc.as_ptr().as_ref().vmctx,
                         trampoline,
                         vm_function.anyfunc.as_ptr().as_ref().func_ptr,
-                        values_vec.as_mut_ptr() as *mut u8,
+                        params.as_mut_ptr() as *mut u8,
                     )
                 };
                 let store_mut = store.as_store_mut();
@@ -449,9 +466,10 @@ impl Function {
         }
 
         // Load the return values out of `values_vec`.
+        let signature = self.ty(store);
         for (index, &value_type) in signature.results().iter().enumerate() {
             unsafe {
-                results[index] = Value::from_raw(store, value_type, values_vec[index]);
+                results[index] = Value::from_raw(store, value_type, params[index]);
             }
         }
 
@@ -547,6 +565,27 @@ impl Function {
         };
         let mut results = vec![Value::null(); self.result_arity(store)];
         self.call_wasm(store, trampoline, params, &mut results)?;
+        Ok(results.into_boxed_slice())
+    }
+
+    #[doc(hidden)]
+    #[allow(missing_docs)]
+    #[cfg(feature = "compiler")]
+    pub fn call_raw(
+        &self,
+        store: &mut impl AsStoreMut,
+        params: Vec<RawValue>,
+    ) -> Result<Box<[Value]>, RuntimeError> {
+        let trampoline = unsafe {
+            self.handle
+                .get(store.as_store_ref().objects())
+                .anyfunc
+                .as_ptr()
+                .as_ref()
+                .call_trampoline
+        };
+        let mut results = vec![Value::null(); self.result_arity(store)];
+        self.call_wasm_raw(store, trampoline, params, &mut results)?;
         Ok(results.into_boxed_slice())
     }
 

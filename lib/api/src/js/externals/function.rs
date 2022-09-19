@@ -12,6 +12,7 @@ use js_sys::{Array, Function as JSFunction};
 use std::iter::FromIterator;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasmer_types::RawValue;
 
 use crate::js::export::VMFunction;
 use std::fmt;
@@ -397,6 +398,20 @@ impl Function {
         store: &mut impl AsStoreMut,
         params: &[Value],
     ) -> Result<Box<[Value]>, RuntimeError> {
+        #[allow(unused_unsafe)]
+        let params: Vec<_> = unsafe {
+            params.iter().map(|a| a.as_raw_value(&store.as_store_ref())).collect()
+        };
+        self.call_raw(store, params)
+    }
+
+    #[doc(hidden)]
+    #[allow(missing_docs)]
+    pub fn call_raw(
+        &self,
+        store: &mut impl AsStoreMut,
+        params: Vec<RawValue>,
+    ) -> Result<Box<[Value]>, RuntimeError> {
         let arr = js_sys::Array::new_with_length(params.len() as u32);
 
         // let raw_env = env.as_raw() as *mut u8;
@@ -407,7 +422,12 @@ impl Function {
             arr.set(i as u32, js_value);
         }
 
-        store.as_store_mut().inner.is_calling.replace(self.handle.clone());
+        store.as_store_mut().inner.is_calling.replace(
+            (
+                self.handle.clone(),
+                params,
+            )
+        );
 
         let result = {
             let mut r;

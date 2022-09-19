@@ -266,6 +266,21 @@ where
     pub(crate) runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
 }
 
+impl WasiEnv {
+    /// Forking the WasiState is used when either fork or vfork is called
+    pub fn fork(&self) -> Self
+    {
+        Self {
+            id: self.id,
+            stack_base: self.stack_base,
+            stack_start: self.stack_start,
+            state: Arc::new(self.state.fork()),
+            inner: None,
+            runtime: self.runtime.clone()
+        }
+    }
+}
+
 // Represents the current thread ID for the executing method
 thread_local!(pub(crate) static CALLER_ID: RefCell<u32> = RefCell::new(0));
 thread_local!(pub(crate) static REWIND: RefCell<Option<Vec<u8>>> = RefCell::new(None));

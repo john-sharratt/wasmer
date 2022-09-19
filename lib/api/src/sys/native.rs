@@ -75,6 +75,22 @@ macro_rules! impl_native_traits {
             #[allow(unused_mut)]
             #[allow(clippy::too_many_arguments)]
             pub fn call(&self, store: &mut impl AsStoreMut, $( $x: $x, )* ) -> Result<Rets, RuntimeError> {
+                // Ensure all parameters come from the same context.
+                if $(!FromToNativeWasmType::is_from_store(&$x, store) ||)* false {
+                    return Err(RuntimeError::new(
+                        "cross-`Context` values are not supported",
+                    ));
+                }
+
+                let params_list = vec![ $( $x.to_native().into_raw(store) ),* ];
+                self.call_raw(store, params_list)
+            }
+
+            #[doc(hidden)]
+            #[allow(missing_docs)]
+            #[allow(unused_mut)]
+            #[allow(clippy::too_many_arguments)]
+            pub fn call_raw(&self, store: &mut impl AsStoreMut, mut params_list: Vec<RawValue> ) -> Result<Rets, RuntimeError> {
                 let anyfunc = unsafe {
                     *self.func
                         .handle
@@ -83,15 +99,9 @@ macro_rules! impl_native_traits {
                         .as_ptr()
                         .as_ref()
                 };
-                // Ensure all parameters come from the same context.
-                if $(!FromToNativeWasmType::is_from_store(&$x, store) ||)* false {
-                    return Err(RuntimeError::new(
-                        "cross-`Context` values are not supported",
-                    ));
-                }
                 // TODO: when `const fn` related features mature more, we can declare a single array
                 // of the correct size here.
-                let mut params_list = [ $( $x.to_native().into_raw(store) ),* ];
+                let orig_params_list = params_list.clone();
                 let mut rets_list_array = Rets::empty_array();
                 let rets_list: &mut [RawValue] = rets_list_array.as_mut();
                 let using_rets_array;
@@ -107,7 +117,10 @@ macro_rules! impl_native_traits {
                 };
 
                 store.as_store_mut().inner.is_calling.replace(
-                    self.func.handle.clone()
+                    (
+                        self.func.handle.clone(),
+                        orig_params_list
+                    )
                 );
 
                 let mut r;
