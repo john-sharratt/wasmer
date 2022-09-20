@@ -90,7 +90,7 @@ impl WasiPipe {
             std::mem::swap(guard.deref_mut(), &mut null_tx);
         }
         self.read_buffer.take();
-    }
+    }    
 }
 
 impl Read for WasiPipe {

@@ -25,9 +25,11 @@ impl From<u32> for CallDescriptor {
     }
 }
 
-pub trait VirtualBus: fmt::Debug + Send + Sync + 'static {
+pub trait VirtualBus<T>: fmt::Debug + Send + Sync + 'static
+where T: std::fmt::Debug + Send + Sync + 'static
+{
     /// Starts a new WAPM sub process
-    fn new_spawn(&self) -> SpawnOptions {
+    fn new_spawn(&self) -> SpawnOptions<T> {
         SpawnOptions::new(Box::new(UnsupportedVirtualBusSpawner::default()))
     }
 
@@ -37,14 +39,15 @@ pub trait VirtualBus: fmt::Debug + Send + Sync + 'static {
     }
 }
 
-pub trait VirtualBusSpawner {
+pub trait VirtualBusSpawner<T> {
     /// Spawns a new WAPM process by its name
-    fn spawn(&mut self, name: &str, config: &SpawnOptionsConfig) -> Result<BusSpawnedProcess>;
+    fn spawn(&mut self, name: &str, config: &SpawnOptionsConfig<T>) -> Result<BusSpawnedProcess<T>>;
 }
 
 #[derive(Debug, Clone)]
-pub struct SpawnOptionsConfig {
+pub struct SpawnOptionsConfig<T> {
     reuse: bool,
+    env: Option<T>,
     chroot: bool,
     args: Vec<String>,
     preopen: Vec<String>,
@@ -56,9 +59,13 @@ pub struct SpawnOptionsConfig {
     access_token: Option<String>,
 }
 
-impl SpawnOptionsConfig {
+impl<T> SpawnOptionsConfig<T> {
     pub const fn reuse(&self) -> bool {
         self.reuse
+    }
+
+    pub const fn env(&self) -> Option<&T> {
+        self.env.as_ref()
     }
 
     pub const fn chroot(&self) -> bool {
@@ -98,17 +105,18 @@ impl SpawnOptionsConfig {
     }
 }
 
-pub struct SpawnOptions {
-    spawner: Box<dyn VirtualBusSpawner>,
-    conf: SpawnOptionsConfig,
+pub struct SpawnOptions<T> {
+    spawner: Box<dyn VirtualBusSpawner<T>>,
+    conf: SpawnOptionsConfig<T>,
 }
 
-impl SpawnOptions {
-    pub fn new(spawner: Box<dyn VirtualBusSpawner>) -> Self {
+impl<T> SpawnOptions<T> {
+    pub fn new(spawner: Box<dyn VirtualBusSpawner<T>>) -> Self {
         Self {
             spawner,
             conf: SpawnOptionsConfig {
                 reuse: false,
+                env: None,
                 chroot: false,
                 args: Vec::new(),
                 preopen: Vec::new(),
@@ -121,8 +129,13 @@ impl SpawnOptions {
             },
         }
     }
-    pub fn options(&mut self, options: SpawnOptionsConfig) -> &mut Self {
+    pub fn options(&mut self, options: SpawnOptionsConfig<T>) -> &mut Self {
         self.conf = options;
+        self
+    }
+
+    pub fn env(&mut self, env: T) -> &mut Self {
+        self.conf.env.replace(env);
         self
     }
 
@@ -177,17 +190,17 @@ impl SpawnOptions {
     }
 
     /// Spawns a new bus instance by its reference name
-    pub fn spawn(&mut self, name: &str) -> Result<BusSpawnedProcess> {
+    pub fn spawn(&mut self, name: &str) -> Result<BusSpawnedProcess<T>> {
         self.spawner.spawn(name, &self.conf)
     }
 }
 
 #[derive(Debug)]
-pub struct BusSpawnedProcess {
+pub struct BusSpawnedProcess<T> {
     /// Name of the spawned process
     pub name: String,
     /// Configuration applied to this spawned thread
-    pub config: SpawnOptionsConfig,
+    pub config: SpawnOptionsConfig<T>,
     /// Reference to the spawned instance
     pub inst: Box<dyn VirtualBusProcess + Sync + Unpin>,
     /// Virtual file used for stdin
@@ -398,16 +411,24 @@ pub enum BusDataFormat {
 }
 
 #[derive(Debug, Default)]
-pub struct UnsupportedVirtualBus {}
+pub struct UnsupportedVirtualBus
+{
+}
 
-impl VirtualBus for UnsupportedVirtualBus {
+impl<T> VirtualBus<T> for UnsupportedVirtualBus
+where T: std::fmt::Debug + Send + Sync + 'static
+{
 }
 
 #[derive(Debug, Default)]
-pub struct UnsupportedVirtualBusSpawner {}
+pub struct UnsupportedVirtualBusSpawner
+{
+}
 
-impl VirtualBusSpawner for UnsupportedVirtualBusSpawner {
-    fn spawn(&mut self, _name: &str, _config: &SpawnOptionsConfig) -> Result<BusSpawnedProcess> {
+impl<T> VirtualBusSpawner<T> for UnsupportedVirtualBusSpawner
+where T: std::fmt::Debug + Send + Sync + 'static
+{
+    fn spawn(&mut self, _name: &str, _config: &SpawnOptionsConfig<T>) -> Result<BusSpawnedProcess<T>> {
         Err(VirtualBusError::Unsupported)
     }
 }

@@ -32,6 +32,7 @@ pub use self::guard::*;
 pub use self::thread::*;
 pub use self::parking::*;
 use crate::WasiCallingId;
+use crate::WasiEnv;
 use crate::WasiFunctionEnv;
 use crate::WasiThreadId;
 use crate::syscalls::types::*;
@@ -1856,7 +1857,7 @@ unsafe impl Sync for WasiThreadContext { }
 pub(crate) struct WasiStateThreading {
     pub(crate) threads: Arc<RwLock<HashMap<WasiThreadId, WasiThread>>>,
     pub(crate) thread_count: Arc<AtomicU32>,
-    pub bus_processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess>>,
+    pub bus_processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess<WasiEnv>>>,
     pub bus_process_fork: HashMap<WasiBusProcessId, WasiThreadId>,
     pub bus_process_reuse: HashMap<Cow<'static, str>, WasiBusProcessId>,
     pub bus_process_seed: u32,

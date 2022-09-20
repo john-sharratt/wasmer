@@ -7,7 +7,7 @@ use wasmer::vm::VMMemory;
 use wasmer_vbus::{UnsupportedVirtualBus, VirtualBus};
 use wasmer_vnet::VirtualNetworking;
 
-use crate::WasiCallingId;
+use crate::{WasiCallingId, WasiEnv};
 
 use super::types::*;
 use super::WasiError;
@@ -59,7 +59,7 @@ where Self: fmt::Debug + Sync,
     /// which allows runtimes to pass serialized messages between each other similar to
     /// RPC's. BUS implementation can be implemented that communicate across runtimes
     /// thus creating a distributed computing architecture.
-    fn bus(&self) -> &(dyn VirtualBus);
+    fn bus(&self) -> &(dyn VirtualBus<WasiEnv>);
 
     /// Provides access to all the networking related functions such as sockets.
     /// By default networking is not implemented.
@@ -125,7 +125,7 @@ where Self: fmt::Debug + Sync,
 #[derive(Debug)]
 pub struct PluggableRuntimeImplementation
 {
-    pub bus: Box<dyn VirtualBus + Sync>,
+    pub bus: Box<dyn VirtualBus<WasiEnv> + Sync>,
     pub networking: Box<dyn VirtualNetworking + Sync>,
     pub thread_id_seed: AtomicU32,
 }
@@ -134,7 +134,7 @@ impl PluggableRuntimeImplementation
 {
     pub fn set_bus_implementation<I>(&mut self, bus: I)
     where
-        I: VirtualBus + Sync,
+        I: VirtualBus<WasiEnv> + Sync,
     {
         self.bus = Box::new(bus)
     }
@@ -165,7 +165,7 @@ for PluggableRuntimeImplementation
 impl WasiRuntimeImplementation
 for PluggableRuntimeImplementation
 {
-    fn bus<'a>(&'a self) -> &'a (dyn VirtualBus) {
+    fn bus<'a>(&'a self) -> &'a (dyn VirtualBus<WasiEnv>) {
         self.bus.deref()
     }
 

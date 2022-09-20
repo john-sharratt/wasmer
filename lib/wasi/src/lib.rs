@@ -48,6 +48,7 @@ pub use crate::syscalls::types;
 pub use crate::utils::{
     get_wasi_version, get_wasi_versions, is_wasi_module, is_wasix_module, WasiVersion,
 };
+use bytes::BytesMut;
 #[allow(unused_imports)]
 #[cfg(feature = "js")]
 use bytes::Bytes;
@@ -155,7 +156,8 @@ impl Into<u32> for WasiBusProcessId {
     }
 }
 
-#[derive(Clone)]
+#[derive(Derivative, Clone)]
+#[derivative(Debug)]
 pub struct WasiEnvInner
 {
     /// Represents a reference to the memory
@@ -170,21 +172,25 @@ pub struct WasiEnvInner
     /// Represents the callback for spawning a thread (name = "_start_thread")
     /// (due to limitations with i64 in browsers the parameters are broken into i32 pairs)
     /// [this takes a user_data field]
+    #[derivative(Debug = "ignore")]
     thread_spawn: Option<TypedFunction<(i32, i32), ()>>,
     /// Represents the callback for spawning a reactor (name = "_react")
     /// (due to limitations with i64 in browsers the parameters are broken into i32 pairs)
     /// [this takes a user_data field]
+    #[derivative(Debug = "ignore")]
     react: Option<TypedFunction<(i32, i32), ()>>,
     /// Represents the callback for signals (name = "__wasm_signal")
     /// Signals are triggered asynchronously at idle times of the process
+    #[derivative(Debug = "ignore")]
     signal: Option<TypedFunction<i32, ()>>,
     /// Represents the callback for destroying a local thread variable (name = "_thread_local_destroy")
     /// [this takes a pointer to the destructor and the data to be destroyed]
+    #[derivative(Debug = "ignore")]
     thread_local_destroy: Option<TypedFunction<(i32, i32, i32, i32), ()>>,
     /// asyncify_start_unwind(data : i32): call this to start unwinding the
     /// stack from the current location. "data" must point to a data
     /// structure as described above (with fields containing valid data).
-    #[allow(dead_code)]
+    #[derivative(Debug = "ignore")]
     asyncify_start_unwind: Option<TypedFunction<i32, ()>>,
     /// asyncify_stop_unwind(): call this to note that unwinding has
     /// concluded. If no other code will run before you start to rewind,
@@ -193,17 +199,17 @@ pub struct WasiEnvInner
     /// "sleep", then you must call this at the proper time. Otherwise,
     /// the code will think it is still unwinding when it should not be,
     /// which means it will keep unwinding in a meaningless way.
-    #[allow(dead_code)]
+    #[derivative(Debug = "ignore")]
     asyncify_stop_unwind: Option<TypedFunction<(), ()>>,
     /// asyncify_start_rewind(data : i32): call this to start rewinding the
     /// stack vack up to the location stored in the provided data. This prepares
     /// for the rewind; to start it, you must call the first function in the
     /// call stack to be unwound.
-    #[allow(dead_code)]
+    #[derivative(Debug = "ignore")]
     asyncify_start_rewind: Option<TypedFunction<i32, ()>>,
     /// asyncify_stop_rewind(): call this to note that rewinding has
     /// concluded, and normal execution can resume.
-    #[allow(dead_code)]
+    #[derivative(Debug = "ignore")]
     asyncify_stop_rewind: Option<TypedFunction<(), ()>>,
     /// asyncify_get_state(): call this to get the current value of the
     /// internal "__asyncify_state" variable as described above.
@@ -211,6 +217,7 @@ pub struct WasiEnvInner
     /// calls, so that you know when to start an asynchronous operation and
     /// when to propagate results back.
     #[allow(dead_code)]
+    #[derivative(Debug = "ignore")]
     asyncify_get_state: Option<TypedFunction<(), i32>>,
 }
 
@@ -246,13 +253,28 @@ unsafe impl Sync for WasiEnvInner { }
 pub const DEFAULT_STACK_SIZE: u64 = 1_048_576u64;
 pub const DEFAULT_STACK_BASE: u64 = DEFAULT_STACK_SIZE;
 
+#[derive(Debug, Clone)]
+pub struct WasiVFork {
+    /// The unwound stack before the vfork occured
+    pub rewind_stack: BytesMut,
+    /// The memory stack before the vfork occured
+    pub memory_stack: BytesMut,
+    /// The environment before the vfork occured
+    pub env: Box<WasiEnv>,
+    /// Offset into the memory where the PID will be
+    /// written when the real fork takes places
+    pub pid_offset: u64,
+}
+
 /// The environment provided to the WASI imports.
-#[derive(Derivative, Clone)]
+#[derive(Debug, Clone)]
 pub struct WasiEnv
 where
 {
     /// ID of this thread (zero is the main thread)
     id: WasiThreadId,
+    /// Represents a fork of the process that is currently in play
+    vfork: Option<WasiVFork>,
     /// Base stack pointer for the memory stack
     pub stack_base: u64,
     /// Start of the stack memory that is allocated for this thread
@@ -272,6 +294,7 @@ impl WasiEnv {
     {
         Self {
             id: self.id,
+            vfork: None,
             stack_base: self.stack_base,
             stack_start: self.stack_start,
             state: Arc::new(self.state.fork()),
@@ -283,7 +306,7 @@ impl WasiEnv {
 
 // Represents the current thread ID for the executing method
 thread_local!(pub(crate) static CALLER_ID: RefCell<u32> = RefCell::new(0));
-thread_local!(pub(crate) static REWIND: RefCell<Option<Vec<u8>>> = RefCell::new(None));
+thread_local!(pub(crate) static REWIND: RefCell<Option<bytes::Bytes>> = RefCell::new(None));
 lazy_static::lazy_static! {
     static ref CALLER_ID_SEED: Arc<AtomicU32> = Arc::new(AtomicU32::new(1));
 }
@@ -308,6 +331,7 @@ impl WasiEnv {
     fn new_ext(state: Arc<WasiState>) -> Self {
         let ret = Self {
             id: 0u32.into(),
+            vfork: None,
             stack_base: DEFAULT_STACK_SIZE,
             stack_start: 0,
             state,
@@ -403,7 +427,7 @@ impl WasiEnv {
     }
 
     /// Accesses the virtual bus implementation
-    pub fn bus<'a>(&'a self) -> &'a (dyn VirtualBus) {
+    pub fn bus<'a>(&'a self) -> &'a (dyn VirtualBus<WasiEnv>) {
         self.runtime.bus()
     }
 
