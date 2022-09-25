@@ -424,14 +424,6 @@ impl Function {
         mut params: Vec<RawValue>,
         results: &mut [Value],
     ) -> Result<(), RuntimeError> {
-
-        // We set the function we are calling
-        store.as_store_mut().inner.is_calling.replace(
-            (
-                self.handle.clone(),
-                Vec::new()
-            )
-        );
         
         // Call the trampoline.
         let result = {

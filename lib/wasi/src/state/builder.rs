@@ -1,14 +1,14 @@
 //! Builder system for configuring a [`WasiState`] and creating it.
 
-use crate::state::{default_fs_backing, WasiFs, WasiState, WasiStateThreading};
+use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
-use crate::{WasiEnv, WasiFunctionEnv, WasiInodes};
+use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane};
 use generational_arena::Arena;
 use rand::Rng;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::RwLock;
 use thiserror::Error;
 use wasmer::AsStoreMut;
@@ -19,7 +19,7 @@ use wasmer_vfs::{FsError, VirtualFile};
 /// Internal method only, users should call [`WasiState::new`].
 pub(crate) fn create_wasi_state(program_name: &str) -> WasiStateBuilder {
     WasiStateBuilder {
-        args: vec![program_name.bytes().collect()],
+        args: vec![program_name.to_string()],
         ..WasiStateBuilder::default()
     }
 }
@@ -42,8 +42,8 @@ pub(crate) fn create_wasi_state(program_name: &str) -> WasiStateBuilder {
 /// ```
 #[derive(Default)]
 pub struct WasiStateBuilder {
-    args: Vec<Vec<u8>>,
-    envs: Vec<(Vec<u8>, Vec<u8>)>,
+    args: Vec<String>,
+    envs: Vec<(String, Vec<u8>)>,
     preopens: Vec<PreopenedDir>,
     vfs_preopens: Vec<String>,
     #[allow(clippy::type_complexity)]
@@ -118,7 +118,7 @@ impl WasiStateBuilder {
         Value: AsRef<[u8]>,
     {
         self.envs
-            .push((key.as_ref().to_vec(), value.as_ref().to_vec()));
+            .push((String::from_utf8_lossy(key.as_ref()).to_string(), value.as_ref().to_vec()));
 
         self
     }
@@ -130,7 +130,7 @@ impl WasiStateBuilder {
     where
         Arg: AsRef<[u8]>,
     {
-        self.args.push(arg.as_ref().to_vec());
+        self.args.push(String::from_utf8_lossy(arg.as_ref()).to_string());
 
         self
     }
@@ -357,17 +357,11 @@ impl WasiStateBuilder {
     /// to `mut self` for every _builder method_, but it will break
     /// existing code. It will be addressed in a next major release.
     pub fn build(&mut self) -> Result<WasiState, WasiStateCreationError> {
-        for (i, arg) in self.args.iter().enumerate() {
-            for b in arg.iter() {
+        for arg in self.args.iter() {
+            for b in arg.as_bytes().iter() {
                 if *b == 0 {
                     return Err(WasiStateCreationError::ArgumentContainsNulByte(
-                        std::str::from_utf8(arg)
-                            .unwrap_or(if i == 0 {
-                                "Inner error: program name is invalid utf8!"
-                            } else {
-                                "Inner error: arg is invalid utf8!"
-                            })
-                            .to_string(),
+                        arg.clone(),
                     ));
                 }
             }
@@ -379,7 +373,7 @@ impl WasiStateBuilder {
         }
 
         for (env_key, env_value) in self.envs.iter() {
-            match env_key.iter().find_map(|&ch| {
+            match env_key.as_bytes().iter().find_map(|&ch| {
                 if ch == 0 {
                     Some(InvalidCharacter::Nul)
                 } else if ch == b'=' {
@@ -392,7 +386,7 @@ impl WasiStateBuilder {
                     return Err(WasiStateCreationError::EnvironmentVariableFormatError(
                         format!(
                             "found nul byte in env var key \"{}\" (key=value)",
-                            String::from_utf8_lossy(env_key)
+                            env_key
                         ),
                     ))
                 }
@@ -401,7 +395,7 @@ impl WasiStateBuilder {
                     return Err(WasiStateCreationError::EnvironmentVariableFormatError(
                         format!(
                             "found equal sign in env var key \"{}\" (key=value)",
-                            String::from_utf8_lossy(env_key)
+                            env_key
                         ),
                     ))
                 }
@@ -413,7 +407,7 @@ impl WasiStateBuilder {
                 return Err(WasiStateCreationError::EnvironmentVariableFormatError(
                     format!(
                         "found nul byte in env var value \"{}\" (key=value)",
-                        String::from_utf8_lossy(env_value)
+                        String::from_utf8_lossy(env_value),
                     ),
                 ));
             }
@@ -464,25 +458,23 @@ impl WasiStateBuilder {
             wasi_fs
         };
 
-        let (threading, main_handle) = WasiStateThreading::new();
-
         Ok(WasiState {
             fs: wasi_fs,
             secret: rand::thread_rng().gen::<[u8; 32]>(),
             inodes: Arc::new(inodes),
             args: self.args.clone(),
             preopen: self.vfs_preopens.clone(),
-            threading: RwLock::new(threading),
+            chroot: false,
+            threading: Default::default(),
             futexs: Default::default(),
             clock_offset: Default::default(),
             bus: Default::default(),
-            main_thread: Mutex::new(main_handle),
             envs: self
                 .envs
                 .iter()
                 .map(|(key, value)| {
                     let mut env = Vec::with_capacity(key.len() + value.len() + 1);
-                    env.extend_from_slice(key);
+                    env.extend_from_slice(key.as_bytes());
                     env.push(b'=');
                     env.extend_from_slice(value);
 
@@ -506,9 +498,32 @@ impl WasiStateBuilder {
         &mut self,
         store: &mut impl AsStoreMut,
     ) -> Result<WasiFunctionEnv, WasiStateCreationError> {
+        let control_plane = WasiControlPlane::default();
+        self.finalize_with(store, &control_plane)
+    }
+
+    /// Consumes the [`WasiStateBuilder`] and produces a [`WasiEnv`]
+    /// with a particular control plane
+    ///
+    /// Returns the error from `WasiFs::new` if there's an error.
+    ///
+    /// # Calling `finalize` multiple times
+    ///
+    /// Calling this method multiple times might not produce a
+    /// determinisic result. This method is calling [Self::build],
+    /// which is changing the builder's internal state. See
+    /// [Self::build]'s documentation to learn more.
+    pub fn finalize_with(
+        &mut self,
+        store: &mut impl AsStoreMut,
+        control_plane: &WasiControlPlane,
+    ) -> Result<WasiFunctionEnv, WasiStateCreationError> {
         let state = self.build()?;
 
-        let mut env = WasiEnv::new(state);
+        let process = control_plane.new_process();
+        let thread = process.new_thread();
+
+        let mut env = WasiEnv::new(state, process, thread);
         if let Some(runtime) = self.runtime_override.as_ref() {
             env.runtime = runtime.clone();
         }

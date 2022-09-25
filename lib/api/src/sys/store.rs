@@ -2,8 +2,8 @@ use crate::sys::tunables::BaseTunables;
 use std::fmt;
 #[cfg(feature = "compiler")]
 use wasmer_compiler::{Engine, EngineBuilder, Tunables};
-use wasmer_types::{OnCalledAction, RawValue};
-use wasmer_vm::{init_traps, TrapHandler, TrapHandlerFn, VMFunction, StoreHandle, StoreId};
+use wasmer_types::OnCalledAction;
+use wasmer_vm::{init_traps, TrapHandler, TrapHandlerFn, StoreId};
 
 use wasmer_vm::StoreObjects;
 
@@ -18,7 +18,6 @@ pub(crate) struct StoreInner {
     pub(crate) tunables: Box<dyn Tunables + Send + Sync>,
     pub(crate) trap_handler: Option<Box<TrapHandlerFn<'static>>>,
     pub(crate) on_called: Option<Box<dyn FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>>>>,
-    pub(crate) is_calling: Option<(StoreHandle<VMFunction>, Vec<RawValue>)>,
 }
 
 /// The store represents all global state that can be manipulated by
@@ -80,7 +79,6 @@ impl Store {
                 tunables: Box::new(tunables),
                 trap_handler: None,
                 on_called: None,
-                is_calling: None,
             }),
             engine: engine.cloned(),
         }
@@ -302,12 +300,6 @@ impl<'a> StoreMut<'a> {
     where F: FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
     {
         self.inner.on_called.replace(Box::new(callback));
-    }
-
-    /// Returns a reference to the current function thats being invoked
-    pub fn is_calling(&self) -> Option<(StoreHandle<VMFunction>, Vec<RawValue>)>
-    {
-        self.inner.is_calling.clone()
     }
 }
 

@@ -4,8 +4,9 @@ use bytes::{Buf, Bytes};
 use std::convert::TryInto;
 use std::io::{self, Read};
 use std::ops::DerefMut;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Mutex;
+use std::time::Duration;
 use wasmer::WasmSlice;
 use wasmer::{MemorySize, MemoryView};
 
@@ -43,19 +44,28 @@ impl WasiPipe {
         &mut self,
         memory: &MemoryView,
         iov: WasmSlice<__wasi_iovec_t<M>>,
+        timeout: Duration,
     ) -> Result<usize, __wasi_errno_t> {
         loop {
             if let Some(buf) = self.read_buffer.as_mut() {
                 let buf_len = buf.len();
                 if buf_len > 0 {
                     let reader = buf.as_ref();
-                    let read = read_bytes(reader, memory, iov).map(|_| buf_len as usize)?;
+                    let read = read_bytes(reader, memory, iov).map(|a| a as usize)?;
                     buf.advance(read);
                     return Ok(read);
                 }
             }
             let rx = self.rx.lock().unwrap();
-            let data = rx.recv().map_err(|_| __WASI_EIO)?;
+            let data = match rx.recv_timeout(timeout) {
+                Ok(a) => a,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(__WASI_ETIMEDOUT);
+                },
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Ok(0);
+                }
+            };
             self.read_buffer.replace(Bytes::from(data));
         }
     }

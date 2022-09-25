@@ -1,6 +1,5 @@
 use std::fmt;
-use wasmer_types::{OnCalledAction, RawValue};
-use crate::js::export::VMFunction;
+use wasmer_types::OnCalledAction;
 
 /// We require the context to have a fixed memory address for its lifetime since
 /// various bits of the VM have raw pointers that point back to it. Hence we
@@ -8,7 +7,6 @@ use crate::js::export::VMFunction;
 pub(crate) struct StoreInner {
     pub(crate) objects: StoreObjects,
     pub(crate) on_called: Option<Box<dyn FnOnce(StoreMut) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>>>>,
-    pub(crate) is_calling: Option<(StoreHandle<VMFunction>, Vec<RawValue>)>,
 }
 
 /// The store represents all global state that can be manipulated by
@@ -32,7 +30,6 @@ impl Store {
             inner: Box::new(StoreInner {
                 objects: Default::default(),
                 on_called: None,
-                is_calling: None,
             }),
         }
     }
@@ -144,12 +141,6 @@ impl<'a> StoreMut<'a> {
     where F: FnOnce(StoreMut<'_>) -> Result<OnCalledAction, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
     {
         self.inner.on_called.replace(Box::new(callback));
-    }
-
-    /// Returns a reference to the current function thats being invoked
-    pub fn is_calling(&self) -> Option<(StoreHandle<VMFunction>, Vec<RawValue>)>
-    {
-        self.inner.is_calling.clone()
     }
 }
 

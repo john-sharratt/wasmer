@@ -101,7 +101,6 @@ macro_rules! impl_native_traits {
                 };
                 // TODO: when `const fn` related features mature more, we can declare a single array
                 // of the correct size here.
-                let orig_params_list = params_list.clone();
                 let mut rets_list_array = Rets::empty_array();
                 let rets_list: &mut [RawValue] = rets_list_array.as_mut();
                 let using_rets_array;
@@ -115,13 +114,6 @@ macro_rules! impl_native_traits {
                     }
                     rets_list.as_mut()
                 };
-
-                store.as_store_mut().inner.is_calling.replace(
-                    (
-                        self.func.handle.clone(),
-                        orig_params_list
-                    )
-                );
 
                 let mut r;
                 loop {

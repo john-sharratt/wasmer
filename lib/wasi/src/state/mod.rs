@@ -32,12 +32,9 @@ pub use self::guard::*;
 pub use self::thread::*;
 pub use self::parking::*;
 use crate::WasiCallingId;
-use crate::WasiEnv;
 use crate::WasiFunctionEnv;
-use crate::WasiThreadId;
 use crate::syscalls::types::*;
 use crate::utils::map_io_err;
-use crate::WasiBusProcessId;
 use cooked_waker::ViaRawPointer;
 use cooked_waker::Wake;
 use cooked_waker::WakeRef;
@@ -70,7 +67,6 @@ use std::{
     },
 };
 use tracing::{debug, trace};
-use wasmer_vbus::BusSpawnedProcess;
 
 use wasmer_vfs::{FileSystem, FsError, OpenOptions, VirtualFile};
 
@@ -191,10 +187,13 @@ pub enum Kind {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Fd {
+    /// The reference count is only increased when the FD is
+    /// duplicates - fd_close will not kill the inode until this reaches zero
+    pub ref_cnt: Arc<AtomicU32>,
     pub rights: __wasi_rights_t,
     pub rights_inheriting: __wasi_rights_t,
     pub flags: __wasi_fdflags_t,
-    pub offset: u64,
+    pub offset: Arc<AtomicU64>,
     /// Flags that determine how the [`Fd`] can be used.
     ///
     /// Used when reopening a [`VirtualFile`] during [`WasiState`] deserialization.
@@ -363,15 +362,31 @@ impl WasiFs
     /// Forking the WasiState is used when either fork or vfork is called
     pub fn fork(&self) -> Self
     {
+        let fd_map = self.fd_map.read().unwrap().clone();
+        for fd in fd_map.values() {
+            fd.ref_cnt.fetch_add(1, Ordering::Relaxed);
+        }
         Self {
             preopen_fds: RwLock::new(self.preopen_fds.read().unwrap().clone()),
             name_map: self.name_map.clone(),
-            fd_map: RwLock::new(self.fd_map.read().unwrap().clone()),
+            fd_map: RwLock::new(fd_map),
             next_fd: AtomicU32::new(self.next_fd.load(Ordering::Acquire)),
             inode_counter: AtomicU64::new(self.inode_counter.load(Ordering::Acquire)),
             current_dir: Mutex::new(self.current_dir.lock().unwrap().clone()),
             is_wasix: AtomicBool::new(self.is_wasix.load(Ordering::Acquire)),
             fs_backing: self.fs_backing.clone(),
+        }
+    }
+
+    /// Closes all the file handles
+    pub fn close_all(&self, inodes: &WasiInodes) {
+        let mut guard = self.fd_map.write().unwrap();
+        let fds = {
+            guard.iter().map(|a| *a.0).collect::<Vec<_>>()
+        };
+
+        for fd in fds {
+            _ = self.close_fd_ext(inodes, &mut guard, fd);
         }
     }
 }
@@ -1515,10 +1530,11 @@ impl WasiFs {
         self.fd_map.write().unwrap().insert(
             idx,
             Fd {
+                ref_cnt: Arc::new(AtomicU32::new(1)),
                 rights,
                 rights_inheriting,
                 flags,
-                offset: 0,
+                offset: Arc::new(AtomicU64::new(0)),
                 open_flags,
                 inode,
             },
@@ -1529,13 +1545,15 @@ impl WasiFs {
     pub fn clone_fd(&self, fd: __wasi_fd_t) -> Result<__wasi_fd_t, __wasi_errno_t> {
         let fd = self.get_fd(fd)?;
         let idx = self.next_fd.fetch_add(1, Ordering::AcqRel);
+        fd.ref_cnt.fetch_add(1, Ordering::Acquire);
         self.fd_map.write().unwrap().insert(
             idx,
             Fd {
+                ref_cnt: fd.ref_cnt.clone(),
                 rights: fd.rights,
                 rights_inheriting: fd.rights_inheriting,
                 flags: fd.flags,
-                offset: fd.offset,
+                offset: fd.offset.clone(),
                 open_flags: fd.open_flags,
                 inode: fd.inode,
             },
@@ -1634,12 +1652,13 @@ impl WasiFs {
         self.fd_map.write().unwrap().insert(
             raw_fd,
             Fd {
+                ref_cnt: Arc::new(AtomicU32::new(1)),
                 rights,
                 rights_inheriting: 0,
                 flags: fd_flags,
                 // since we're not calling open on this, we don't need open flags
                 open_flags: 0,
-                offset: 0,
+                offset: Arc::new(AtomicU64::new(0)),
                 inode,
             },
         );
@@ -1717,7 +1736,28 @@ impl WasiFs {
         inodes: &WasiInodes,
         fd: __wasi_fd_t,
     ) -> Result<(), __wasi_errno_t> {
-        let inode = self.get_fd_inode(fd)?;
+        let mut fd_map = self.fd_map.write().unwrap();
+        self.close_fd_ext(inodes, &mut fd_map, fd)
+    }
+
+    /// Closes an open FD, handling all details such as FD being preopen
+    pub(crate) fn close_fd_ext(
+        &self,
+        inodes: &WasiInodes,
+        fd_map: &mut RwLockWriteGuard<HashMap<u32, Fd>>,
+        fd: __wasi_fd_t,
+    ) -> Result<(), __wasi_errno_t> {
+
+        let pfd = fd_map.get(&fd)
+            .ok_or(__WASI_EBADF)?;
+        if pfd.ref_cnt.fetch_sub(1, Ordering::AcqRel) > 1 {
+            trace!("closing file descriptor({}) - ref-cnt", fd);
+            fd_map.remove(&fd);
+            return Ok(());
+        }
+        trace!("closing file descriptor({}) - inode", fd);
+
+        let inode = pfd.inode;
         let inodeval = inodes.get_inodeval(inode)?;
         let is_preopened = inodeval.is_preopened;
 
@@ -1746,7 +1786,7 @@ impl WasiFs {
                     let mut guard = inodes.arena[p].write();
                     match guard.deref_mut() {
                         Kind::Dir { entries, .. } | Kind::Root { entries } => {
-                            self.fd_map.write().unwrap().remove(&fd).unwrap();
+                            fd_map.remove(&fd).unwrap();
                             if is_preopened {
                                 let mut idx = None;
                                 {
@@ -1851,123 +1891,12 @@ unsafe impl Sync for WasiThreadContext { }
 /// These internal implementation details are hidden away from the
 /// consumer who should instead implement the vbus trait on the runtime
 
-#[derive(Derivative)]
+#[derive(Derivative, Default)]
 #[derivative(Debug)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub(crate) struct WasiStateThreading {
-    pub(crate) threads: Arc<RwLock<HashMap<WasiThreadId, WasiThread>>>,
-    pub(crate) thread_count: Arc<AtomicU32>,
-    pub bus_processes: HashMap<WasiBusProcessId, Box<BusSpawnedProcess<WasiEnv>>>,
-    pub bus_process_fork: HashMap<WasiBusProcessId, WasiThreadId>,
-    pub bus_process_reuse: HashMap<Cow<'static, str>, WasiBusProcessId>,
-    pub bus_process_seed: u32,
-    pub thread_seed: WasiThreadId,
-    pub thread_local: HashMap<(WasiThreadId, u32), u64>,
-    pub thread_local_user_data: HashMap<u32, u64>,
-    pub thread_local_seed: u32,
     #[derivative(Debug = "ignore")]
     pub thread_ctx: HashMap<WasiCallingId, Arc<WasiThreadContext>>,
-}
-
-impl WasiStateThreading
-{
-    fn new() -> (Self, WasiThreadHandle) {
-        let mut ret = Self {
-            threads: Default::default(),
-            thread_count: Default::default(),
-            bus_processes: Default::default(),
-            bus_process_fork: Default::default(),
-            bus_process_reuse: Default::default(),
-            bus_process_seed: 1,
-            thread_seed: Default::default(),
-            thread_local: Default::default(),
-            thread_local_user_data: Default::default(),
-            thread_local_seed: Default::default(),
-            thread_ctx: Default::default(),
-        };
-        let handle = ret.new_thread();
-        (ret, handle)
-    }
-}
-
-impl WasiStateThreading
-{
-    /// Creates a a thread and returns it
-    pub fn new_thread(&mut self) -> WasiThreadHandle {
-        let id = self.thread_seed.inc();
-        let ctrl = WasiThread::default();
-        {
-            let mut guard = self.threads.write().unwrap();
-            guard.insert(id, ctrl);
-        }
-        self.thread_count.fetch_add(1, Ordering::AcqRel);
-        
-        WasiThreadHandle {
-            id,
-            threads: self.threads.clone(),
-            thread_count: self.thread_count.clone()
-        }
-    }
-
-    pub fn get(&self, tid: &WasiThreadId) -> Option<WasiThread> {
-        let guard = self.threads.read().unwrap();
-        guard.get(tid).map(|a| a.clone())
-    }
-
-    pub fn signal(&self, tid: &WasiThreadId, signal: __wasi_signal_t) {
-        let guard = self.threads.read().unwrap();
-        if let Some(thread) = guard.get(tid) {
-            thread.signal(signal);
-        } else {
-            trace!("lost-signal(tid={}, sig={})", tid.0, signal);
-        }
-    }
-
-    pub fn signal_all(&self, signal: __wasi_signal_t) {
-        let guard = self.threads.read().unwrap();
-        for thread in guard.values() {
-            thread.signal(signal);
-        }
-    }
-
-    pub fn pop_signals(&self, tid: &WasiThreadId) -> Vec<__wasi_signal_t> {
-        let guard = self.threads.read().unwrap();
-        if let Some(thread) = guard.get(tid) {
-            thread.pop_signals()
-        } else {
-            Vec::new()
-        }
-    }
-
-    pub fn active_threads(&self) -> u32 {
-        self.thread_count.load(Ordering::Acquire)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct WasiThreadHandle {
-    id: WasiThreadId,
-    threads: Arc<RwLock<HashMap<WasiThreadId, WasiThread>>>,
-    pub(crate) thread_count: Arc<AtomicU32>,
-}
-
-impl WasiThreadHandle {
-    pub fn id(&self) -> WasiThreadId {
-        self.id
-    }
-}
-
-impl Drop
-for WasiThreadHandle {
-    fn drop(&mut self) {
-        if let Some(ctrl) = {
-            let mut guard = self.threads.write().unwrap();
-            guard.remove(&self.id)
-        } {
-            ctrl.mark_finished();
-        }
-        self.thread_count.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 
 /// Represents a futex which will make threads wait for completion in a more
@@ -1981,7 +1910,7 @@ pub struct WasiFutex {
 #[derive(Debug)]
 pub struct WasiBusCall
 {
-    pub bid: WasiBusProcessId,
+    pub bid: WasiProcessId,
     pub invocation: Box<dyn VirtualBusInvocation + Sync>,
 }
 
@@ -2068,10 +1997,10 @@ pub struct WasiState {
     pub(crate) futexs: Mutex<HashMap<u64, WasiFutex>>,
     pub(crate) clock_offset: Mutex<HashMap<__wasi_clockid_t, i64>>,
     pub(crate) bus: WasiBusState,
-    pub args: Vec<Vec<u8>>,
+    pub chroot: bool,
+    pub args: Vec<String>,
     pub envs: Vec<Vec<u8>>,
     pub preopen: Vec<String>,
-    pub main_thread: Mutex<WasiThreadHandle>
 }
 
 impl WasiState {
@@ -2156,19 +2085,18 @@ impl WasiState {
     /// Forking the WasiState is used when either fork or vfork is called
     pub fn fork(&self) -> Self
     {
-        let (threading, main_handle) = WasiStateThreading::new();
         WasiState {
             fs: self.fs.fork(),
             secret: self.secret.clone(),
             inodes: self.inodes.clone(),
-            threading: RwLock::new(threading),
+            threading: Default::default(),
             futexs: Default::default(),
             clock_offset: Mutex::new(self.clock_offset.lock().unwrap().clone()),
             bus: Default::default(),
             args: self.args.clone(),
             envs: self.envs.clone(),
+            chroot: self.chroot.clone(),
             preopen: self.preopen.clone(),
-            main_thread: Mutex::new(main_handle)
         }
     }
 }

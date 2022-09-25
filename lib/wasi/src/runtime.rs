@@ -1,6 +1,5 @@
 use std::fmt;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 use wasmer::{Module, Store};
 use wasmer::vm::VMMemory;
@@ -11,7 +10,6 @@ use crate::{WasiCallingId, WasiEnv};
 
 use super::types::*;
 use super::WasiError;
-use super::WasiThreadId;
 
 #[derive(Error, Debug)]
 pub enum WasiThreadError {
@@ -65,9 +63,6 @@ where Self: fmt::Debug + Sync,
     /// By default networking is not implemented.
     fn networking(&self) -> &(dyn VirtualNetworking);
 
-    /// Generates a new thread ID
-    fn thread_generate_id(&self) -> WasiThreadId;
-
     /// Gets the TTY state
     fn tty_get(&self) -> WasiTtyState {
         WasiTtyState {
@@ -110,16 +105,6 @@ where Self: fmt::Debug + Sync,
         std::thread::yield_now();
         Ok(())
     }
-
-    /// Gets the current process ID
-    fn getpid(&self) -> Option<u32> {
-        None
-    }
-
-    /// Gets the parent process ID of a particular process
-    fn getppid(&self, _pid: u32) -> Option<u32> {
-        None
-    }
 }
 
 #[derive(Debug)]
@@ -127,7 +112,6 @@ pub struct PluggableRuntimeImplementation
 {
     pub bus: Box<dyn VirtualBus<WasiEnv> + Sync>,
     pub networking: Box<dyn VirtualNetworking + Sync>,
-    pub thread_id_seed: AtomicU32,
 }
 
 impl PluggableRuntimeImplementation
@@ -157,7 +141,6 @@ for PluggableRuntimeImplementation
             #[cfg(feature = "host-vnet")]
             networking: Box::new(wasmer_wasi_local_networking::LocalNetworking::default()),
             bus: Box::new(UnsupportedVirtualBus::default()),
-            thread_id_seed: Default::default(),
         }
     }
 }
@@ -171,10 +154,6 @@ for PluggableRuntimeImplementation
 
     fn networking<'a>(&'a self) -> &'a (dyn VirtualNetworking) {
         self.networking.deref()
-    }
-
-    fn thread_generate_id(&self) -> WasiThreadId {
-        self.thread_id_seed.fetch_add(1, Ordering::Relaxed).into()
     }
     
     #[cfg(feature = "sys-thread")]

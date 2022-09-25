@@ -63,29 +63,13 @@ macro_rules! impl_native_traits {
         {
             /// Call the typed func and return results.
             #[allow(clippy::too_many_arguments)]
-            pub fn call(&self, store: &mut impl AsStoreMut, $( $x: $x, )* ) -> Result<Rets, RuntimeError> where
+            pub fn call(&self, mut store: &mut impl AsStoreMut, $( $x: $x, )* ) -> Result<Rets, RuntimeError> where
             $( $x: FromToNativeWasmType + crate::js::NativeWasmTypeInto, )*
             {
                 #[allow(unused_unsafe)]
-                let params_list = unsafe {
+                let params_list: Vec<RawValue> = unsafe {
                     vec![ $( RawValue { f64: $x.into_raw(store) } ),* ]
                 };
-                self.call_raw(store, params_list)
-            }
-
-            #[doc(hidden)]
-            #[allow(missing_docs)]
-            #[allow(clippy::too_many_arguments)]
-            pub fn call_raw(&self, mut store: &mut impl AsStoreMut, params_list: Vec<RawValue> ) -> Result<Rets, RuntimeError> where
-            $( $x: FromToNativeWasmType + crate::js::NativeWasmTypeInto, )*
-            {
-                store.as_store_mut().inner.is_calling.replace(
-                    (
-                        self.handle.clone(),
-                        params_list.clone(),
-                    )
-                );
-
                 let params_list: Vec<JsValue> = params_list
                     .into_iter()
                     .map(|a| a.as_jsvalue(&store.as_store_ref()))

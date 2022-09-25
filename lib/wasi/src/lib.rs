@@ -42,6 +42,7 @@ mod utils;
 
 pub use crate::state::{
     Fd, Pipe, Stderr, Stdin, Stdout, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
+    WasiThreadId, WasiThreadHandle, WasiProcessId, WasiControlPlane, WasiThread, WasiProcess,
     WasiStateCreationError, ALL_RIGHTS, VIRTUAL_ROOT_FD,
 };
 pub use crate::syscalls::types;
@@ -54,6 +55,7 @@ use bytes::BytesMut;
 use bytes::Bytes;
 use derivative::Derivative;
 use tracing::{trace, warn, error};
+use wasmer_vbus::SpawnEnvironmentIntrinsics;
 pub use wasmer_vbus::{UnsupportedVirtualBus, VirtualBus};
 #[deprecated(since = "2.1.0", note = "Please use `wasmer_vfs::FsError`")]
 pub use wasmer_vfs::FsError as WasiFsError;
@@ -69,7 +71,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 use wasmer::{
     imports, namespace, AsStoreMut, Exports, Function, FunctionEnv, Imports, Memory, Memory32,
-    MemoryAccessError, MemorySize, Module, TypedFunction, Memory64, MemoryView, AsStoreRef, Instance, ExportError, Global, Value,
+    MemoryAccessError, MemorySize, Module, TypedFunction, Memory64, MemoryView, AsStoreRef, Instance, ExportError, Global, Value, Store,
 };
 
 pub use runtime::{
@@ -86,33 +88,6 @@ pub enum WasiError {
     Exit(syscalls::types::__wasi_exitcode_t),
     #[error("The WASI version could not be determined")]
     UnknownWasiVersion,
-}
-
-/// Represents the ID of a WASI thread
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WasiThreadId(u32);
-
-impl WasiThreadId {
-    pub fn raw(&self) -> u32 {
-        self.0
-    }
-
-    pub fn inc(&mut self) -> WasiThreadId {
-        let ret = self.clone();
-        self.0 += 1;
-        ret
-    }
-}
-
-impl From<u32> for WasiThreadId {
-    fn from(id: u32) -> Self {
-        Self(id)
-    }
-}
-impl From<WasiThreadId> for u32 {
-    fn from(t: WasiThreadId) -> u32 {
-        t.0 as u32
-    }
 }
 
 /// Represents the ID of a WASI calling thread
@@ -141,21 +116,6 @@ impl From<WasiCallingId> for u32 {
     }
 }
 
-/// Represents the ID of a sub-process
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WasiBusProcessId(u32);
-
-impl From<u32> for WasiBusProcessId {
-    fn from(id: u32) -> Self {
-        Self(id)
-    }
-}
-impl Into<u32> for WasiBusProcessId {
-    fn into(self) -> u32 {
-        self.0 as u32
-    }
-}
-
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
 pub struct WasiEnvInner
@@ -169,6 +129,13 @@ pub struct WasiEnvInner
     exports: Exports,
     //// Points to the current location of the memory stack pointer
     stack_pointer: Option<Global>,
+    /// Main function that will be invoked (name = "_start")
+    #[derivative(Debug = "ignore")]
+    start: Option<TypedFunction<(), ()>>,
+    /// Function thats invoked to initialize the WASM module (nane = "_initialize")
+    #[allow(dead_code)]
+    #[derivative(Debug = "ignore")]
+    initialize: Option<TypedFunction<(), ()>>,
     /// Represents the callback for spawning a thread (name = "_start_thread")
     /// (due to limitations with i64 in browsers the parameters are broken into i32 pairs)
     /// [this takes a user_data field]
@@ -230,6 +197,8 @@ impl WasiEnvInner
             memory,
             exports: instance.exports.clone(),
             stack_pointer: instance.exports.get_global("__stack_pointer").map(|a| a.clone()).ok(),
+            start: instance.exports.get_typed_function(store, "_start").ok(),
+            initialize: instance.exports.get_typed_function(store, "_initialize").ok(),
             thread_spawn: instance.exports.get_typed_function(store, "_start_thread").ok(),
             react: instance.exports.get_typed_function(store, "_react").ok(),
             signal: instance.exports.get_typed_function(store, "__wasm_signal").ok(),
@@ -261,6 +230,9 @@ pub struct WasiVFork {
     pub memory_stack: BytesMut,
     /// The environment before the vfork occured
     pub env: Box<WasiEnv>,
+    /// Handle of the thread we have forked (dropping this handle
+    /// will signal that the thread is dead)
+    pub handle: WasiThreadHandle,
     /// Offset into the memory where the PID will be
     /// written when the real fork takes places
     pub pid_offset: u64,
@@ -271,10 +243,12 @@ pub struct WasiVFork {
 pub struct WasiEnv
 where
 {
-    /// ID of this thread (zero is the main thread)
-    id: WasiThreadId,
+    /// Represents the process this environment is attached to
+    pub process: WasiProcess,
+    /// Represents the thread this environment is attached to
+    pub thread: WasiThread,
     /// Represents a fork of the process that is currently in play
-    vfork: Option<WasiVFork>,
+    pub vfork: Option<WasiVFork>,
     /// Base stack pointer for the memory stack
     pub stack_base: u64,
     /// Start of the stack memory that is allocated for this thread
@@ -284,23 +258,42 @@ where
     pub state: Arc<WasiState>,
     /// Inner functions and references that are loaded before the environment starts
     pub inner: Option<WasiEnvInner>,
+    /// List of the handles that are owned by this context 
+    /// (this can be used to ensure that threads own themselves or others)
+    pub owned_handles: Vec<WasiThreadHandle>,
     /// Implementation of the WASI runtime.
-    pub(crate) runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
+    pub runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
 }
 
 impl WasiEnv {
     /// Forking the WasiState is used when either fork or vfork is called
-    pub fn fork(&self) -> Self
+    pub fn fork(&self) -> (Self, WasiThreadHandle)
     {
-        Self {
-            id: self.id,
-            vfork: None,
-            stack_base: self.stack_base,
-            stack_start: self.stack_start,
-            state: Arc::new(self.state.fork()),
-            inner: None,
-            runtime: self.runtime.clone()
-        }
+        let process = self.process.compute.new_process();        
+        let handle = process.new_thread();
+        
+        (
+            Self {
+                process: process,
+                thread: handle.as_thread(),
+                vfork: None,
+                stack_base: self.stack_base,
+                stack_start: self.stack_start,
+                state: Arc::new(self.state.fork()),
+                inner: None,
+                owned_handles: Vec::new(),
+                runtime: self.runtime.clone()
+            },
+            handle
+        )
+    }
+
+    pub fn pid(&self) -> WasiProcessId {
+        self.process.pid()
+    }
+
+    pub fn tid(&self) -> WasiThreadId {
+        self.thread.tid()
     }
 }
 
@@ -323,20 +316,25 @@ pub fn current_caller_id() -> WasiCallingId {
 }
 
 impl WasiEnv {
-    pub fn new(state: WasiState) -> Self {
+    pub fn new(state: WasiState, process: WasiProcess, thread: WasiThreadHandle) -> Self {
         let state = Arc::new(state);
-        Self::new_ext(state)
+        let mut ret = Self::new_ext(state, process, thread.as_thread());
+        ret.owned_handles.push(thread);
+        ret
     }
 
-    fn new_ext(state: Arc<WasiState>) -> Self {
+    fn new_ext(state: Arc<WasiState>, process: WasiProcess, thread: WasiThread) -> Self {
+        let runtime = Arc::new(PluggableRuntimeImplementation::default());
         let ret = Self {
-            id: 0u32.into(),
+            process,
+            thread,
             vfork: None,
             stack_base: DEFAULT_STACK_SIZE,
             stack_start: 0,
             state,
             inner: None,
-            runtime: Arc::new(PluggableRuntimeImplementation::default()),
+            owned_handles: Vec::new(),
+            runtime,
         };
         ret
     }
@@ -356,8 +354,7 @@ impl WasiEnv {
 
     /// Returns the number of active threads
     pub fn active_threads(&self) -> u32 {
-        let guard = self.state.threading.read().unwrap();
-        guard.active_threads()
+        self.process.active_threads()
     }
 
     // Yields execution
@@ -365,10 +362,7 @@ impl WasiEnv {
         // Check for any signals that we need to trigger
         // (but only if a signal handler is registered)
         if let Some(handler) = self.inner().signal.clone() {
-            let signals = {
-                let guard = self.state.threading.read().unwrap();
-                guard.pop_signals(&self.id)
-            };
+            let signals = self.thread.pop_signals();
             for signal in signals {
                 trace!("processing-signal: {}", signal);
                 if let Err(err) = handler.call(store, signal as i32) {
@@ -389,6 +383,12 @@ impl WasiEnv {
 
     // Yields execution
     pub fn yield_now(&self) -> Result<(), WasiError> {
+        if let Some(forced_exit) = self.thread.try_join() {
+            return Err(WasiError::Exit(forced_exit));
+        }
+        if let Some(forced_exit) = self.process.try_join() {
+            return Err(WasiError::Exit(forced_exit));
+        }
         self.runtime.yield_now(current_caller_id())?;
         Ok(())
     }
@@ -497,6 +497,48 @@ impl WasiEnv {
     }
 }
 
+impl SpawnEnvironmentIntrinsics
+for WasiEnv
+{
+    fn chroot(&self) -> bool {
+        self.state.chroot
+    }
+
+    fn args(&self) -> &Vec<String> {
+        &self.state.args
+    }
+
+    fn preopen(&self) -> &Vec<String> {
+        &self.state.preopen
+    }
+
+    fn stdin_mode(&self) -> wasmer_vbus::StdioMode {
+        match self.state.stdin() {
+            Ok(Some(_)) => wasmer_vbus::StdioMode::Inherit,
+            _ => wasmer_vbus::StdioMode::Null,
+        }
+    }
+
+    fn stdout_mode(&self) -> wasmer_vbus::StdioMode {
+        match self.state.stdout() {
+            Ok(Some(_)) => wasmer_vbus::StdioMode::Inherit,
+            _ => wasmer_vbus::StdioMode::Null,
+        }
+    }
+
+    fn stderr_mode(&self) -> wasmer_vbus::StdioMode {
+        match self.state.stderr() {
+            Ok(Some(_)) => wasmer_vbus::StdioMode::Inherit,
+            _ => wasmer_vbus::StdioMode::Null,
+        }
+    }
+
+    fn working_dir(&self) -> String {
+        let guard = self.state.fs.current_dir.lock().unwrap();
+        guard.clone()
+    }
+}
+
 pub struct WasiFunctionEnv {
     pub env: FunctionEnv<WasiEnv>,
 }
@@ -556,6 +598,8 @@ impl WasiFunctionEnv {
             module: instance.module().clone(),
             exports: instance.exports.clone(),
             stack_pointer: instance.exports.get_global("__stack_pointer").map(|a| a.clone()).ok(),
+            start: instance.exports.get_typed_function(store, "_start").ok(),
+            initialize: instance.exports.get_typed_function(store, "_initialize").ok(),
             thread_spawn: instance.exports.get_typed_function(store, "_start_thread").ok(),
             react: instance.exports.get_typed_function(store, "_react").ok(),
             signal: instance.exports.get_typed_function(&store, "__wasm_signal").ok(),
@@ -609,6 +653,47 @@ impl WasiFunctionEnv {
         }
 
         Ok(resolver)
+    }
+
+    pub fn cleanup(&self, store: &mut Store) {
+        trace!("wasi[{}]:: cleaning up local thread variables", self.data(store).pid());
+
+        // Destroy all the local thread variables that were allocated for this thread
+        let to_local_destroy = {
+            let thread_id = self.data(store).thread.tid();
+            let mut to_local_destroy = Vec::new();
+            let mut inner = self.data(store).process.write();
+            for ((thread, key), val) in inner.thread_local.iter() {
+                if *thread == thread_id {
+                    if let Some(user_data) = inner.thread_local_user_data.get(key) {
+                        to_local_destroy.push((*user_data, *val))
+                    }
+                }
+            }
+            inner.thread_local.retain(|(t, _), _| *t != thread_id);
+            to_local_destroy
+        };
+        if to_local_destroy.len() > 0 {
+            if let Some(thread_local_destroy) = self.data(store).inner().thread_local_destroy.as_ref().map(|a| a.clone()) {
+                for (user_data, val) in to_local_destroy {
+                    let user_data_low: u32 = (user_data & 0xFFFFFFFF) as u32;
+                    let user_data_high: u32 = (user_data >> 32) as u32;
+
+                    let val_low: u32 = (val & 0xFFFFFFFF) as u32;
+                    let val_high: u32 = (val >> 32) as u32;
+
+                    let _ = thread_local_destroy.call(store, user_data_low as i32, user_data_high as i32, val_low as i32, val_high as i32);
+                }
+            }
+        }
+
+        // If this is the main thread then also close all the files
+        if self.data(store).thread.is_main() {
+            trace!("wasi[{}]:: cleaning up open file handles", self.data(store).pid());
+            
+            let inodes = self.data(store).state.inodes.read().unwrap();
+            self.data(store).state.fs.close_all(inodes.deref());
+        }
     }
 }
 
@@ -671,7 +756,7 @@ fn wasi_unstable_exports(mut store: &mut impl AsStoreMut, env: &FunctionEnv<Wasi
         "path_symlink" => Function::new_typed_with_env(&mut store, env, path_symlink::<Memory32>),
         "path_unlink_file" => Function::new_typed_with_env(&mut store, env, path_unlink_file::<Memory32>),
         "poll_oneoff" => Function::new_typed_with_env(&mut store, env, legacy::snapshot0::poll_oneoff),
-        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit),
+        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit::<Memory32>),
         "proc_raise" => Function::new_typed_with_env(&mut store, env, proc_raise),
         "random_get" => Function::new_typed_with_env(&mut store, env, random_get::<Memory32>),
         "sched_yield" => Function::new_typed_with_env(&mut store, env, sched_yield),
@@ -726,7 +811,7 @@ fn wasi_snapshot_preview1_exports(
         "path_symlink" => Function::new_typed_with_env(&mut store, env, path_symlink::<Memory32>),
         "path_unlink_file" => Function::new_typed_with_env(&mut store, env, path_unlink_file::<Memory32>),
         "poll_oneoff" => Function::new_typed_with_env(&mut store, env, poll_oneoff::<Memory32>),
-        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit),
+        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit::<Memory32>),
         "proc_raise" => Function::new_typed_with_env(&mut store, env, proc_raise),
         "random_get" => Function::new_typed_with_env(&mut store, env, random_get::<Memory32>),
         "sched_yield" => Function::new_typed_with_env(&mut store, env, sched_yield),
@@ -786,7 +871,7 @@ fn wasix_exports_32(
         "path_symlink" => Function::new_typed_with_env(&mut store, env, path_symlink::<Memory32>),
         "path_unlink_file" => Function::new_typed_with_env(&mut store, env, path_unlink_file::<Memory32>),
         "poll_oneoff" => Function::new_typed_with_env(&mut store, env, poll_oneoff::<Memory32>),
-        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit),
+        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit::<Memory32>),
         "proc_fork" => Function::new_typed_with_env(&mut store, env, proc_fork::<Memory32>),
         "proc_join" => Function::new_typed_with_env(&mut store, env, proc_join::<Memory32>),
         "proc_signal" => Function::new_typed_with_env(&mut store, env, proc_signal::<Memory32>),
@@ -924,7 +1009,7 @@ fn wasix_exports_64(
         "path_symlink" => Function::new_typed_with_env(&mut store, env, path_symlink::<Memory64>),
         "path_unlink_file" => Function::new_typed_with_env(&mut store, env, path_unlink_file::<Memory64>),
         "poll_oneoff" => Function::new_typed_with_env(&mut store, env, poll_oneoff::<Memory64>),
-        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit),
+        "proc_exit" => Function::new_typed_with_env(&mut store, env, proc_exit::<Memory64>),
         "proc_fork" => Function::new_typed_with_env(&mut store, env, proc_fork::<Memory64>),
         "proc_join" => Function::new_typed_with_env(&mut store, env, proc_join::<Memory64>),
         "proc_signal" => Function::new_typed_with_env(&mut store, env, proc_signal::<Memory64>),

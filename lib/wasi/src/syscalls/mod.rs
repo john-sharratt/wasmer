@@ -19,9 +19,9 @@ pub mod windows;
 pub mod legacy;
 
 use self::types::*;
-use crate::state::{bus_error_into_wasi_err, wasi_error_into_bus_err, InodeHttpSocketType, WasiFutex, bus_write_rights, bus_read_rights, WasiBusCall, WasiThreadContext, WasiParkingLot, WasiDummyWaker};
+use crate::state::{bus_error_into_wasi_err, wasi_error_into_bus_err, InodeHttpSocketType, WasiFutex, bus_write_rights, bus_read_rights, WasiBusCall, WasiThreadContext, WasiParkingLot, WasiDummyWaker, WasiThreadId, WasiProcessId};
 use crate::utils::map_io_err;
-use crate::{WasiBusProcessId, WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE, WasiVFork};
+use crate::{WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE, WasiVFork};
 use crate::{
     mem_error_to_wasi,
     state::{
@@ -29,7 +29,7 @@ use crate::{
         virtual_file_type_to_wasi_file_type, Fd, Inode, InodeSocket, InodeSocketKind, InodeVal,
         Kind, PollEvent, PollEventBuilder, WasiPipe, WasiState, MAX_SYMLINKS,
     },
-    WasiEnv, WasiError, WasiThreadId,
+    WasiEnv, WasiError,
 };
 use bytes::{Bytes, BytesMut};
 use cooked_waker::IntoWaker;
@@ -133,7 +133,7 @@ pub(crate) fn read_bytes<T: Read, M: MemorySize>(
         let to_read = from_offset::<M>(iov_inner.buf_len)?;
         raw_bytes.resize(to_read, 0);
         let has_read = reader.read(&mut raw_bytes).map_err(map_io_err)?;
-
+        
         let buf = WasmPtr::<u8, M>::new(iov_inner.buf)
             .slice(memory, iov_inner.buf_len)
             .map_err(mem_error_to_wasi)?;
@@ -309,11 +309,12 @@ pub fn args_get<M: MemorySize>(
     argv: WasmPtr<WasmPtr<u8, M>, M>,
     argv_buf: WasmPtr<u8, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::args_get");
+    debug!("wasi[{}]::args_get", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
 
-    let result = write_buffer_array(&memory, &*state.args, argv, argv_buf);
+    let state_args: Vec<Vec<u8>> = state.args.iter().map(|a| a.as_bytes().to_vec()).collect();
+    let result = write_buffer_array(&memory, &*state_args, argv, argv_buf);
 
     debug!(
         "=> args:\n{}",
@@ -321,7 +322,7 @@ pub fn args_get<M: MemorySize>(
             .args
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("{:>20}: {}", i, ::std::str::from_utf8(v).unwrap()))
+            .map(|(i, v)| format!("{:>20}: {}", i, v))
             .collect::<Vec<String>>()
             .join("\n")
     );
@@ -341,7 +342,7 @@ pub fn args_sizes_get<M: MemorySize>(
     argc: WasmPtr<M::Offset, M>,
     argv_buf_size: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::args_sizes_get");
+    debug!("wasi[{}]::args_sizes_get", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
 
@@ -373,7 +374,7 @@ pub fn clock_res_get<M: MemorySize>(
     clock_id: __wasi_clockid_t,
     resolution: WasmPtr<__wasi_timestamp_t, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::clock_res_get");
+    trace!("wasi[{}]::clock_res_get", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
@@ -494,7 +495,7 @@ pub fn environ_sizes_get<M: MemorySize>(
     environ_count: WasmPtr<M::Offset, M>,
     environ_buf_size: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::environ_sizes_get");
+    trace!("wasi[{}]::environ_sizes_get", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
 
@@ -535,7 +536,7 @@ pub fn fd_advise(
     len: __wasi_filesize_t,
     advice: __wasi_advice_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_advise: fd={}", fd);
+    debug!("wasi[{}]::fd_advise: fd={}", ctx.data().pid(), fd);
 
     // this is used for our own benefit, so just returning success is a valid
     // implementation for now
@@ -557,7 +558,7 @@ pub fn fd_allocate(
     offset: __wasi_filesize_t,
     len: __wasi_filesize_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_allocate");
+    debug!("wasi[{}]::fd_allocate", ctx.data().pid());
     let env = ctx.data();
     let (_, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
     let fd_entry = wasi_try!(state.fs.get_fd(fd));
@@ -604,12 +605,11 @@ pub fn fd_allocate(
 /// - `__WASI_EBADF`
 ///     If `fd` is invalid or not open
 pub fn fd_close(ctx: FunctionEnvMut<'_, WasiEnv>, fd: __wasi_fd_t) -> __wasi_errno_t {
-    debug!("wasi::fd_close: fd={}", fd);
+    debug!("wasi[{}]::fd_close: fd={}", ctx.data().pid(), fd);
     let env = ctx.data();
     let (_, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
 
-    let fd_entry = wasi_try!(state.fs.get_fd(fd));
-
+    let fd_entry = wasi_try!(state.fs.get_fd(fd));    
     wasi_try!(state.fs.close_fd(inodes.deref(), fd));
 
     __WASI_ESUCCESS
@@ -677,7 +677,7 @@ pub fn fd_fdstat_set_flags(
     fd: __wasi_fd_t,
     flags: __wasi_fdflags_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_fdstat_set_flags");
+    debug!("wasi[{}]::fd_fdstat_set_flags", ctx.data().pid());
     let env = ctx.data();
     let (_, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
     let mut fd_map = state.fs.fd_map.write().unwrap();
@@ -706,7 +706,7 @@ pub fn fd_fdstat_set_rights(
     fs_rights_base: __wasi_rights_t,
     fs_rights_inheriting: __wasi_rights_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_fdstat_set_rights");
+    debug!("wasi[{}]::fd_fdstat_set_rights", ctx.data().pid());
     let env = ctx.data();
     let (_, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
     let mut fd_map = state.fs.fd_map.write().unwrap();
@@ -782,7 +782,7 @@ pub fn fd_filestat_set_size(
     fd: __wasi_fd_t,
     st_size: __wasi_filesize_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_filestat_set_size");
+    debug!("wasi[{}]::fd_filestat_set_size", ctx.data().pid());
     let env = ctx.data();
     let (_, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
     let fd_entry = wasi_try!(state.fs.get_fd(fd));
@@ -833,7 +833,7 @@ pub fn fd_filestat_set_times(
     st_mtim: __wasi_timestamp_t,
     fst_flags: __wasi_fstflags_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_filestat_set_times");
+    debug!("wasi[{}]::fd_filestat_set_times", ctx.data().pid());
     let env = ctx.data();
     let (_, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
     let fd_entry = wasi_try!(state.fs.get_fd(fd));
@@ -896,7 +896,7 @@ pub fn fd_pread<M: MemorySize>(
     offset: __wasi_filesize_t,
     nread: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::fd_pread: fd={}, offset={}", fd, offset);
+    trace!("wasi[{}]::fd_pread: fd={}, offset={}", ctx.data().pid(), fd, offset);
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
 
@@ -950,7 +950,18 @@ pub fn fd_pread<M: MemorySize>(
                     wasi_try_ok!(socket.recv(&memory, iovs), env)
                 }
                 Kind::Pipe { pipe } => {
-                    wasi_try_ok!(pipe.recv(&memory, iovs), env)
+                    let mut a;
+                    loop {
+                        a = wasi_try_ok!(match pipe.recv(&memory, iovs, Duration::from_millis(5)) {
+                            Err(err) if err == __WASI_ETIMEDOUT => {
+                                env.yield_now()?;
+                                continue;
+                            },
+                            a => a
+                        }, env);
+                        break;
+                    }
+                    a
                 }
                 Kind::EventNotifications { .. } => return Ok(__WASI_EINVAL),
                 Kind::Dir { .. } | Kind::Root { .. } => return Ok(__WASI_EISDIR),
@@ -967,7 +978,6 @@ pub fn fd_pread<M: MemorySize>(
 
     let bytes_read: M::Offset = wasi_try_ok!(bytes_read.try_into().map_err(|_| __WASI_EOVERFLOW));
     wasi_try_mem_ok!(nread_ref.write(bytes_read));
-    debug!("Success: {} bytes read", bytes_read);
     Ok(__WASI_ESUCCESS)
 }
 
@@ -984,7 +994,7 @@ pub fn fd_prestat_get<M: MemorySize>(
     fd: __wasi_fd_t,
     buf: WasmPtr<__wasi_prestat_t, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::fd_prestat_get: fd={}", fd);
+    trace!("wasi[{}]::fd_prestat_get: fd={}", ctx.data().pid(), fd);
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
 
@@ -1070,7 +1080,7 @@ pub fn fd_pwrite<M: MemorySize>(
     offset: __wasi_filesize_t,
     nwritten: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::fd_pwrite");
+    trace!("wasi[{}]::fd_pwrite", ctx.data().pid());
     // TODO: refactor, this is just copied from `fd_write`...
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
@@ -1180,154 +1190,158 @@ pub fn fd_read<M: MemorySize>(
     iovs_len: M::Offset,
     nread: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::fd_read: fd={}", fd);
+    trace!("wasi[{}]::fd_read: fd={}", ctx.data().pid(), fd);
     let mut env = ctx.data();
     let state = env.state.clone();
     let inodes = state.inodes.clone();
     //let iovs_len = if iovs_len > M::Offset::from(1u32) { M::Offset::from(1u32) } else { iovs_len };
+
+    let is_stdio = match fd {
+        __WASI_STDIN_FILENO => true,
+        __WASI_STDOUT_FILENO => return Ok(__WASI_EINVAL),
+        __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
+        _ => false,
+    };
     
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = {
         let inodes = inodes.read().unwrap();
-        match fd {
-            __WASI_STDIN_FILENO => {
-                let mut guard = wasi_try_ok!(
-                    inodes
-                        .stdin_mut(&state.fs.fd_map)
-                        .map_err(fs_error_into_wasi_err),
-                    env
-                );
-                if let Some(ref mut stdin) = guard.deref_mut() {
-                    let mut memory = env.memory_view(&ctx);
-                    let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-                    wasi_try_ok!(read_bytes(stdin, &memory, iovs_arr), env)
-                } else {
-                    return Ok(__WASI_EBADF);
-                }
-            }
-            __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
-            _ => {
-                if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
-                    // TODO: figure out the error to return when lacking rights
-                    return Ok(__WASI_EACCES);
-                }
-
-                let is_non_blocking = fd_entry.flags & __WASI_FDFLAG_NONBLOCK != 0;
-                let offset = fd_entry.offset as usize;
-                let inode_idx = fd_entry.inode;
-                let inode = &inodes.arena[inode_idx];
-
-                let bytes_read = {
-                    let mut guard = inode.write();
-                    match guard.deref_mut() {
-                        Kind::File { handle, .. } => {
-                            if let Some(handle) = handle {
-                                wasi_try_ok!(
-                                    handle
-                                        .seek(std::io::SeekFrom::Start(offset as u64))
-                                        .map_err(map_io_err),
-                                    env
-                                );
-                                let mut memory = env.memory_view(&ctx);
-                                let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-                                wasi_try_ok!(read_bytes(handle, &memory, iovs_arr), env)
-                            } else {
-                                return Ok(__WASI_EINVAL);
-                            }
-                        }
-                        Kind::Socket { socket } => {
-                            let mut memory = env.memory_view(&ctx);
-                            let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-                            wasi_try_ok!(socket.recv(&memory, iovs_arr), env)
-                        }
-                        Kind::Pipe { pipe } => {
-                            let mut memory = env.memory_view(&ctx);
-                            let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-                            wasi_try_ok!(pipe.recv(&memory, iovs_arr), env)
-                        }
-                        Kind::Dir { .. } | Kind::Root { .. } => {
-                            // TODO: verify
-                            return Ok(__WASI_EISDIR);
-                        }
-                        Kind::EventNotifications {
-                            counter,
-                            is_semaphore,
-                            wakers,
-                        } => {
-                            let counter = Arc::clone(counter);
-                            let is_semaphore: bool = *is_semaphore;
-                            let wakers = Arc::clone(wakers);
-                            drop(guard);
-                            drop(inodes);
-
-                            let (tx, rx) = mpsc::channel();
-                            {
-                                let mut guard = wakers.lock().unwrap();
-                                guard.push_front(tx);
-                            }
-
-                            let ret;
-                            loop {
-                                let val = counter.load(Ordering::Acquire);
-                                if val > 0 {
-                                    let new_val = if is_semaphore { val - 1 } else { 0 };
-                                    if counter
-                                        .compare_exchange(
-                                            val,
-                                            new_val,
-                                            Ordering::AcqRel,
-                                            Ordering::Acquire,
-                                        )
-                                        .is_ok()
-                                    {
-                                        let mut memory = env.memory_view(&ctx);
-                                        let reader = val.to_ne_bytes();
-                                        let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-                                        ret = wasi_try_ok!(
-                                            read_bytes(&reader[..], &memory, iovs_arr),
-                                            env
-                                        );
-                                        break;
-                                    } else {
-                                        continue;
-                                    }
-                                }
-
-                                // If its none blocking then exit
-                                if is_non_blocking {
-                                    return Ok(__WASI_EAGAIN);
-                                }
-
-                                // Yield for a fixed period of time and then check again
-                                env.yield_now()?;
-                                if rx.recv_timeout(Duration::from_millis(5)).is_err() {
-                                    env.clone().sleep(&mut ctx, Duration::from_millis(5))?;
-                                }
-                                env = ctx.data();
-                            }
-                            ret
-                        }
-                        Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
-                        Kind::Buffer { buffer } => {
-                            let mut memory = env.memory_view(&ctx);
-                            let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-                            wasi_try_ok!(read_bytes(&buffer[offset..], &memory, iovs_arr), env)
-                        }
-                    }
-                };
-
-                // reborrow
-                let mut fd_map = state.fs.fd_map.write().unwrap();
-                let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
-                fd_entry.offset += bytes_read as u64;
-
-                bytes_read
+        if is_stdio == false {
+            if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_READ) {
+                // TODO: figure out the error to return when lacking rights
+                return Ok(__WASI_EACCES);
             }
         }
+
+        let is_non_blocking = fd_entry.flags & __WASI_FDFLAG_NONBLOCK != 0;
+        let offset = fd_entry.offset.load(Ordering::Acquire) as usize;
+        let inode_idx = fd_entry.inode;
+        let inode = &inodes.arena[inode_idx];
+
+        let bytes_read = {
+            let mut guard = inode.write();
+            match guard.deref_mut() {
+                Kind::File { handle, .. } => {
+                    if let Some(handle) = handle {
+                        if is_stdio == false {
+                            wasi_try_ok!(
+                                handle
+                                    .seek(std::io::SeekFrom::Start(offset as u64))
+                                    .map_err(map_io_err),
+                                env
+                            );
+                        }
+                        let mut memory = env.memory_view(&ctx);
+                        let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                        wasi_try_ok!(read_bytes(handle, &memory, iovs_arr), env)
+                    } else {
+                        return Ok(__WASI_EINVAL);
+                    }
+                }
+                Kind::Socket { socket } => {
+                    let mut memory = env.memory_view(&ctx);
+                    let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                    wasi_try_ok!(socket.recv(&memory, iovs_arr), env)
+                }
+                Kind::Pipe { pipe } => {
+                    let mut memory = env.memory_view(&ctx);
+                    let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                    let mut a;
+                    loop {
+                        a = wasi_try_ok!(match pipe.recv(&memory, iovs_arr, Duration::from_millis(5)) {
+                            Err(err) if err == __WASI_ETIMEDOUT => {
+                                env.yield_now()?;
+                                continue;
+                            },
+                            a => a
+                        }, env);
+                        break;
+                    }
+                    a
+                }
+                Kind::Dir { .. } | Kind::Root { .. } => {
+                    // TODO: verify
+                    return Ok(__WASI_EISDIR);
+                }
+                Kind::EventNotifications {
+                    counter,
+                    is_semaphore,
+                    wakers,
+                } => {
+                    let counter = Arc::clone(counter);
+                    let is_semaphore: bool = *is_semaphore;
+                    let wakers = Arc::clone(wakers);
+                    drop(guard);
+                    drop(inodes);
+
+                    let (tx, rx) = mpsc::channel();
+                    {
+                        let mut guard = wakers.lock().unwrap();
+                        guard.push_front(tx);
+                    }
+
+                    let ret;
+                    loop {
+                        let val = counter.load(Ordering::Acquire);
+                        if val > 0 {
+                            let new_val = if is_semaphore { val - 1 } else { 0 };
+                            if counter
+                                .compare_exchange(
+                                    val,
+                                    new_val,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok()
+                            {
+                                let mut memory = env.memory_view(&ctx);
+                                let reader = val.to_ne_bytes();
+                                let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                                ret = wasi_try_ok!(
+                                    read_bytes(&reader[..], &memory, iovs_arr),
+                                    env
+                                );
+                                break;
+                            } else {
+                                continue;
+                            }
+                        }
+
+                        // If its none blocking then exit
+                        if is_non_blocking {
+                            return Ok(__WASI_EAGAIN);
+                        }
+
+                        // Yield for a fixed period of time and then check again
+                        env.yield_now()?;
+                        if rx.recv_timeout(Duration::from_millis(5)).is_err() {
+                            env.clone().sleep(&mut ctx, Duration::from_millis(5))?;
+                        }
+                        env = ctx.data();
+                    }
+                    ret
+                }
+                Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_read"),
+                Kind::Buffer { buffer } => {
+                    let mut memory = env.memory_view(&ctx);
+                    let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
+                    wasi_try_ok!(read_bytes(&buffer[offset..], &memory, iovs_arr), env)
+                }
+            }
+        };
+
+        if is_stdio == false {
+            // reborrow
+            let mut fd_map = state.fs.fd_map.write().unwrap();
+            let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
+            fd_entry.offset.fetch_add(bytes_read as u64, Ordering::AcqRel);
+        }
+
+        bytes_read
     };
 
     let bytes_read: M::Offset = wasi_try_ok!(bytes_read.try_into().map_err(|_| __WASI_EOVERFLOW));
-    trace!("wasi::fd_read: bytes_read={}", bytes_read);
+    trace!("wasi[{}]::fd_read: bytes_read={}", ctx.data().pid(), bytes_read);
     
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -1360,7 +1374,7 @@ pub fn fd_readdir<M: MemorySize>(
     cookie: __wasi_dircookie_t,
     bufused: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::fd_readdir");
+    trace!("wasi[{}]::fd_readdir", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
     // TODO: figure out how this is supposed to work;
@@ -1490,21 +1504,36 @@ pub fn fd_renumber(
     from: __wasi_fd_t,
     to: __wasi_fd_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_renumber: from={}, to={}", from, to);
+    debug!("wasi[{}]::fd_renumber(from={}, to={})", ctx.data().pid(), from, to);
+
+    if from == to {
+        return __WASI_ESUCCESS;
+    }
+
     let env = ctx.data();
-    let (_, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
+    let (_, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
 
     let mut fd_map = state.fs.fd_map.write().unwrap();
     let fd_entry = wasi_try!(fd_map.get_mut(&from).ok_or(__WASI_EBADF));
 
+    if from != to {
+        fd_entry.ref_cnt.fetch_add(1, Ordering::Acquire);
+    }
     let new_fd_entry = Fd {
         // TODO: verify this is correct
+        ref_cnt: fd_entry.ref_cnt.clone(),
+        offset: fd_entry.offset.clone(),
         rights: fd_entry.rights_inheriting,
         ..*fd_entry
     };
 
+    if let Some(fd_entry) = fd_map.get(&to).map(|a| a.clone()) {
+        if fd_entry.ref_cnt.fetch_sub(1, Ordering::AcqRel) == 1 {
+            wasi_try!(state.fs.close_fd_ext(inodes.deref(), &mut fd_map, to));
+        }
+    }
     fd_map.insert(to, new_fd_entry);
-    fd_map.remove(&from);
+    
     __WASI_ESUCCESS
 }
 
@@ -1521,7 +1550,7 @@ pub fn fd_dup<M: MemorySize>(
     fd: __wasi_fd_t,
     ret_fd: WasmPtr<__wasi_fd_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_dup");
+    debug!("wasi[{}]::fd_dup", ctx.data().pid());
 
     let env = ctx.data();
     let (memory, state) = env.get_memory_and_wasi_state(&ctx, 0);
@@ -1540,7 +1569,7 @@ pub fn fd_event<M: MemorySize>(
     flags: __wasi_eventfdflags,
     ret_fd: WasmPtr<__wasi_fd_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_event");
+    debug!("wasi[{}]::fd_event", ctx.data().pid());
 
     let env = ctx.data();
     let (memory, state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
@@ -1584,7 +1613,7 @@ pub fn fd_seek<M: MemorySize>(
     whence: __wasi_whence_t,
     newoffset: WasmPtr<__wasi_filesize_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::fd_seek: fd={}, offset={}", fd, offset);
+    trace!("wasi[{}]::fd_seek: fd={}, offset={}", ctx.data().pid(), fd, offset);
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
     let new_offset_ref = newoffset.deref(&memory);
@@ -1595,11 +1624,17 @@ pub fn fd_seek<M: MemorySize>(
     }
 
     // TODO: handle case if fd is a dir?
-    match whence {
+    let new_offset = match whence {
         __WASI_WHENCE_CUR => {
             let mut fd_map = state.fs.fd_map.write().unwrap();
             let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
-            fd_entry.offset = (fd_entry.offset as i64 + offset) as u64
+            if offset > 0 {
+                fd_entry.offset.fetch_add(offset as u64, Ordering::AcqRel)
+            } else if offset < 0 {
+                fd_entry.offset.fetch_sub(offset.abs() as u64, Ordering::AcqRel)
+            } else {
+                fd_entry.offset.load(Ordering::Acquire)
+            }
         }
         __WASI_WHENCE_END => {
             use std::io::SeekFrom;
@@ -1615,7 +1650,7 @@ pub fn fd_seek<M: MemorySize>(
                         drop(guard);
                         let mut fd_map = state.fs.fd_map.write().unwrap();
                         let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
-                        fd_entry.offset = (end as i64 + offset) as u64;
+                        fd_entry.offset.store((end as i64 + offset) as u64, Ordering::Release);
                     } else {
                         return Ok(__WASI_EINVAL);
                     }
@@ -1637,17 +1672,19 @@ pub fn fd_seek<M: MemorySize>(
                     return Ok(__WASI_EINVAL);
                 }
             }
+            fd_entry.offset.load(Ordering::Acquire)
         }
         __WASI_WHENCE_SET => {
             let mut fd_map = state.fs.fd_map.write().unwrap();
             let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
-            fd_entry.offset = offset as u64
+            fd_entry.offset.store(offset as u64, Ordering::Release);
+            offset as u64
         }
         _ => return Ok(__WASI_EINVAL),
-    }
+    };
     // reborrow
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
-    wasi_try_mem_ok!(new_offset_ref.write(fd_entry.offset));
+    wasi_try_mem_ok!(new_offset_ref.write(new_offset));
 
     Ok(__WASI_ESUCCESS)
 }
@@ -1662,7 +1699,7 @@ pub fn fd_seek<M: MemorySize>(
 /// - `__WASI_EPERM`
 /// - `__WASI_ENOTCAPABLE`
 pub fn fd_sync(ctx: FunctionEnvMut<'_, WasiEnv>, fd: __wasi_fd_t) -> __wasi_errno_t {
-    debug!("wasi::fd_sync");
+    debug!("wasi[{}]::fd_sync", ctx.data().pid());
     debug!("=> fd={}", fd);
     let env = ctx.data();
     let (_, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
@@ -1708,7 +1745,7 @@ pub fn fd_tell<M: MemorySize>(
     fd: __wasi_fd_t,
     offset: WasmPtr<__wasi_filesize_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::fd_tell");
+    debug!("wasi[{}]::fd_tell", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
     let offset_ref = offset.deref(&memory);
@@ -1719,7 +1756,7 @@ pub fn fd_tell<M: MemorySize>(
         return __WASI_EACCES;
     }
 
-    wasi_try_mem!(offset_ref.write(fd_entry.offset));
+    wasi_try_mem!(offset_ref.write(fd_entry.offset.load(Ordering::Acquire)));
 
     __WASI_ESUCCESS
 }
@@ -1745,119 +1782,107 @@ pub fn fd_write<M: MemorySize>(
     iovs_len: M::Offset,
     nwritten: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::fd_write: fd={}", fd);
+    trace!("wasi[{}]::fd_write: fd={}", ctx.data().pid(), fd);
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
     let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
     let nwritten_ref = nwritten.deref(&memory);
 
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
-    let bytes_written = match fd {
+
+    let is_stdio = match fd {
         __WASI_STDIN_FILENO => return Ok(__WASI_EINVAL),
-        __WASI_STDOUT_FILENO => {
-            let mut guard = wasi_try_ok!(
-                inodes
-                    .stdout_mut(&state.fs.fd_map)
-                    .map_err(fs_error_into_wasi_err),
-                env
-            );
-            if let Some(ref mut stdout) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stdout, &memory, iovs_arr), env)
-            } else {
-                return Ok(__WASI_EBADF);
-            }
-        }
-        __WASI_STDERR_FILENO => {
-            let mut guard = wasi_try_ok!(
-                inodes
-                    .stderr_mut(&state.fs.fd_map)
-                    .map_err(fs_error_into_wasi_err),
-                env
-            );
-            if let Some(ref mut stderr) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stderr, &memory, iovs_arr), env)
-            } else {
-                return Ok(__WASI_EBADF);
-            }
-        }
-        _ => {
+        __WASI_STDOUT_FILENO => true,
+        __WASI_STDERR_FILENO => true,
+        _ => false,
+    };
+
+    let bytes_written ={
+        if is_stdio == false {
             if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE) {
                 return Ok(__WASI_EACCES);
             }
+        }
 
-            let offset = fd_entry.offset as usize;
-            let inode_idx = fd_entry.inode;
-            let inode = &inodes.arena[inode_idx];
+        let offset = fd_entry.offset.load(Ordering::Acquire) as usize;
+        let inode_idx = fd_entry.inode;
+        let inode = &inodes.arena[inode_idx];
 
-            let bytes_written = {
-                let mut guard = inode.write();
-                match guard.deref_mut() {
-                    Kind::File { handle, .. } => {
-                        if let Some(handle) = handle {
+        let bytes_written = {
+            let mut guard = inode.write();
+            match guard.deref_mut() {
+                Kind::File { handle, .. } => {
+                    if let Some(handle) = handle {
+                        if is_stdio == false {
                             wasi_try_ok!(
                                 handle
                                     .seek(std::io::SeekFrom::Start(offset as u64))
                                     .map_err(map_io_err),
                                 env
                             );
-                            wasi_try_ok!(write_bytes(handle, &memory, iovs_arr), env)
-                        } else {
-                            return Ok(__WASI_EINVAL);
                         }
-                    }
-                    Kind::Socket { socket } => {
-                        wasi_try_ok!(socket.send(&memory, iovs_arr), env)
-                    }
-                    Kind::Pipe { pipe } => {
-                        wasi_try_ok!(pipe.send(&memory, iovs_arr), env)
-                    }
-                    Kind::Dir { .. } | Kind::Root { .. } => {
-                        // TODO: verify
-                        return Ok(__WASI_EISDIR);
-                    }
-                    Kind::EventNotifications {
-                        counter, wakers, ..
-                    } => {
-                        let mut val = 0u64.to_ne_bytes();
-                        let written =
-                            wasi_try_ok!(write_bytes(&mut val[..], &memory, iovs_arr));
-                        if written != val.len() {
-                            return Ok(__WASI_EINVAL);
-                        }
-                        let val = u64::from_ne_bytes(val);
-
-                        counter.fetch_add(val, Ordering::AcqRel);
-                        {
-                            let mut guard = wakers.lock().unwrap();
-                            while let Some(wake) = guard.pop_back() {
-                                if wake.send(()).is_ok() {
-                                    break;
-                                }
-                            }
-                        }
-
-                        written
-                    }
-                    Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_write"),
-                    Kind::Buffer { buffer } => {
-                        wasi_try_ok!(
-                            write_bytes(&mut buffer[offset..], &memory, iovs_arr),
-                            env
-                        )
+                        wasi_try_ok!(write_bytes(handle, &memory, iovs_arr), env)
+                    } else {
+                        return Ok(__WASI_EINVAL);
                     }
                 }
-            };
+                Kind::Socket { socket } => {
+                    wasi_try_ok!(socket.send(&memory, iovs_arr), env)
+                }
+                Kind::Pipe { pipe } => {
+                    wasi_try_ok!(pipe.send(&memory, iovs_arr), env)
+                }
+                Kind::Dir { .. } | Kind::Root { .. } => {
+                    // TODO: verify
+                    return Ok(__WASI_EISDIR);
+                }
+                Kind::EventNotifications {
+                    counter, wakers, ..
+                } => {
+                    let mut val = 0u64.to_ne_bytes();
+                    let written =
+                        wasi_try_ok!(write_bytes(&mut val[..], &memory, iovs_arr));
+                    if written != val.len() {
+                        return Ok(__WASI_EINVAL);
+                    }
+                    let val = u64::from_ne_bytes(val);
 
-            // reborrow
+                    counter.fetch_add(val, Ordering::AcqRel);
+                    {
+                        let mut guard = wakers.lock().unwrap();
+                        while let Some(wake) = guard.pop_back() {
+                            if wake.send(()).is_ok() {
+                                break;
+                            }
+                        }
+                    }
+
+                    written
+                }
+                Kind::Symlink { .. } => unimplemented!("Symlinks in wasi::fd_write"),
+                Kind::Buffer { buffer } => {
+                    wasi_try_ok!(
+                        write_bytes(&mut buffer[offset..], &memory, iovs_arr),
+                        env
+                    )
+                }
+            }
+        };
+
+        // reborrow and update the size
+        if is_stdio == false {
             {
                 let mut fd_map = state.fs.fd_map.write().unwrap();
                 let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
-                fd_entry.offset += bytes_written as u64;
+                fd_entry.offset.fetch_add(bytes_written as u64, Ordering::AcqRel);
             }
-            wasi_try_ok!(state.fs.filestat_resync_size(inodes.deref(), fd), env);
 
-            bytes_written
+            // we set teh size but we don't return any errors if it fails as
+            // pipes and sockets will not do anything with this
+            let _ = state.fs.filestat_resync_size(inodes.deref(), fd);
         }
+
+        bytes_written
     };
 
     let bytes_written: M::Offset =
@@ -1879,7 +1904,7 @@ pub fn fd_pipe<M: MemorySize>(
     ro_fd1: WasmPtr<__wasi_fd_t, M>,
     ro_fd2: WasmPtr<__wasi_fd_t, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::fd_pipe");
+    trace!("wasi[{}]::fd_pipe", ctx.data().pid());
 
     let env = ctx.data();
     let (memory, state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
@@ -1902,6 +1927,7 @@ pub fn fd_pipe<M: MemorySize>(
     let rights = super::state::all_socket_rights();
     let fd1 = wasi_try!(state.fs.create_fd(rights, rights, 0, 0, inode1));
     let fd2 = wasi_try!(state.fs.create_fd(rights, rights, 0, 0, inode2));
+    trace!("wasi[{}]::fd_pipe (fd1={}, fd2={})", ctx.data().pid(), fd1, fd2);
 
     wasi_try_mem!(ro_fd1.write(&memory, fd1));
     wasi_try_mem!(ro_fd2.write(&memory, fd2));
@@ -1928,7 +1954,7 @@ pub fn path_create_directory<M: MemorySize>(
     path: WasmPtr<u8, M>,
     path_len: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_create_directory");
+    debug!("wasi[{}]::path_create_directory", ctx.data().pid());
     let env = ctx.data();
     let (memory, state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
@@ -2058,7 +2084,7 @@ pub fn path_filestat_get<M: MemorySize>(
     path_len: M::Offset,
     buf: WasmPtr<__wasi_filestat_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_filestat_get (fd={})", fd);
+    debug!("wasi[{}]::path_filestat_get (fd={})", ctx.data().pid(), fd);
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
@@ -2148,7 +2174,7 @@ pub fn path_filestat_set_times<M: MemorySize>(
     st_mtim: __wasi_timestamp_t,
     fst_flags: __wasi_fstflags_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_filestat_set_times");
+    debug!("wasi[{}]::path_filestat_set_times", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
     let fd_entry = wasi_try!(state.fs.get_fd(fd));
@@ -2226,7 +2252,7 @@ pub fn path_link<M: MemorySize>(
     new_path: WasmPtr<u8, M>,
     new_path_len: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_link");
+    debug!("wasi[{}]::path_link", ctx.data().pid());
     if old_flags & __WASI_LOOKUP_SYMLINK_FOLLOW != 0 {
         debug!("  - will follow symlinks when opening path");
     }
@@ -2324,7 +2350,7 @@ pub fn path_open<M: MemorySize>(
     fs_flags: __wasi_fdflags_t,
     fd: WasmPtr<__wasi_fd_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_open");
+    debug!("wasi[{}]::path_open", ctx.data().pid());
     if dirflags & __WASI_LOOKUP_SYMLINK_FOLLOW != 0 {
         debug!("  - will follow symlinks when opening path");
     }
@@ -2530,7 +2556,7 @@ pub fn path_open<M: MemorySize>(
     ));
 
     wasi_try_mem!(fd_ref.write(out_fd));
-    debug!("wasi::path_open returning fd {}", out_fd);
+    debug!("wasi[{}]::path_open returning fd {}", ctx.data().pid(), out_fd);
 
     __WASI_ESUCCESS
 }
@@ -2560,7 +2586,7 @@ pub fn path_readlink<M: MemorySize>(
     buf_len: M::Offset,
     buf_used: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_readlink");
+    debug!("wasi[{}]::path_readlink", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
@@ -2609,7 +2635,7 @@ pub fn path_remove_directory<M: MemorySize>(
     path_len: M::Offset,
 ) -> __wasi_errno_t {
     // TODO check if fd is a dir, ensure it's within sandbox, etc.
-    debug!("wasi::path_remove_directory");
+    debug!("wasi[{}]::path_remove_directory", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
@@ -2878,7 +2904,7 @@ pub fn path_symlink<M: MemorySize>(
     new_path: WasmPtr<u8, M>,
     new_path_len: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_symlink");
+    debug!("wasi[{}]::path_symlink", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
     let old_path_str = unsafe { get_input_str!(&memory, old_path, old_path_len) };
@@ -2976,7 +3002,7 @@ pub fn path_unlink_file<M: MemorySize>(
     path: WasmPtr<u8, M>,
     path_len: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi::path_unlink_file");
+    debug!("wasi[{}]::path_unlink_file", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
@@ -3088,7 +3114,7 @@ pub fn poll_oneoff<M: MemorySize>(
     nsubscriptions: M::Offset,
     nevents: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::poll_oneoff");
+    trace!("wasi[{}]::poll_oneoff", ctx.data().pid());
     trace!("  => nsubscriptions = {}", nsubscriptions);
     
     let mut events_seen: u32 = 0;
@@ -3350,11 +3376,69 @@ pub fn poll_oneoff<M: MemorySize>(
 /// Inputs:
 /// - `__wasi_exitcode_t`
 ///   Exit code to return to the operating system
-pub fn proc_exit(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+pub fn proc_exit<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     code: __wasi_exitcode_t,
 ) -> Result<(), WasiError> {
-    debug!("wasi::proc_exit, {}", code);
+    debug!("wasi[{}]::proc_exit (code={})", ctx.data().pid(), code);
+    
+    // Set the exit code for this process
+    ctx.data().thread.terminate(code as u32);
+
+    // If we are in a vfork we need to return to the point we left off
+    if let Some(mut vfork) = ctx.data_mut().vfork.take()
+    {
+        // Restore the WasiEnv to the point when we vforked
+        std::mem::swap(&mut vfork.env.inner, &mut ctx.data_mut().inner);
+        std::mem::swap(vfork.env.as_mut(), ctx.data_mut());
+        let mut wasi_env = *vfork.env;
+        wasi_env.owned_handles.push(vfork.handle);
+
+        // We still need to create the process that exited so that
+        // the exit code can be used by the parent process
+        let pid = wasi_env.process.pid();
+        let mut memory_stack = vfork.memory_stack;
+        let rewind_stack = vfork.rewind_stack;
+
+        // If the return value offset is within the memory stack then we need
+        // to update it here rather than in the real memory
+        let pid_offset: u64 = vfork.pid_offset.into();
+        if pid_offset >= wasi_env.stack_start && pid_offset < wasi_env.stack_base
+        {
+            // Make sure its within the "active" part of the memory stack
+            let offset = wasi_env.stack_base - pid_offset;
+            if offset as usize > memory_stack.len() {
+                warn!("wasi[{}]::vfork failed - the return value (pid) is outside of the active part of the memory stack ({} vs {})", ctx.data().pid(), offset, memory_stack.len());
+                return Err(WasiError::Exit(__WASI_EFAULT as u32));
+            }
+            
+            // Update the memory stack with the new PID
+            let val_bytes = pid.raw().to_ne_bytes();
+            let pstart = memory_stack.len() - offset as usize;
+            let pend = pstart + val_bytes.len();
+            let pbytes = &mut memory_stack[pstart..pend];
+            pbytes.clone_from_slice(&val_bytes);
+        } else {
+            warn!("wasi[{}]::vfork failed - the return value (pid) is not being returned on the stack - which is not supported", ctx.data().pid());
+            return Err(WasiError::Exit(__WASI_EFAULT as u32));
+        }
+
+        // Jump back to the vfork point and current on execution
+        unwind::<M, _>(ctx, move |mut ctx, _, _|
+        {
+            // Now rewind the previous stack and carry on from where we did the vfork
+            match rewind::<M>(ctx, memory_stack.freeze(), rewind_stack.freeze()) {
+                __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
+                err => {
+                    warn!("fork failed - could not rewind the stack - errno={}", err);
+                    OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)))
+                }
+            }
+        })?;
+        return Ok(());
+    }
+
+    // Otherwise just exit
     Err(WasiError::Exit(code))
 }
 
@@ -3369,11 +3453,10 @@ pub fn thread_signal(
     tid: __wasi_tid_t,
     sig: __wasi_signal_t
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::thread_signal(tid={}, sig={})", tid, sig);
+    debug!("wasi[{}]::thread_signal(tid={}, sig={})", ctx.data().pid(), tid, sig);
     {
-        let guard = ctx.data().state().threading.read().unwrap();
-        let tid = WasiThreadId(tid);
-        guard.signal(&tid, sig);
+        let tid: WasiThreadId = tid.into();
+        ctx.data().process.signal_thread(&tid, sig);
     }
     
     let env = ctx.data();
@@ -3392,13 +3475,9 @@ pub fn proc_raise(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     sig: __wasi_signal_t
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::proc_raise (sig={})", sig);
-    {
-        let guard = ctx.data().state().threading.read().unwrap();
-        guard.signal_all(sig);
-    }
-
+    debug!("wasi[{}]::proc_raise (sig={})", ctx.data().pid(), sig);
     let env = ctx.data();
+    env.process.signal_all_threads(sig);
     env.clone().yield_now_with_signals(&mut ctx)?;
 
     Ok(__WASI_ESUCCESS)
@@ -3409,7 +3488,7 @@ pub fn proc_raise(
 pub fn sched_yield(
     mut ctx: FunctionEnvMut<'_, WasiEnv>
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::sched_yield");
+    trace!("wasi[{}]::sched_yield", ctx.data().pid());
     let env = ctx.data();
     env.clone().yield_now_with_signals(&mut ctx)?;
     Ok(__WASI_ESUCCESS)
@@ -3732,10 +3811,10 @@ pub fn stack_checkpoint<M: MemorySize>(
         let ret_val = wasi_try_mem_ok!(
             ret_val.read(&memory)
         );
-        trace!("wasi::stack_checkpoint - restored - (ret={})", ret_val);
+        trace!("wasi[{}]::stack_checkpoint - restored - (ret={})", ctx.data().pid(), ret_val);
         return Ok(__WASI_ESUCCESS);
     }
-    trace!("wasi::stack_checkpoint - capturing");
+    trace!("wasi[{}]::stack_checkpoint - capturing", ctx.data().pid());
 
     // Set the return value that we will give back to
     // indicate we are a normal function call
@@ -3820,7 +3899,7 @@ pub fn stack_restore<M: MemorySize>(
     snapshot_ptr: WasmPtr<__wasi_stack_snaphost_t, M>,
     mut val: __wasi_longsize_t,
 ) -> Result<(), WasiError> {
-    trace!("wasi::stack_restore (with_ret={})", val);
+    trace!("wasi[{}]::stack_restore (with_ret={})", ctx.data().pid(), val);
 
     // Read the snapshot from the stack
     let env = ctx.data();
@@ -3828,7 +3907,7 @@ pub fn stack_restore<M: MemorySize>(
     let snapshot = match snapshot_ptr.read(&memory) {
         Ok(a) => a,
         Err(err) => {
-            warn!("wasi::stack_restore - failed to read stack snapshot - {}", err);
+            warn!("wasi[{}]::stack_restore - failed to read stack snapshot - {}", ctx.data().pid(), err);
             return Err(WasiError::Exit(128));
         }
     };
@@ -3848,7 +3927,7 @@ pub fn stack_restore<M: MemorySize>(
             if snapshot.host_offset as usize > upper {
                 let remainder = snapshot.host_offset as usize - upper;
                 if remainder >= rewind_stack.len() {
-                    warn!("wasi::stack_restore - current rewind stack is too small to restore the snapshot");
+                    warn!("wasi[{}]::stack_restore - current rewind stack is too small to restore the snapshot", ctx.data().pid());
                     return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
                 }
                 let lower = rewind_stack.len() - remainder;
@@ -3865,7 +3944,7 @@ pub fn stack_restore<M: MemorySize>(
             if snapshot.memory_offset as usize > upper {
                 let remainder = snapshot.memory_offset as usize - upper;
                 if remainder >= memory_stack.len() {
-                    warn!("wasi::stack_restore - current memory stack is too small to restore the snapshot");
+                    warn!("wasi[{}]::stack_restore - current memory stack is too small to restore the snapshot", ctx.data().pid());
                     return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
                 }
                 let lower = memory_stack.len() - remainder;
@@ -3942,12 +4021,24 @@ pub fn stack_restore<M: MemorySize>(
 /// * `pid` - Handle of the child process to wait on
 /// * `sig` - Signal to send the child process
 pub fn proc_signal<M: MemorySize>(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     pid: __wasi_pid_t,
     sig: __wasi_signal_t,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::proc_signal");
-    panic!("child signal not yet implemented")
+    trace!("wasi[{}]::proc_signal(pid={}, sig={})", ctx.data().pid(), pid, sig);
+
+    let process = {
+        let pid: WasiProcessId = pid.into();
+        ctx.data().process.compute.get_process(pid)
+    };
+    if let Some(process) = process {
+        process.signal_all_threads(sig);
+    }
+    
+    let env = ctx.data();
+    env.clone().yield_now_with_signals(&mut ctx)?;
+
+    Ok(__WASI_ESUCCESS)
 }
 
 /// ### `random_get()`
@@ -3962,7 +4053,7 @@ pub fn random_get<M: MemorySize>(
     buf: WasmPtr<u8, M>,
     buf_len: M::Offset,
 ) -> __wasi_errno_t {
-    trace!("wasi::random_get buf_len: {}", buf_len);
+    trace!("wasi[{}]::random_get(buf_len={})", ctx.data().pid(), buf_len);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let buf_len64: u64 = buf_len.into();
@@ -3984,7 +4075,7 @@ pub fn tty_get<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     tty_state: WasmPtr<__wasi_tty_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::tty_stdin");
+    debug!("wasi[{}]::tty_get", ctx.data().pid());
     let env = ctx.data();
 
     let state = env.runtime.tty_get();
@@ -4027,7 +4118,7 @@ pub fn tty_set<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     tty_state: WasmPtr<__wasi_tty_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::tty_set");
+    debug!("wasi[{}]::tty_set", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -4078,7 +4169,7 @@ pub fn getcwd<M: MemorySize>(
     path: WasmPtr<u8, M>,
     path_len: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::getcwd");
+    debug!("wasi[{}]::getcwd", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
@@ -4119,7 +4210,7 @@ pub fn chdir<M: MemorySize>(
     path: WasmPtr<u8, M>,
     path_len: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi::chdir");
+    debug!("wasi[{}]::chdir", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
     let path = unsafe { get_input_str!(&memory, path, path_len) };
@@ -4142,7 +4233,7 @@ pub fn callback_thread<M: MemorySize>(
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let name = unsafe { name.read_utf8_string(&memory, name_len)? };
-    debug!("wasi::callback_spawn (name={})", name);
+    debug!("wasi[{}]::callback_spawn (name={})", ctx.data().pid(), name);
 
     let funct = env.inner().exports
         .get_typed_function(&ctx, &name).ok();
@@ -4173,7 +4264,7 @@ pub fn callback_signal<M: MemorySize>(
             }
         }
     };
-    debug!("wasi::callback_signal (name={})", name);
+    debug!("wasi[{}]::callback_signal (name={})", ctx.data().pid(), name);
 
     let funct = env.inner().exports
         .get_typed_function(&ctx, &name).ok();
@@ -4200,7 +4291,7 @@ pub fn callback_reactor<M: MemorySize>(
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let name = unsafe { name.read_utf8_string(&memory, name_len)? };
-    debug!("wasi::callback_reactor (name={})", name);
+    debug!("wasi[{}]::callback_reactor (name={})", ctx.data().pid(), name);
 
     let funct = env.inner().exports
         .get_typed_function(&ctx, &name).ok();
@@ -4223,7 +4314,7 @@ pub fn callback_thread_local_destroy<M: MemorySize>(
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let name = unsafe { name.read_utf8_string(&memory, name_len)? };
-    debug!("wasi::callback_thread_local_destroy (name={})", name);
+    debug!("wasi[{}]::callback_thread_local_destroy (name={})", ctx.data().pid(), name);
 
     let funct = env.inner().exports
         .get_typed_function(&ctx, &name).ok();
@@ -4258,7 +4349,7 @@ pub fn thread_spawn<M: MemorySize>(
     reactor: __wasi_bool_t,
     ret_tid: WasmPtr<__wasi_tid_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::thread_spawn (reactor={}, thread_id={}, stack_base={}, caller_id={})", reactor, ctx.data().id.raw(), stack_base, current_caller_id().raw());
+    debug!("wasi[{}]::thread_spawn (reactor={}, thread_id={}, stack_base={}, caller_id={})", ctx.data().pid(), reactor, ctx.data().thread.tid().raw(), stack_base, current_caller_id().raw());
     
     // Now we use the environment and memory references
     let env = ctx.data();
@@ -4266,10 +4357,7 @@ pub fn thread_spawn<M: MemorySize>(
     let runtime = env.runtime.clone();
 
     // Create the handle that represents this thread
-    let mut thread_handle = {
-        let mut guard = env.state.threading.write().unwrap();
-        guard.new_thread()
-    };
+    let mut thread_handle = env.process.new_thread();
     let thread_id: __wasi_tid_t = thread_handle.id().into();
 
     // We need a copy of the process memory and a packaged store in order to
@@ -4297,7 +4385,7 @@ pub fn thread_spawn<M: MemorySize>(
     let create_ctx = {
         let state = env.state.clone();
         let wasi_env = env.clone();
-        let thread_id = thread_handle.id();
+        let thread = thread_handle.as_thread();
         move |mut store: Store, module: Module, memory: VMMemory|
         {
             // We need to reconstruct some things
@@ -4308,7 +4396,7 @@ pub fn thread_spawn<M: MemorySize>(
             let mut ctx = WasiFunctionEnv::new(&mut store, wasi_env.clone());
             {
                 let env = ctx.data_mut(&mut store);
-                env.id = thread_id;
+                env.thread = thread.clone();
                 env.stack_base = stack_base;
                 env.stack_start = stack_start;
             }
@@ -4328,7 +4416,7 @@ pub fn thread_spawn<M: MemorySize>(
             ctx.data_mut(&mut store).inner = Some(
                 WasiEnvInner::new(module, memory, &store, &instance)
             );
-            trace!("threading: new context created for thread_id = {}", thread_id.raw());
+            trace!("threading: new context created for thread_id = {}", thread.tid().raw());
             Ok(WasiThreadContext {
                 ctx,
                 store: RefCell::new(store)
@@ -4363,36 +4451,8 @@ pub fn thread_spawn<M: MemorySize>(
         // If we are NOT a reactor then we will only run once and need to clean up
         if reactor == __WASI_BOOL_FALSE
         {
-            trace!("threading: cleaning up local thread variables");
-
-            // Destroy all the local thread variables that were allocated for this thread
-            let to_local_destroy = {
-                let thread_id = ctx.data(store).id;
-                let mut to_local_destroy = Vec::new();
-                let mut guard = ctx.data(store).state.threading.write().unwrap();
-                for ((thread, key), val) in guard.thread_local.iter() {
-                    if *thread == thread_id {
-                        if let Some(user_data) = guard.thread_local_user_data.get(key) {
-                            to_local_destroy.push((*user_data, *val))
-                        }
-                    }
-                }
-                guard.thread_local.retain(|(t, _), _| *t != thread_id);
-                to_local_destroy
-            };
-            if to_local_destroy.len() > 0 {
-                if let Some(thread_local_destroy) = ctx.data(store).inner().thread_local_destroy.as_ref().map(|a| a.clone()) {
-                    for (user_data, val) in to_local_destroy {
-                        let user_data_low: u32 = (user_data & 0xFFFFFFFF) as u32;
-                        let user_data_high: u32 = (user_data >> 32) as u32;
-
-                        let val_low: u32 = (val & 0xFFFFFFFF) as u32;
-                        let val_high: u32 = (val >> 32) as u32;
-
-                        let _ = thread_local_destroy.call(store, user_data_low as i32, user_data_high as i32, val_low as i32, val_high as i32);
-                    }
-                }
-            }
+            // Clean up the environment
+            ctx.cleanup(store);
         }
 
         // Return the result
@@ -4516,14 +4576,14 @@ pub fn thread_local_create<M: MemorySize>(
     user_data: u64,
     ret_key: WasmPtr<__wasi_tl_key_t, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::thread_local_create (user_data={})", user_data);
+    trace!("wasi[{}]::thread_local_create (user_data={})", ctx.data().pid(), user_data);
     let env = ctx.data();
 
     let key = {
-        let mut guard = env.state.threading.write().unwrap();
-        guard.thread_local_seed += 1;
-        let key = guard.thread_local_seed;
-        guard.thread_local_user_data.insert(key, user_data);
+        let mut inner = env.process.write();
+        inner.thread_local_seed += 1;
+        let key = inner.thread_local_seed;
+        inner.thread_local_user_data.insert(key, user_data);
         key
     };
     
@@ -4544,12 +4604,12 @@ pub fn thread_local_destroy(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     key: __wasi_tl_key_t
 ) -> __wasi_errno_t {
-    trace!("wasi::thread_local_destroy (key={})", key);
-    let state = ctx.data().state.clone();
-    let mut guard = state.threading.write().unwrap();
-    if let Some(user_data) = guard.thread_local_user_data.remove(&key) {
+    trace!("wasi[{}]::thread_local_destroy (key={})", ctx.data().pid(), key);
+    let process = ctx.data().process.clone();
+    let mut inner = process.write();
+    if let Some(user_data) = inner.thread_local_user_data.remove(&key) {
         if let Some(thread_local_destroy) = ctx.data().inner().thread_local_destroy.as_ref().map(|a| a.clone()) {
-            guard.thread_local
+            inner.thread_local
                 .iter()
                 .filter(|((_, k), _)| *k == key)
                 .for_each(|((_, _), val)| {
@@ -4563,7 +4623,7 @@ pub fn thread_local_destroy(
                 });
         }
     }
-    guard.thread_local.retain(|(_, k), _| *k != key);
+    inner.thread_local.retain(|(_, k), _| *k != key);
     __WASI_ESUCCESS
 }
 
@@ -4579,12 +4639,12 @@ pub fn thread_local_set(
     key: __wasi_tl_key_t,
     val: __wasi_tl_val_t
 ) -> __wasi_errno_t {
-    //trace!("wasi::thread_local_set (key={}, val={})", key, val);
+    //trace!("wasi[{}]::thread_local_set (key={}, val={})", ctx.data().pid(), key, val);
     let env = ctx.data();
 
-    let current_thread = ctx.data().id;
-    let mut guard = env.state.threading.write().unwrap();
-    guard.thread_local.insert((current_thread, key), val);
+    let current_thread = ctx.data().thread.tid();
+    let mut inner = env.process.write();
+    inner.thread_local.insert((current_thread, key), val);
     __WASI_ESUCCESS
 }
 
@@ -4599,12 +4659,12 @@ pub fn thread_local_get<M: MemorySize>(
     key: __wasi_tl_key_t,
     ret_val: WasmPtr<__wasi_tl_val_t, M>,
 ) -> __wasi_errno_t {
-    //trace!("wasi::thread_local_get (key={})", key);
+    //trace!("wasi[{}]::thread_local_get (key={})", ctx.data().pid(), key);
     let env = ctx.data();
 
     let val = {
-        let current_thread = ctx.data().id;
-        let guard = env.state.threading.read().unwrap();
+        let current_thread = ctx.data().thread.tid();
+        let guard = env.process.read();
         guard.thread_local.get(&(current_thread, key)).map(|a| a.clone())
     };
     let val = val.unwrap_or_default();
@@ -4623,7 +4683,7 @@ pub fn thread_sleep(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     duration: __wasi_timestamp_t,
 ) -> Result<__wasi_errno_t, WasiError> {
-    //trace!("wasi::thread_sleep");
+    //trace!("wasi[{}]::thread_sleep", ctx.data().pid());
 
     let env = ctx.data();
     let duration = Duration::from_nanos(duration as u64);
@@ -4638,10 +4698,10 @@ pub fn thread_id<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ret_tid: WasmPtr<__wasi_tid_t, M>,
 ) -> __wasi_errno_t {
-    //trace!("wasi::thread_id");
+    //trace!("wasi[{}]::thread_id", ctx.data().pid());
 
     let env = ctx.data();
-    let tid: __wasi_tid_t = env.id.into();
+    let tid: __wasi_tid_t = env.thread.tid().into();
     let memory = env.memory_view(&ctx);
     wasi_try_mem!(ret_tid.write(&memory, tid));
     __WASI_ESUCCESS
@@ -4658,18 +4718,15 @@ pub fn thread_join(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     tid: __wasi_tid_t,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::thread_join");
+    debug!("wasi[{}]::thread_join(tid={})", ctx.data().pid(), tid);
 
     let env = ctx.data();
     let tid: WasiThreadId = tid.into();
-    let other_thread = {
-        let guard = env.state.threading.read().unwrap();
-        guard.get(&tid)
-    };
+    let other_thread = env.process.get_thread(&tid);
     if let Some(other_thread) = other_thread {
         loop {
             env.yield_now()?;
-            if other_thread.join(Duration::from_millis(50)) {
+            if other_thread.join(Duration::from_millis(50)).is_some() {
                 break;
             }
         }
@@ -4686,7 +4743,7 @@ pub fn thread_parallelism<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ret_parallelism: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::thread_parallelism");
+    debug!("wasi[{}]::thread_parallelism", ctx.data().pid());
 
     let env = ctx.data();
     let parallelism = wasi_try!(env.runtime().thread_parallelism().map_err(|err| {
@@ -4715,7 +4772,7 @@ pub fn futex_wait<M: MemorySize>(
     timeout: WasmPtr<__wasi_option_timestamp_t, M>,
     ret_woken: WasmPtr<__wasi_bool_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::futex_wait(offset={})", futex_ptr.offset());
+    trace!("wasi[{}]::futex_wait(offset={})", ctx.data().pid(), futex_ptr.offset());
     let env = ctx.data();
     let state = env.state.deref();
 
@@ -4796,7 +4853,7 @@ pub fn futex_wake<M: MemorySize>(
     futex: WasmPtr<u32, M>,
     ret_woken: WasmPtr<__wasi_bool_t, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::futex_wake(offset={})", futex.offset());
+    trace!("wasi[{}]::futex_wake(offset={})", ctx.data().pid(), futex.offset());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let state = env.state.deref();
@@ -4809,7 +4866,7 @@ pub fn futex_wake<M: MemorySize>(
         futex.inner.1.notify_one();
         woken = true;
     } else {
-        trace!("wasi::futex_wake - nothing waiting!");
+        trace!("wasi[{}]::futex_wake - nothing waiting!", ctx.data().pid());
     }
 
     let woken = match woken {
@@ -4831,7 +4888,7 @@ pub fn futex_wake_all<M: MemorySize>(
     futex: WasmPtr<u32, M>,
     ret_woken: WasmPtr<__wasi_bool_t, M>,
 ) -> __wasi_errno_t {
-    trace!("wasi::futex_wake_all(offset={})", futex.offset());
+    trace!("wasi[{}]::futex_wake_all(offset={})", ctx.data().pid(), futex.offset());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let state = env.state.deref();
@@ -4860,17 +4917,13 @@ pub fn proc_id<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ret_pid: WasmPtr<__wasi_pid_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::getpid");
-
     let env = ctx.data();
-    let pid = env.runtime().getpid();
-    if let Some(pid) = pid {
-        let memory = env.memory_view(&ctx);
-        wasi_try_mem!(ret_pid.write(&memory, pid as __wasi_pid_t));
-        __WASI_ESUCCESS
-    } else {
-        __WASI_ENOTSUP
-    }
+    let pid = env.process.pid();
+    debug!("wasi[{}]::getpid", ctx.data().pid());
+
+    let memory = env.memory_view(&ctx);
+    wasi_try_mem!(ret_pid.write(&memory, pid.raw() as __wasi_pid_t));
+    __WASI_ESUCCESS
 }
 
 /// ### `getppid()`
@@ -4880,19 +4933,23 @@ pub fn proc_parent<M: MemorySize>(
     pid: __wasi_pid_t,
     ret_parent: WasmPtr<__wasi_pid_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::getpid");
+    debug!("wasi[{}]::getppid", ctx.data().pid());
 
     let env = ctx.data();
-    
-    let parent = env.runtime().getppid(pid);
-
-    if let Some(parent) = parent {
+    let pid: WasiProcessId = pid.into();
+    if pid == env.process.pid() {
         let memory = env.memory_view(&ctx);
-        wasi_try_mem!(ret_parent.write(&memory, parent as __wasi_pid_t));
-        __WASI_ESUCCESS
+        wasi_try_mem!(ret_parent.write(&memory, env.process.ppid().raw() as __wasi_pid_t));    
     } else {
-        __WASI_ENOTSUP
+        let compute = env.process.control_plane();
+        if let Some(process) = compute.get_process(pid) {
+            let memory = env.memory_view(&ctx);
+            wasi_try_mem!(ret_parent.write(&memory, process.pid().raw() as __wasi_pid_t));
+        } else {
+            return __WASI_EBADF;
+        }
     }
+    __WASI_ESUCCESS
 }
 
 /// ### `thread_exit()`
@@ -4908,7 +4965,7 @@ pub fn thread_exit(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     exitcode: __wasi_exitcode_t,
 ) -> Result<(), WasiError> {
-    debug!("wasi::thread_exit");
+    debug!("wasi[{}]::thread_exit", ctx.data().pid());
     Err(WasiError::Exit(exitcode))
 }
 
@@ -4922,40 +4979,38 @@ pub fn proc_fork<M: MemorySize>(
     pid_ptr: WasmPtr<__wasi_pid_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
     // If we were just restored then we need to return the value instead
+    let fork_op = if copy_memory == __WASI_BOOL_TRUE { "fork" } else { "vfork" };
     if handle_rewind::<M>(&mut ctx) {
         let env = ctx.data();
         let memory = env.memory_view(&ctx);
-        let pid = wasi_try_mem_ok!(
+        let ret_pid = wasi_try_mem_ok!(
             pid_ptr.read(&memory)
         );
-        trace!("wasi::proc_fork - restored - (pid={})", pid);
+        if ret_pid == 0 {
+            trace!("wasi[{}]::proc_{} - entering child", ctx.data().pid(), fork_op);
+        } else {
+            trace!("wasi[{}]::proc_{} - entering parent(child={})", ctx.data().pid(), fork_op, ret_pid);
+        }
         return Ok(__WASI_ESUCCESS);
     }
-    trace!("wasi::proc_fork - capturing");
+    trace!("wasi[{}]::proc_{} - capturing", ctx.data().pid(), fork_op);
 
-    // We need a copy of the function that was originally executed so
-    // that we can run it again with the existing stack
-    let (mut funct, funct_params) = match ctx.as_store_mut().is_calling() {
-        Some(a) => a,
-        None => {
-            trace!("wasi::proc_fork - failed as the running function could not be identified");
-            return Ok(__WASI_EFAULT);
-        }
-    };
-
+    // Fork the environment which will copy all the open file handlers
+    // and associate a new context but otherwise shares things like the
+    // file system interface. The handle to the forked process is stored
+    // in the parent process context
+    let (mut child_env, mut child_handle) = ctx.data().fork();
+    let child_pid = child_env.process.pid();
+    
     // We write a zero to the PID before we capture the stack
     // so that this is what will be returned to the child
+    ctx.data_mut().process.children.push(child_pid);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     wasi_try_mem_ok!(
         pid_ptr.write(&memory, 0)
     );
-
-    // Fork the environment which will copy all the open file handlers
-    // and associate a new context but otherwise shares things like the
-    // file system interface.
-    let mut wasi_env = env.fork();
-
+    
     // Pass some offsets to the unwind function
     let pid_offset = pid_ptr.offset();
     
@@ -4972,21 +5027,23 @@ pub fn proc_fork<M: MemorySize>(
             // We first fork the environment and replace the current environment
             // so that the process can continue to prepare for the real fork as
             // if it had actually forked
-            std::mem::swap(ctx.data_mut(), &mut wasi_env);
+            std::mem::swap(&mut ctx.data_mut().inner, &mut child_env.inner);
+            std::mem::swap(ctx.data_mut(), &mut child_env);
             ctx.data_mut().vfork.replace(WasiVFork {
                 rewind_stack: rewind_stack.clone(),
                 memory_stack: memory_stack.clone(),
-                env: Box::new(wasi_env),
+                env: Box::new(child_env),
+                handle: child_handle,
                 pid_offset,
             });
-
+            
             // Carry on as if the fork had taken place (which basically means
             // it prevents to be the new process with the old one suspended)
             // Rewind the stack and carry on
             match rewind::<M>(ctx, memory_stack.freeze(), rewind_stack.freeze()) {
                 __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
                 err => {
-                    warn!("vfork failed - could not rewind the stack - errno={}", err);
+                    warn!("{} failed - could not rewind the stack - errno={}", fork_op, err);
                     OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)))
                 }
             }
@@ -4995,19 +5052,6 @@ pub fn proc_fork<M: MemorySize>(
 
     // Create the thread that will back this forked process
     let state = env.state.clone();
-    let (pid, mut handle) = {
-        let mut guard = state.threading.write().unwrap();
-        let thread = guard.new_thread();
-        guard.bus_process_seed += 1;
-        let pid = guard.bus_process_seed;
-        guard.bus_process_fork.insert(pid.into(), thread.id());
-
-        // While we are here we also do some lazy cleanup
-        let existing: HashSet<_> = guard.threads.read().unwrap().keys().map(|a| a.clone()).collect();
-        guard.bus_process_fork.retain(|_, v| existing.contains(v));
-
-        (pid, thread)
-    };
 
     // Perform the unwind action
     unwind::<M, _>(ctx, move |mut ctx, mut memory_stack, rewind_stack|
@@ -5015,21 +5059,21 @@ pub fn proc_fork<M: MemorySize>(
         // Fork the memory and copy the module (compiled code)
         let env = ctx.data();
         let fork_memory: VMMemory = match env
-                .memory()
-                .try_clone(&ctx)
-                .ok_or_else(|| {
-                    error!("fork failed - the memory could not be cloned");
-                    MemoryError::Generic(format!("the memory could not be cloned"))
-                })
-                .and_then(|mut memory| 
-                    memory.fork()
-                )
+            .memory()
+            .try_clone(&ctx)
+            .ok_or_else(|| {
+                error!("wasi[{}]::{} failed - the memory could not be cloned", ctx.data().pid(), fork_op);
+                MemoryError::Generic(format!("the memory could not be cloned"))
+            })
+            .and_then(|mut memory| 
+                memory.fork()
+            )
         {
             Ok(memory) => {
                  memory.into()
             },
             Err(err) => {
-                warn!("fork failed - could not fork the memory - {}", err);
+                warn!("wasi[{}]::{} failed - could not fork the memory - {}", ctx.data().pid(), fork_op, err);
                 return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
             }
         };
@@ -5043,16 +5087,13 @@ pub fn proc_fork<M: MemorySize>(
         let mut fork_store = Store::new(engine);
         #[cfg(not(feature = "compiler"))]
         let mut fork_store = Store::default();
-        let stack_base = env.stack_base;
-        let stack_start = env.stack_start;
+        let stack_base = child_env.stack_base;
+        let stack_start = child_env.stack_start;
 
         // Now we use the environment and memory references
-        let env = ctx.data();
-        let memory = env.memory_view(&ctx);
-        let runtime = env.runtime.clone();
+        let runtime = child_env.runtime.clone();
         let child_memory_stack = memory_stack.clone();
         let child_rewind_stack = rewind_stack.clone();
-        let thread_id: __wasi_tid_t = handle.id().into();        
 
         // Build a new store that will be passed to the thread
         #[cfg(feature = "compiler")]
@@ -5065,9 +5106,8 @@ pub fn proc_fork<M: MemorySize>(
         // This function takes in memory and a store and creates a context that
         // can be used to call back into the process
         let create_ctx = {
-            let state = env.state.clone();
-            let wasi_env = env.clone();
-            let thread_id = handle.id();
+            let state = child_env.state.clone();
+            let wasi_env = child_env.clone();
             move |mut store: Store, module: Module, memory: VMMemory|
             {
                 // We need to reconstruct some things
@@ -5078,7 +5118,6 @@ pub fn proc_fork<M: MemorySize>(
                 let mut ctx = WasiFunctionEnv::new(&mut store, wasi_env.clone());
                 {
                     let env = ctx.data_mut(&mut store);
-                    env.id = thread_id;
                     env.stack_base = stack_base;
                     env.stack_start = stack_start;
                 }
@@ -5089,7 +5128,7 @@ pub fn proc_fork<M: MemorySize>(
                 let instance = match Instance::new(&mut store, &module, &import_object) {
                     Ok(a) => a,
                     Err(err) => {
-                        error!("fork failed - create instance failed: {}", err);
+                        error!("{} failed - create instance failed: {}", fork_op, err);
                         return Err(__WASI_ENOEXEC as u32);
                     }
                 };
@@ -5098,7 +5137,7 @@ pub fn proc_fork<M: MemorySize>(
                 ctx.data_mut(&mut store).inner = Some(
                     WasiEnvInner::new(module, memory, &store, &instance)
                 );
-                trace!("fork: new context created for thread_id = {}", thread_id.raw());
+                trace!("{}: new context created for thread_id = {}", fork_op, wasi_env.thread.tid().raw());
                 Ok(WasiThreadContext {
                     ctx,
                     store: RefCell::new(store)
@@ -5111,57 +5150,31 @@ pub fn proc_fork<M: MemorySize>(
         {
             // Rewind the stack and carry on
             {
+                trace!("wasi[{}]::{}: rewinding child", ctx.data(store).pid(), fork_op);
                 let ctx = ctx.env.clone().into_mut(&mut store);
                 match rewind::<M>(ctx, child_memory_stack.freeze(), child_rewind_stack.freeze()) {
                     __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
                     err => {
-                        warn!("fork failed - could not rewind the stack - errno={}", err);
+                        warn!("{} failed - could not rewind the stack - errno={}", fork_op, err);
                         return __WASI_ENOEXEC as u32;
                     }
                 };
             }
 
-            // We invoke the function
-            let store_id = store.id();
-            funct.set_store_id(store_id);
-            let funct: Function = funct.into();
-            
+            // Invoke the start function
             let mut ret = __WASI_ESUCCESS;
-            if let Err(err) = funct.call_raw(store, funct_params) {
-                debug!("fork failed - start: {}", err);
-                ret = __WASI_ENOEXEC;
+            if ctx.data(store).thread.is_main() {
+                trace!("wasi[{}]::{}: re-invoking main", ctx.data(store).pid(), fork_op);
+                let start = ctx.data(store).inner().start.clone().unwrap();
+                start.call(&mut store);
+            } else {
+                trace!("wasi[{}]::{}: re-invoking thread_spawn", ctx.data(store).pid(), fork_op);
+                let start = ctx.data(store).inner().thread_spawn.clone().unwrap();
+                start.call(&mut store, 0, 0);
             }
 
-            trace!("fork: cleaning up local thread variables");
-
-            // Destroy all the local thread variables that were allocated for this thread
-            let to_local_destroy = {
-                let thread_id = ctx.data(store).id;
-                let mut to_local_destroy = Vec::new();
-                let mut guard = ctx.data(store).state.threading.write().unwrap();
-                for ((thread, key), val) in guard.thread_local.iter() {
-                    if *thread == thread_id {
-                        if let Some(user_data) = guard.thread_local_user_data.get(key) {
-                            to_local_destroy.push((*user_data, *val))
-                        }
-                    }
-                }
-                guard.thread_local.retain(|(t, _), _| *t != thread_id);
-                to_local_destroy
-            };
-            if to_local_destroy.len() > 0 {
-                if let Some(thread_local_destroy) = ctx.data(store).inner().thread_local_destroy.as_ref().map(|a| a.clone()) {
-                    for (user_data, val) in to_local_destroy {
-                        let user_data_low: u32 = (user_data & 0xFFFFFFFF) as u32;
-                        let user_data_high: u32 = (user_data >> 32) as u32;
-
-                        let val_low: u32 = (val & 0xFFFFFFFF) as u32;
-                        let val_high: u32 = (val >> 32) as u32;
-
-                        let _ = thread_local_destroy.call(store, user_data_low as i32, user_data_high as i32, val_low as i32, val_high as i32);
-                    }
-                }
-            }
+            // Clean up the environment
+            ctx.cleanup((&mut store));
 
             // Return the result
             ret as u32
@@ -5170,12 +5183,12 @@ pub fn proc_fork<M: MemorySize>(
         // This next function gets a context for the local thread and then
         // calls into the process    
         let mut execute_module = {
-            let state = env.state.clone();
+            let state = child_env.state.clone();
             move |store: &mut Option<Store>, module: Module, memory: &mut Option<VMMemory>|
             {
                 // We capture the thread handle here, it is used to notify
                 // anyone that is interested when this thread has terminated
-                let _captured_handle = Box::new(&mut handle);
+                let _captured_handle = Box::new(&mut child_handle);
 
                 // Given that it is not safe to assume this delegate will run on the
                 // same thread we need to capture a simple process that will create
@@ -5203,14 +5216,14 @@ pub fn proc_fork<M: MemorySize>(
                     let memory = match memory.take() {
                         Some(m) => m,
                         None => {
-                            debug!("fork failed - memory can only be consumed once per context creation");
+                            debug!("{} failed - memory can only be consumed once per context creation", fork_op);
                             return __WASI_ENOEXEC as u32;
                         }
                     };
                     let store = match store.take() {
                         Some(s) => s,
                         None => {
-                            debug!("fork failed - store can only be consumed once per context creation");
+                            debug!("{} failed - store can only be consumed once per context creation", fork_op);
                             return __WASI_ENOEXEC as u32;
                         }
                     };
@@ -5229,10 +5242,11 @@ pub fn proc_fork<M: MemorySize>(
         };
 
         // Now spawn a thread
-        trace!("fork: spawning background thread");
+        trace!("{}: spawning child process (pid={})", fork_op, child_pid);
         let thread_module = env.inner().module.clone();
         runtime
             .thread_spawn(Box::new(move |store: Store, module: Module, thread_memory: VMMemory| {
+                trace!("{}: child process started (pid={})", fork_op, child_pid);
                 let mut thread_memory = Some(thread_memory);
                 let mut store = Some(store);
                 execute_module(&mut store, module, &mut thread_memory);
@@ -5251,18 +5265,18 @@ pub fn proc_fork<M: MemorySize>(
             // Make sure its within the "active" part of the memory stack
             let offset = env.stack_base - pid_offset;
             if offset as usize > memory_stack.len() {
-                warn!("fork failed - the return value (pid) is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
+                warn!("{} failed - the return value (pid) is outside of the active part of the memory stack ({} vs {})", fork_op, offset, memory_stack.len());
                 return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
             }
             
             // Update the memory stack with the new PID
-            let val_bytes = pid.to_ne_bytes();
+            let val_bytes = child_pid.raw().to_ne_bytes();
             let pstart = memory_stack.len() - offset as usize;
             let pend = pstart + val_bytes.len();
             let pbytes = &mut memory_stack[pstart..pend];
             pbytes.clone_from_slice(&val_bytes);
         } else {
-            warn!("fork failed - the return value (pid) is not being returned on the stack - which is not supported");
+            warn!("{} failed - the return value (pid) is not being returned on the stack - which is not supported", fork_op);
             return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
         }
 
@@ -5270,7 +5284,7 @@ pub fn proc_fork<M: MemorySize>(
         match rewind::<M>(ctx, memory_stack.freeze(), rewind_stack.freeze()) {
             __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
             err => {
-                warn!("fork failed - could not rewind the stack - errno={}", err);
+                warn!("{} failed - could not rewind the stack - errno={}", fork_op, err);
                 OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)))
             }
         }
@@ -5300,14 +5314,14 @@ pub fn proc_exec<M: MemorySize>(
         warn!("failed to execve as the name could not be read - {}", err);
         WasiError::Exit(__WASI_EFAULT as __wasi_exitcode_t)
     })?;
-    trace!("wasi::proc_exec (name={})", name);
+    trace!("wasi[{}]::proc_exec (name={})", ctx.data().pid(), name);
 
     let args = args.read_utf8_string(&memory, args_len).map_err(|err| {
         warn!("failed to execve as the args could not be read - {}", err);
         WasiError::Exit(__WASI_EFAULT as __wasi_exitcode_t)
     })?;
-    let args: Vec<_> = args.split(&['\n', '\r']).map(|a| a.to_string()).collect();
-
+    let args: Vec<_> = args.split(&['\n', '\r']).map(|a| a.to_string()).filter(|a| a.len() > 0).collect();
+    
     // Convert the preopen directories
     let preopen = ctx.data().state.preopen.clone();
 
@@ -5330,35 +5344,39 @@ pub fn proc_exec<M: MemorySize>(
     // with the forked WasiEnv, then do a longjmp back to the vfork point.
     if let Some(mut vfork) = ctx.data_mut().vfork.take()
     {
+        // We will need the child pid later
+        let child_pid = ctx.data().process.pid();
+
         // Restore the WasiEnv to the point when we vforked
+        std::mem::swap(&mut vfork.env.inner, &mut ctx.data_mut().inner);
         std::mem::swap(vfork.env.as_mut(), ctx.data_mut());
-        let wasi_env = *vfork.env;
+        let mut wasi_env = *vfork.env;
+        wasi_env.owned_handles.push(vfork.handle);
+
+        // Swap out the arguments with the new ones
+        let mut wasi_state = wasi_env.state.fork();
+        wasi_state.args = args;
+        wasi_env.state = Arc::new(wasi_state);
+
+        // Recrod the stack offsets before we give up ownership of the wasi_env
+        let stack_base = wasi_env.stack_base;
+        let stack_start = wasi_env.stack_start;
         
         // Spawn a new process with this current execution environment
         let bus = ctx.data().bus();
         let mut process = bus
-            .new_spawn()
-            .env(wasi_env.clone())
-            .chroot(false)
-            .args(args)
-            .preopen(preopen)
-            .stdin_mode(StdioMode::Inherit)
-            .stdout_mode(StdioMode::Inherit)
-            .stderr_mode(StdioMode::Inherit)
-            .working_dir(cur_dir)
+            .spawn_existing(wasi_env)
             .spawn(name.as_str())
             .map_err(|err| {
                 warn!("failed to execve as the process could not be spawned - {}", err);
                 WasiError::Exit(__WASI_ENOEXEC as __wasi_exitcode_t)
             })?;
-
+        
         // Add the process to the environment state
-        let pid = {
-            let mut guard = ctx.data().state.threading.write().unwrap();
-            guard.bus_process_seed += 1;
-            let bid = guard.bus_process_seed;
-            guard.bus_processes.insert(bid.into(), Box::new(process));
-            bid
+        trace!("spawned sub-process (pid={})", child_pid.raw());
+        {
+            let mut inner = ctx.data().process.write();
+            inner.bus_processes.insert(child_pid.into(), Box::new(process));
         };
 
         let mut memory_stack = vfork.memory_stack;
@@ -5367,17 +5385,17 @@ pub fn proc_exec<M: MemorySize>(
         // If the return value offset is within the memory stack then we need
         // to update it here rather than in the real memory
         let pid_offset: u64 = vfork.pid_offset.into();
-        if pid_offset >= wasi_env.stack_start && pid_offset < wasi_env.stack_base
+        if pid_offset >= stack_start && pid_offset < stack_base
         {
             // Make sure its within the "active" part of the memory stack
-            let offset = wasi_env.stack_base - pid_offset;
+            let offset = stack_base - pid_offset;
             if offset as usize > memory_stack.len() {
                 warn!("vfork failed - the return value (pid) is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
                 return Err(WasiError::Exit(__WASI_EFAULT as u32));
             }
             
             // Update the memory stack with the new PID
-            let val_bytes = pid.to_ne_bytes();
+            let val_bytes = child_pid.raw().to_ne_bytes();
             let pstart = memory_stack.len() - offset as usize;
             let pend = pstart + val_bytes.len();
             let pbytes = &mut memory_stack[pstart..pend];
@@ -5406,153 +5424,38 @@ pub fn proc_exec<M: MemorySize>(
     // on the new module
     else
     {
-        panic!("execve outside of a vfork is not yet implemented")
+        // Take the current environment and just pass it directly to the
+        // sub process so that it inherits everything
+        // Swap out the arguments with the new ones
+        let mut wasi_env = ctx.data().clone();
+        let mut wasi_state = wasi_env.state.fork();
+        wasi_state.args = args.clone();
+        wasi_env.state = Arc::new(wasi_state);
+        
+        // Spawn a new process with this current execution environment
+        //let pid = wasi_env.process.pid();
+        let bus = ctx.data().bus();
+        let mut process = bus
+            .spawn_existing(wasi_env)
+            .spawn(name.as_str())
+            .map_err(|err| {
+                warn!("failed to execve as the process could not be spawned - {}", err);
+                WasiError::Exit(__WASI_ENOEXEC as __wasi_exitcode_t)
+            })?;
+
+        // Wait for the sub-process to exit itself - then we will exit
+        loop {
+            ctx.data().clone().sleep(&mut ctx, Duration::from_millis(50))?;
+            if let Some(exit_code) = process.inst.exit_code() {
+                trace!("execve exited with {}", exit_code);
+                proc_exit::<M>(ctx, exit_code)?;
+                unreachable!("proc_exit should have terminated the process");
+            }
+        }
     }
 
     // Success
     Ok(())
-}
-
-/// ### `proc_vfork()`
-pub fn proc_vfork<M: MemorySize>(
-    mut ctx: FunctionEnvMut<'_, WasiEnv>,
-    pid_ptr: WasmPtr<__wasi_pid_t, M>,
-) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::proc_vfork");
-    panic!("vfork not yet implemented")
-    /*
-    // If we were just restored then we need to return the value instead
-    if handle_rewind::<M>(&mut ctx) {
-        let env = ctx.data();
-        let memory = env.memory_view(&ctx);
-        let pid = wasi_try_mem_ok!(
-            pid_ptr.read(&memory)
-        );
-        trace!("wasi::proc_fork - restored - (pid={})", pid);
-        return Ok(__WASI_ESUCCESS);
-    }
-    trace!("wasi::proc_fork - capturing");
-
-    // We write a zero to the PID before we capture the stack
-    // so that this is what will be returned to the child
-    let env = ctx.data();
-    let memory = env.memory_view(&ctx);
-    wasi_try_mem_ok!(
-        pid_ptr.write(&memory, 0)
-    );
-
-    // Pass some offsets to the unwind function
-    let pid_offset = pid_ptr.offset();
-
-    // Perform the unwind action
-    unwind::<M, _>(ctx, move |mut ctx, memory_stack, rewind_stack|
-    {
-        // Convert the arguments to vectors
-        let env = ctx.data();
-        let (memory, state, inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
-        let bus = env.bus();
-
-        // Fork the memory
-        let fork_memory =
-
-        // Spawn the process
-        let runtime = env.runtime.clone();
-        wasi_try!(runtime
-            .thread_spawn(Box::new(move |store: Store, module: Module, thread_memory: VMMemory| {
-                let mut thread_memory = Some(thread_memory);
-                let mut store = Some(store);
-                execute_module(&mut store, module, &mut thread_memory);
-            }), store, fork_module, fork_memory)
-            .map_err(|err| {
-                let err: __wasi_errno_t = err.into();
-                err
-            }));
-
-        let args = state.args
-            .clone()
-            .into_iter()
-            .map(|a| unsafe { String::from_utf8_unchecked(a) })
-            .collect();
-
-        // Convert the preopen directories
-        let preopen = state.preopen.clone();
-        
-        // Get the current working directory
-        let (_, cur_dir) = match state
-            .fs
-            .get_current_dir(inodes.deref_mut(), crate::VIRTUAL_ROOT_FD,)
-        {
-            Ok(a) => a,
-            Err(err) => {
-                warn!("failed to create subprocess for fork - {}", err);
-                return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as __wasi_exitcode_t)));
-            }
-        };
-
-        // Extract the currently running module
-        let module = env.inner().module.clone();
-        let memory = ctx.as_store_mut().fork()
-
-        // First we create a new process
-        let mut process = match bus
-            .new_spawn()
-            .args(args)
-            .preopen(preopen)
-            .stdin_mode(StdioMode::Inherit)
-            .stdout_mode(StdioMode::Inherit)
-            .stderr_mode(StdioMode::Inherit)
-            .working_dir(cur_dir)
-            .spawn_resume(module, new_store, memory_stack, rewind_stack)
-        {
-            Ok(a) => a,
-            Err(err) => {
-                warn!("failed to create subprocess for fork - {}", err);
-                return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as __wasi_exitcode_t)));
-            }
-        };
-
-        // Add the process to the environment state
-        let pid = {
-            let mut guard = env.state.threading.write().unwrap();
-            guard.bus_process_seed += 1;
-            let bid = guard.bus_process_seed;
-            guard.bus_processes.insert(bid.into(), Box::new(process));
-            bid
-        };
-
-        // If the return value offset is within the memory stack then we need
-        // to update it here rather than in the real memory
-        let pid_offset: u64 = pid_offset.into();
-        if pid_offset >= env.stack_start && pid_offset < env.stack_base
-        {
-            // Make sure its within the "active" part of the memory stack
-            let offset = env.stack_base - pid_offset;
-            if offset as usize > memory_stack.len() {
-                warn!("fork failed - the return value (pid) is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
-                return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
-            }
-            
-            // Update the memory stack with the new PID
-            let val_bytes = pid.to_ne_bytes();
-            let pstart = memory_stack.len() - offset as usize;
-            let pend = pstart + val_bytes.len();
-            let pbytes = &mut memory_stack[pstart..pend];
-            pbytes.clone_from_slice(&val_bytes);
-        } else {
-            warn!("fork failed - the return value (pid) is not being returned on the stack - which is not supported");
-            return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
-        }
-
-        // Rewind the stack and carry on
-        match rewind::<M>(ctx, memory_stack, rewind_stack) {
-            __WASI_ESUCCESS => OnCalledAction::InvokeAgain,
-            err => {
-                warn!("fork failed - could not rewind the stack - errno={}", err);
-                OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)))
-            }
-        }
-    })
-    */
 }
 
 /// Spawns a new process within the context of this machine
@@ -5575,7 +5478,7 @@ pub fn proc_vfork<M: MemorySize>(
 ///
 /// Returns a bus process id that can be used to invoke calls
 pub fn proc_spawn<M: MemorySize>(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     name: WasmPtr<u8, M>,
     name_len: M::Offset,
     chroot: __wasi_bool_t,
@@ -5592,19 +5495,21 @@ pub fn proc_spawn<M: MemorySize>(
 ) -> __bus_errno_t {
     let env = ctx.data();
     let bus = env.runtime.bus();
+    let control_plane = env.process.control_plane();
     let memory = env.memory_view(&ctx);
     let name = unsafe { get_input_str_bus!(&memory, name, name_len) };
     let args = unsafe { get_input_str_bus!(&memory, args, args_len) };
     let preopen = unsafe { get_input_str_bus!(&memory, preopen, preopen_len) };
     let working_dir = unsafe { get_input_str_bus!(&memory, working_dir, working_dir_len) };
     let chroot = chroot == __WASI_BOOL_TRUE;
-    debug!("wasi::process_spawn (name={})", name);
+    debug!("wasi[{}]::process_spawn (name={})", ctx.data().pid(), name);
 
-    let args: Vec<_> = args.split(&['\n', '\r']).map(|a| a.to_string()).collect();
+    let args: Vec<_> = args.split(&['\n', '\r']).map(|a| a.to_string()).filter(|a| a.len() > 0).collect();
 
     let preopen: Vec<_> = preopen
         .split(&['\n', '\r'])
         .map(|a| a.to_string())
+        .filter(|a| a.len() > 0)
         .collect();
 
     let conv_stdio_mode = |mode: __wasi_stdiomode_t| match mode {
@@ -5615,7 +5520,7 @@ pub fn proc_spawn<M: MemorySize>(
     };
 
     let mut process = wasi_try_bus!(bus
-        .new_spawn()
+        .spawn_new()
         .chroot(chroot)
         .args(args)
         .preopen(preopen)
@@ -5623,6 +5528,7 @@ pub fn proc_spawn<M: MemorySize>(
         .stdout_mode(conv_stdio_mode(stdout))
         .stderr_mode(conv_stdio_mode(stderr))
         .working_dir(working_dir)
+        .build()
         .spawn(name.as_str())
         .map_err(bus_error_into_wasi_err));
 
@@ -5690,16 +5596,18 @@ pub fn proc_spawn<M: MemorySize>(
     let stderr = conv_stdio_fd(fd_stderr);
 
     // Add the process to the environment state
-    let pid = {
-        let mut guard = env.state.threading.write().unwrap();
-        guard.bus_process_seed += 1;
-        let bid = guard.bus_process_seed;
-        guard.bus_processes.insert(bid.into(), Box::new(process));
-        bid
+    let pid = env.process.pid();
+    ctx.data_mut().process.children.push(pid);
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+
+    {
+        let mut guard = env.process.write();
+        guard.bus_processes.insert(pid.into(), Box::new(process));
     };
 
     let handles = __wasi_bus_handles_t {
-        bid: pid,
+        bid: pid.raw(),
         stdin,
         stdout,
         stderr,
@@ -5719,20 +5627,43 @@ pub fn proc_spawn<M: MemorySize>(
 pub fn proc_join<M: MemorySize>(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     pid: __wasi_pid_t,
-    exit_code: WasmPtr<__wasi_exitcode_t, M>,
+    exit_code_ptr: WasmPtr<__wasi_exitcode_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    trace!("wasi::proc_join");
+    trace!("wasi[{}]::proc_join (pid={})", ctx.data().pid(), pid);
 
+    // If the ID is maximum then it means wait for all the children
+    if pid == u32::MAX {
+        loop {
+            ctx.data().yield_now()?;
+            if let Some(exit_code) = ctx.data_mut().process.join_children(Duration::from_millis(50)) {
+                trace!("children exited with {}", exit_code);
+                let env = ctx.data();
+                let memory = env.memory_view(&ctx);
+                wasi_try_mem_ok!(exit_code_ptr.write(&memory, exit_code));
+                break;
+            }
+        }
+    }
+
+    // Otherwise we wait for the specific PID
     let env = ctx.data();
-    let pid: WasiBusProcessId = pid.into();
-    let thread_id = {
-        let guard = env.state.threading.read().unwrap();
-        guard.bus_process_fork
-            .get(&pid)
-            .map(|a| a.clone())
-    };
-    if let Some(thread_id) = thread_id {
-        thread_join(ctx, thread_id.raw())?;
+    let pid: WasiProcessId = pid.into();
+    let process = env.process.control_plane().get_process(pid).map(|a| a.clone());
+    if let Some(process) = process {
+        loop {
+            env.yield_now()?;
+            if let Some(exit_code) = process.join(Duration::from_millis(50)) {
+                trace!("child ({}) exited with {}", pid.raw(), exit_code);
+                let env = ctx.data();
+                let memory = env.memory_view(&ctx);
+                wasi_try_mem_ok!(exit_code_ptr.write(&memory, exit_code));
+                break;
+            }
+        }
+    } else {
+        debug!("process already terminated or not registered (pid={})", pid.raw());
+        let memory = env.memory_view(&ctx);
+        wasi_try_mem_ok!(exit_code_ptr.write(&memory, __WASI_ENOEXEC as u32));
     }
     Ok(__WASI_ESUCCESS)
 }
@@ -5761,7 +5692,7 @@ pub fn bus_open_local<M: MemorySize>(
     let memory = env.memory_view(&ctx);
     let name = unsafe { get_input_str_bus_ok!(&memory, name, name_len) };
     let reuse = reuse == __WASI_BOOL_TRUE;
-    debug!("wasi::bus_open_local (name={}, reuse={})", name, reuse);
+    debug!("wasi[{}]::bus_open_local (name={}, reuse={})", ctx.data().pid(), name, reuse);
 
     bus_open_internal(ctx, name, reuse, None, None, ret_bid)
 }
@@ -5807,7 +5738,7 @@ pub fn bus_open_remote<M: MemorySize>(
 }
 
 fn bus_open_internal<M: MemorySize>(
-    ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
     name: String,
     reuse: bool,
     instance: Option<String>,
@@ -5821,7 +5752,7 @@ fn bus_open_internal<M: MemorySize>(
 
     // Check if it already exists
     if reuse {
-        let guard = env.state.threading.read().unwrap();
+        let guard = env.process.read();
         if let Some(bid) = guard.bus_process_reuse.get(&name) {
             if guard.bus_processes.contains_key(bid) {
                 wasi_try_mem_bus_ok!(ret_bid.write(&memory, bid.clone().into()));
@@ -5830,37 +5761,39 @@ fn bus_open_internal<M: MemorySize>(
         }
     }
 
-    let mut process = bus.new_spawn();
-    process
+    let mut process = bus
+        .spawn_new()
         .reuse(reuse)
         .stdin_mode(StdioMode::Null)
         .stdout_mode(StdioMode::Null)
         .stderr_mode(StdioMode::Log);
 
     if let Some(instance) = instance {
-        process.remote_instance(instance);
+        process = process.remote_instance(instance);
     }
 
     if let Some(token) = token {
-        process.access_token(token);
+        process = process.access_token(token);
     }
 
     // Spawn the process
     let mut process = wasi_try_bus_ok!(process
+        .build()
         .spawn(name.as_ref())
         .map_err(bus_error_into_wasi_err));
 
     // Add the process to the environment state
-    let bid = {
-        let mut guard = env.state.threading.write().unwrap();
-        guard.bus_process_seed += 1;
-        let bid: WasiBusProcessId = guard.bus_process_seed.into();
-        guard.bus_processes.insert(bid, Box::new(process));
-        guard.bus_process_reuse.insert(name, bid);
-        bid
+    let pid = env.process.control_plane().reserve_pid();
+    ctx.data_mut().process.children.push(pid);
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    {
+        let mut inner = env.process.write();
+        inner.bus_processes.insert(pid, Box::new(process));
+        inner.bus_process_reuse.insert(name, pid);
     };
 
-    wasi_try_mem_bus_ok!(ret_bid.write(&memory, bid.into()));
+    wasi_try_mem_bus_ok!(ret_bid.write(&memory, pid.into()));
 
     Ok(__BUS_ESUCCESS)
 }
@@ -5871,14 +5804,14 @@ fn bus_open_internal<M: MemorySize>(
 ///
 /// * `bid` - Handle of the bus process handle to be closed
 pub fn bus_close(ctx: FunctionEnvMut<'_, WasiEnv>, bid: __wasi_bid_t) -> __bus_errno_t {
-    trace!("wasi::bus_close (bid={})", bid);
-    let bid: WasiBusProcessId = bid.into();
+    trace!("wasi[{}]::bus_close (bid={})", ctx.data().pid(), bid);
+    let bid: WasiProcessId = bid.into();
 
     let env = ctx.data();
-    let mut guard = env.state.threading.write().unwrap();
-    if let Some(process) = guard.bus_processes.remove(&bid) {
+    let mut inner = env.process.write();
+    if let Some(process) = inner.bus_processes.remove(&bid) {
         let name: Cow<'static, str> = process.name.clone().into();
-        guard.bus_process_reuse.remove(&name);
+        inner.bus_process_reuse.remove(&name);
     }
 
     __BUS_ESUCCESS
@@ -5916,8 +5849,8 @@ pub fn bus_call<M: MemorySize>(
     );
 
     // Get the process that we'll invoke this call for
-    let mut guard = env.state.threading.read().unwrap();
-    let bid: WasiBusProcessId = bid.into();
+    let mut guard = env.process.read();
+    let bid: WasiProcessId = bid.into();
     let process = if let Some(process) = {
         guard.bus_processes.get(&bid).map(|p| p.clone())
     } { process } else {
@@ -6151,7 +6084,7 @@ pub fn bus_poll<M: MemorySize>(
     let env = ctx.data();
     let bus = env.runtime.bus();
     let memory = env.memory_view(&ctx);
-    trace!("wasi::bus_poll (timeout={})", timeout);
+    trace!("wasi[{}]::bus_poll (timeout={})", ctx.data().pid(), timeout);
 
     // Lets start by processing events for calls that are already running
     let mut nevents = M::ZERO;
@@ -6169,15 +6102,15 @@ pub fn bus_poll<M: MemorySize>(
         // Check if any of the processes have closed
         let mut exited_bids = HashSet::new();
         {
-            let mut guard = env.state.threading.write().unwrap();
-            for (pid, process) in guard.bus_processes.iter_mut() {
+            let mut inner = env.process.write();
+            for (pid, process) in inner.bus_processes.iter_mut() {
                 let pinned_process = Pin::new(process.inst.as_mut());
                 if pinned_process.poll_finished(&mut cx) == Poll::Ready(()) {
                     exited_bids.insert(*pid);
                 }
             }
             for pid in exited_bids.iter() {
-                guard.bus_processes.remove(pid);
+                inner.bus_processes.remove(pid);
             }
         }
 
@@ -6230,7 +6163,7 @@ pub fn bus_poll<M: MemorySize>(
                     // If the process that is hosting the call is finished then so is the call
                     if exited_bids.contains(&call.bid) {
                         drop_calls.push(*key);
-                        trace!("wasi::bus_poll (aborted, cid={})", cid);                        
+                        trace!("wasi[{}]::bus_poll (aborted, cid={})", ctx.data().pid(), cid);
                         let evt = unsafe {
                             std::mem::transmute(__wasi_busevent_t2 {
                                 tag: __WASI_BUS_EVENT_TYPE_FAULT,
@@ -6264,7 +6197,7 @@ pub fn bus_poll<M: MemorySize>(
                                             call_seed
                                         };
                         
-                                        trace!("wasi::bus_poll (callback, parent={}, cid={}, topic={})", cid, sub_cid, topic_hash);
+                                        trace!("wasi[{}]::bus_poll (callback, parent={}, cid={}, topic={})", ctx.data().pid(), cid, sub_cid, topic_hash);
                                         __wasi_busevent_t2 {
                                             tag: __WASI_BUS_EVENT_TYPE_CALL,
                                             u: __wasi_busevent_u {
@@ -6285,7 +6218,7 @@ pub fn bus_poll<M: MemorySize>(
                                         drop_calls.push(*key);
                                         finished = true;
 
-                                        trace!("wasi::bus_poll (response, cid={}, len={})", cid, data.len());
+                                        trace!("wasi[{}]::bus_poll (response, cid={}, len={})", ctx.data().pid(), cid, data.len());
                                         __wasi_busevent_t2 {
                                             tag: __WASI_BUS_EVENT_TYPE_RESULT,
                                             u: __wasi_busevent_u {
@@ -6301,7 +6234,7 @@ pub fn bus_poll<M: MemorySize>(
                                         drop_calls.push(*key);
                                         finished = true;
 
-                                        trace!("wasi::bus_poll (fault, cid={}, err={})", cid, fault);
+                                        trace!("wasi[{}]::bus_poll (fault, cid={}, err={})", ctx.data().pid(), cid, fault);
                                         __wasi_busevent_t2 {
                                             tag: __WASI_BUS_EVENT_TYPE_FAULT,
                                             u: __wasi_busevent_u {
@@ -6457,7 +6390,7 @@ pub fn bus_poll<M: MemorySize>(
             let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
             let delta = now.checked_sub(start).unwrap_or(0) as __wasi_timestamp_t;
             if delta >= timeout {
-                trace!("wasi::bus_poll (timeout)");
+                trace!("wasi[{}]::bus_poll (timeout)", ctx.data().pid());
                 wasi_try_mem_bus_ok!(ret_nevents.write(&memory, nevents));
                 return Ok(__BUS_ESUCCESS);
             }
@@ -6474,9 +6407,9 @@ pub fn bus_poll<M: MemorySize>(
         }
     }
     if nevents > M::ZERO {
-        trace!("wasi::bus_poll (return nevents={})", nevents);
+        trace!("wasi[{}]::bus_poll (return nevents={})", ctx.data().pid(), nevents);
     } else {
-        trace!("wasi::bus_poll (idle - no events)");
+        trace!("wasi[{}]::bus_poll (idle - no events)", ctx.data().pid());
     }
 
     wasi_try_mem_bus_ok!(ret_nevents.write(&memory, nevents));
@@ -6539,7 +6472,7 @@ pub fn call_fault(
 {
     let env = ctx.data();
     let bus = env.runtime.bus();
-    debug!("wasi::call_fault (cid={}, fault={})", cid, fault);
+    debug!("wasi[{}]::call_fault (cid={}, fault={})", ctx.data().pid(), cid, fault);
 
     let mut guard = env.state.bus.protected();
     guard.calls.remove(&cid);
@@ -6561,7 +6494,7 @@ pub fn call_close(
 ) {
     let env = ctx.data();
     let bus = env.runtime.bus();
-    trace!("wasi::call_close (cid={})", cid);
+    trace!("wasi[{}]::call_close (cid={})", ctx.data().pid(), cid);
 
     let mut guard = env.state.bus.protected();
     guard.calls.remove(&cid);
@@ -6584,7 +6517,7 @@ pub fn ws_connect<M: MemorySize>(
     url_len: M::Offset,
     ret_sock: WasmPtr<__wasi_fd_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::ws_connect");
+    debug!("wasi[{}]::ws_connect", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let url = unsafe { get_input_str!(&memory, url, url_len) };
@@ -6641,7 +6574,7 @@ pub fn http_request<M: MemorySize>(
     gzip: __wasi_bool_t,
     ret_handles: WasmPtr<__wasi_http_handles_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::http_request");
+    debug!("wasi[{}]::http_request", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let url = unsafe { get_input_str!(&memory, url, url_len) };
@@ -6742,7 +6675,7 @@ pub fn http_status<M: MemorySize>(
     sock: __wasi_fd_t,
     status: WasmPtr<__wasi_http_status_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::http_status");
+    debug!("wasi[{}]::http_status", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -6784,7 +6717,7 @@ pub fn port_bridge<M: MemorySize>(
     token_len: M::Offset,
     security: __wasi_streamsecurity_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_bridge");
+    debug!("wasi[{}]::port_bridge", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let network = unsafe { get_input_str!(&memory, network, network_len) };
@@ -6807,7 +6740,7 @@ pub fn port_bridge<M: MemorySize>(
 /// ### `port_unbridge()`
 /// Disconnects from a remote network
 pub fn port_unbridge(ctx: FunctionEnvMut<'_, WasiEnv>) -> __wasi_errno_t {
-    debug!("wasi::port_unbridge");
+    debug!("wasi[{}]::port_unbridge", ctx.data().pid());
     let env = ctx.data();
     wasi_try!(env.net().unbridge().map_err(net_error_into_wasi_err));
     __WASI_ESUCCESS
@@ -6816,7 +6749,7 @@ pub fn port_unbridge(ctx: FunctionEnvMut<'_, WasiEnv>) -> __wasi_errno_t {
 /// ### `port_dhcp_acquire()`
 /// Acquires a set of IP addresses using DHCP
 pub fn port_dhcp_acquire(ctx: FunctionEnvMut<'_, WasiEnv>) -> __wasi_errno_t {
-    debug!("wasi::port_dhcp_acquire");
+    debug!("wasi[{}]::port_dhcp_acquire", ctx.data().pid());
     let env = ctx.data();
     wasi_try!(env.net().dhcp_acquire().map_err(net_error_into_wasi_err));
     __WASI_ESUCCESS
@@ -6832,7 +6765,7 @@ pub fn port_addr_add<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ip: WasmPtr<__wasi_cidr_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_addr_add");
+    debug!("wasi[{}]::port_addr_add", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let cidr = wasi_try!(super::state::read_cidr(&memory, ip));
@@ -6853,7 +6786,7 @@ pub fn port_addr_remove<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ip: WasmPtr<__wasi_addr_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_addr_remove");
+    debug!("wasi[{}]::port_addr_remove", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let ip = wasi_try!(super::state::read_ip(&memory, ip));
@@ -6864,7 +6797,7 @@ pub fn port_addr_remove<M: MemorySize>(
 /// ### `port_addr_clear()`
 /// Clears all the addresses on the local port
 pub fn port_addr_clear(ctx: FunctionEnvMut<'_, WasiEnv>) -> __wasi_errno_t {
-    debug!("wasi::port_addr_clear");
+    debug!("wasi[{}]::port_addr_clear", ctx.data().pid());
     let env = ctx.data();
     wasi_try!(env.net().ip_clear().map_err(net_error_into_wasi_err));
     __WASI_ESUCCESS
@@ -6876,7 +6809,7 @@ pub fn port_mac<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ret_mac: WasmPtr<__wasi_hardwareaddress_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_mac");
+    debug!("wasi[{}]::port_mac", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let mac = wasi_try!(env.net().mac().map_err(net_error_into_wasi_err));
@@ -6903,7 +6836,7 @@ pub fn port_addr_list<M: MemorySize>(
     addrs: WasmPtr<__wasi_cidr_t, M>,
     naddrs: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_addr_list");
+    debug!("wasi[{}]::port_addr_list", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let max_addrs = wasi_try_mem!(naddrs.read(&memory));
@@ -6937,7 +6870,7 @@ pub fn port_gateway_set<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ip: WasmPtr<__wasi_addr_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_gateway_set");
+    debug!("wasi[{}]::port_gateway_set", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let ip = wasi_try!(super::state::read_ip(&memory, ip));
@@ -6955,7 +6888,7 @@ pub fn port_route_add<M: MemorySize>(
     preferred_until: WasmPtr<__wasi_option_timestamp_t, M>,
     expires_at: WasmPtr<__wasi_option_timestamp_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_route_add");
+    debug!("wasi[{}]::port_route_add", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let cidr = wasi_try!(super::state::read_cidr(&memory, cidr));
@@ -6986,7 +6919,7 @@ pub fn port_route_remove<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     ip: WasmPtr<__wasi_addr_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_route_remove");
+    debug!("wasi[{}]::port_route_remove", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let ip = wasi_try!(super::state::read_ip(&memory, ip));
@@ -6997,7 +6930,7 @@ pub fn port_route_remove<M: MemorySize>(
 /// ### `port_route_clear()`
 /// Clears all the routes in the local port
 pub fn port_route_clear(ctx: FunctionEnvMut<'_, WasiEnv>) -> __wasi_errno_t {
-    debug!("wasi::port_route_clear");
+    debug!("wasi[{}]::port_route_clear", ctx.data().pid());
     let env = ctx.data();
     wasi_try!(env.net().route_clear().map_err(net_error_into_wasi_err));
     __WASI_ESUCCESS
@@ -7017,7 +6950,7 @@ pub fn port_route_list<M: MemorySize>(
     routes: WasmPtr<__wasi_route_t, M>,
     nroutes: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::port_route_list");
+    debug!("wasi[{}]::port_route_list", ctx.data().pid());
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let nroutes = nroutes.deref(&memory);
@@ -7059,7 +6992,7 @@ pub fn sock_shutdown(
     sock: __wasi_fd_t,
     how: __wasi_sdflags_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_shutdown");
+    debug!("wasi[{}]::sock_shutdown", ctx.data().pid());
 
     let both = __WASI_SHUT_RD | __WASI_SHUT_WR;
     let how = match how {
@@ -7086,7 +7019,7 @@ pub fn sock_status<M: MemorySize>(
     sock: __wasi_fd_t,
     ret_status: WasmPtr<__wasi_sockstatus_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_status");
+    debug!("wasi[{}]::sock_status", ctx.data().pid());
 
     let status = wasi_try!(__sock_actor(&ctx, sock, 0, |socket| { socket.status() }));
 
@@ -7121,7 +7054,7 @@ pub fn sock_addr_local<M: MemorySize>(
     sock: __wasi_fd_t,
     ret_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_addr_local");
+    debug!("wasi[{}]::sock_addr_local", ctx.data().pid());
 
     let addr = wasi_try!(__sock_actor(&ctx, sock, 0, |socket| {
         socket.addr_local()
@@ -7152,7 +7085,7 @@ pub fn sock_addr_peer<M: MemorySize>(
     sock: __wasi_fd_t,
     ro_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_addr_peer");
+    debug!("wasi[{}]::sock_addr_peer", ctx.data().pid());
 
     let env = ctx.data();
     let addr = wasi_try!(__sock_actor(&ctx, sock, 0, |socket| { socket.addr_peer() }));
@@ -7192,7 +7125,7 @@ pub fn sock_open<M: MemorySize>(
     pt: __wasi_sockproto_t,
     ro_sock: WasmPtr<__wasi_fd_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_open");
+    debug!("wasi[{}]::sock_open", ctx.data().pid());
 
     let env = ctx.data();
     let (memory, state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
@@ -7247,7 +7180,7 @@ pub fn sock_set_opt_flag(
     opt: __wasi_sockoption_t,
     flag: __wasi_bool_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_set_opt_flag(ty={})", opt);
+    debug!("wasi[{}]::sock_set_opt_flag(ty={})", ctx.data().pid(), opt);
 
     let flag = match flag {
         __WASI_BOOL_FALSE => false,
@@ -7276,7 +7209,7 @@ pub fn sock_get_opt_flag<M: MemorySize>(
     opt: __wasi_sockoption_t,
     ret_flag: WasmPtr<__wasi_bool_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_get_opt_flag(ty={})", opt);
+    debug!("wasi[{}]::sock_get_opt_flag(ty={})", ctx.data().pid(), opt);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
@@ -7308,7 +7241,7 @@ pub fn sock_set_opt_time<M: MemorySize>(
     opt: __wasi_sockoption_t,
     time: WasmPtr<__wasi_option_timestamp_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_set_opt_time(ty={})", opt);
+    debug!("wasi[{}]::sock_set_opt_time(ty={})", ctx.data().pid(), opt);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7348,7 +7281,7 @@ pub fn sock_get_opt_time<M: MemorySize>(
     opt: __wasi_sockoption_t,
     ret_time: WasmPtr<__wasi_option_timestamp_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_get_opt_time(ty={})", opt);
+    debug!("wasi[{}]::sock_get_opt_time(ty={})", ctx.data().pid(), opt);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
@@ -7395,7 +7328,7 @@ pub fn sock_set_opt_size(
     opt: __wasi_sockoption_t,
     size: __wasi_filesize_t,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_set_opt_size(ty={})", opt);
+    debug!("wasi[{}]::sock_set_opt_size(ty={})", ctx.data().pid(), opt);
 
     let ty = match opt {
         __WASI_SOCK_OPTION_RECV_TIMEOUT => wasmer_vnet::TimeType::ReadTimeout,
@@ -7433,7 +7366,7 @@ pub fn sock_get_opt_size<M: MemorySize>(
     opt: __wasi_sockoption_t,
     ret_size: WasmPtr<__wasi_filesize_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_get_opt_size(ty={})", opt);
+    debug!("wasi[{}]::sock_get_opt_size(ty={})", ctx.data().pid(), opt);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
@@ -7471,7 +7404,7 @@ pub fn sock_join_multicast_v4<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip4_t, M>,
     iface: WasmPtr<__wasi_addr_ip4_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_join_multicast_v4");
+    debug!("wasi[{}]::sock_join_multicast_v4", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7497,7 +7430,7 @@ pub fn sock_leave_multicast_v4<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip4_t, M>,
     iface: WasmPtr<__wasi_addr_ip4_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_leave_multicast_v4");
+    debug!("wasi[{}]::sock_leave_multicast_v4", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7523,7 +7456,7 @@ pub fn sock_join_multicast_v6<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip6_t, M>,
     iface: u32,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_join_multicast_v6");
+    debug!("wasi[{}]::sock_join_multicast_v6", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7548,7 +7481,7 @@ pub fn sock_leave_multicast_v6<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip6_t, M>,
     iface: u32,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_leave_multicast_v6");
+    debug!("wasi[{}]::sock_leave_multicast_v6", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7572,7 +7505,7 @@ pub fn sock_bind<M: MemorySize>(
     sock: __wasi_fd_t,
     addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_bind");
+    debug!("wasi[{}]::sock_bind", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7604,7 +7537,7 @@ pub fn sock_listen<M: MemorySize>(
     sock: __wasi_fd_t,
     backlog: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi::sock_listen");
+    debug!("wasi[{}]::sock_listen", ctx.data().pid());
 
     let env = ctx.data();
     let backlog: usize = wasi_try!(backlog.try_into().map_err(|_| __WASI_EINVAL));
@@ -7636,7 +7569,7 @@ pub fn sock_accept<M: MemorySize>(
     ro_fd: WasmPtr<__wasi_fd_t, M>,
     ro_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::sock_accept");
+    debug!("wasi[{}]::sock_accept", ctx.data().pid());
 
     let mut env = ctx.data();
     let (child, addr) = {
@@ -7745,7 +7678,7 @@ pub fn sock_recv<M: MemorySize>(
     ro_data_len: WasmPtr<M::Offset, M>,
     ro_flags: WasmPtr<__wasi_roflags_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::sock_recv");
+    debug!("wasi[{}]::sock_recv", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7788,7 +7721,7 @@ pub fn sock_recv_from<M: MemorySize>(
     ro_flags: WasmPtr<__wasi_roflags_t, M>,
     ro_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::sock_recv_from");
+    debug!("wasi[{}]::sock_recv_from", ctx.data().pid());
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7829,7 +7762,7 @@ pub fn sock_send<M: MemorySize>(
     _si_flags: __wasi_siflags_t,
     ret_data_len: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::sock_send");
+    debug!("wasi[{}]::sock_send", ctx.data().pid());
     let env = ctx.data();
 
     let memory = env.memory_view(&ctx);
@@ -7872,7 +7805,7 @@ pub fn sock_send_to<M: MemorySize>(
     addr: WasmPtr<__wasi_addr_port_t, M>,
     ret_data_len: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::sock_send_to");
+    debug!("wasi[{}]::sock_send_to", ctx.data().pid());
     let env = ctx.data();
 
     let memory = env.memory_view(&ctx);
@@ -7912,7 +7845,7 @@ pub fn sock_send_file<M: MemorySize>(
     mut count: __wasi_filesize_t,
     ret_sent: WasmPtr<__wasi_filesize_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi::send_file");
+    debug!("wasi[{}]::send_file", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
 
@@ -7920,7 +7853,7 @@ pub fn sock_send_file<M: MemorySize>(
     {
         let mut fd_map = state.fs.fd_map.write().unwrap();
         let fd_entry = wasi_try_ok!(fd_map.get_mut(&in_fd).ok_or(__WASI_EBADF));
-        fd_entry.offset = offset as u64;
+        fd_entry.offset.store(offset as u64, Ordering::Release);
     }
 
     // Enter a loop that will process all the data
@@ -7952,7 +7885,7 @@ pub fn sock_send_file<M: MemorySize>(
                     return Ok(__WASI_EACCES);
                 }
 
-                let offset = fd_entry.offset as usize;
+                let offset = fd_entry.offset.load(Ordering::Acquire) as usize;
                 let inode_idx = fd_entry.inode;
                 let inode = &inodes.arena[inode_idx];
 
@@ -7995,7 +7928,7 @@ pub fn sock_send_file<M: MemorySize>(
                 // reborrow
                 let mut fd_map = state.fs.fd_map.write().unwrap();
                 let fd_entry = wasi_try_ok!(fd_map.get_mut(&in_fd).ok_or(__WASI_EBADF));
-                fd_entry.offset += bytes_read as u64;
+                fd_entry.offset.fetch_add(bytes_read as u64, Ordering::AcqRel);
 
                 bytes_read
             }
@@ -8046,7 +7979,7 @@ pub fn resolve<M: MemorySize>(
     naddrs: M::Offset,
     ret_naddrs: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi::resolve");
+    debug!("wasi[{}]::resolve", ctx.data().pid());
 
     let naddrs: usize = wasi_try!(naddrs.try_into().map_err(|_| __WASI_EINVAL));
     let env = ctx.data();
