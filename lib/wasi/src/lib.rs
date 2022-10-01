@@ -54,6 +54,7 @@ use bytes::BytesMut;
 #[cfg(feature = "js")]
 use bytes::Bytes;
 use derivative::Derivative;
+use syscalls::platform_clock_time_get;
 use tracing::{trace, warn, error};
 use wasmer_vbus::SpawnEnvironmentIntrinsics;
 pub use wasmer_vbus::{UnsupportedVirtualBus, VirtualBus};
@@ -362,7 +363,35 @@ impl WasiEnv {
         // Check for any signals that we need to trigger
         // (but only if a signal handler is registered)
         if let Some(handler) = self.inner().signal.clone() {
-            let signals = self.thread.pop_signals();
+            let mut signals = self.thread.pop_signals();
+
+            let mut now = 0;
+            let has_signal_interval = {
+                let mut any = false;
+                let inner = self.process.inner.read().unwrap();
+                if inner.signal_intervals.is_empty() == false {
+                    now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;    
+                    for signal in inner.signal_intervals.values() {
+                        let elapsed = now - signal.last_signal;
+                        if elapsed >= signal.interval.as_nanos() {
+                            any = true;
+                            break;
+                        }
+                    }
+                }
+                any
+            };
+            if has_signal_interval {
+                let mut inner = self.process.inner.write().unwrap();
+                for signal in inner.signal_intervals.values_mut() {
+                    let elapsed = now - signal.last_signal;
+                    if elapsed >= signal.interval.as_nanos() {
+                        signal.last_signal = now;
+                        signals.push(signal.signal);
+                    }
+                }
+            }
+
             for signal in signals {
                 trace!("processing-signal: {}", signal);
                 if let Err(err) = handler.call(store, signal as i32) {
@@ -877,6 +906,7 @@ fn wasix_exports_32(
         "proc_signal" => Function::new_typed_with_env(&mut store, env, proc_signal::<Memory32>),
         "proc_exec" => Function::new_typed_with_env(&mut store, env, proc_exec::<Memory32>),
         "proc_raise" => Function::new_typed_with_env(&mut store, env, proc_raise),
+        "proc_raise_interval" => Function::new_typed_with_env(&mut store, env, proc_raise_interval),
         "proc_spawn" => Function::new_typed_with_env(&mut store, env, proc_spawn::<Memory32>),
         "proc_id" => Function::new_typed_with_env(&mut store, env, proc_id::<Memory32>),
         "proc_parent" => Function::new_typed_with_env(&mut store, env, proc_parent::<Memory32>),
@@ -1015,6 +1045,7 @@ fn wasix_exports_64(
         "proc_signal" => Function::new_typed_with_env(&mut store, env, proc_signal::<Memory64>),
         "proc_exec" => Function::new_typed_with_env(&mut store, env, proc_exec::<Memory64>),
         "proc_raise" => Function::new_typed_with_env(&mut store, env, proc_raise),
+        "proc_raise_interval" => Function::new_typed_with_env(&mut store, env, proc_raise_interval),
         "proc_spawn" => Function::new_typed_with_env(&mut store, env, proc_spawn::<Memory64>),
         "proc_id" => Function::new_typed_with_env(&mut store, env, proc_id::<Memory64>),
         "proc_parent" => Function::new_typed_with_env(&mut store, env, proc_parent::<Memory64>),

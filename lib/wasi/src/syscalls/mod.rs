@@ -1314,7 +1314,7 @@ pub fn fd_read<M: MemorySize>(
 
                         // Yield for a fixed period of time and then check again
                         env.yield_now()?;
-                        if rx.recv_timeout(Duration::from_millis(5)).is_err() {
+                        if rx.try_recv().is_err() {
                             env.clone().sleep(&mut ctx, Duration::from_millis(5))?;
                         }
                         env = ctx.data();
@@ -3478,6 +3478,34 @@ pub fn proc_raise(
     debug!("wasi[{}]::proc_raise (sig={})", ctx.data().pid(), sig);
     let env = ctx.data();
     env.process.signal_all_threads(sig);
+    env.clone().yield_now_with_signals(&mut ctx)?;
+
+    Ok(__WASI_ESUCCESS)
+}
+
+/// ### `proc_raise()`
+/// Send a signal to the process of the calling thread.
+/// Note: This is similar to `raise` in POSIX.
+/// Inputs:
+/// - `__wasi_signal_t`
+///   Signal to be raised for this process
+pub fn proc_raise_interval(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    sig: __wasi_signal_t,
+    interval: __wasi_timestamp_t,
+    repeat: __wasi_bool_t,
+) -> Result<__wasi_errno_t, WasiError> {
+    debug!("wasi[{}]::proc_raise_interval (sig={})", ctx.data().pid(), sig);
+    let env = ctx.data();
+    let interval = match interval {
+        0 => None,
+        a => Some(Duration::from_millis(a))
+    };
+    let repeat = match repeat {
+        __WASI_BOOL_TRUE => true,
+        _ => false
+    };
+    env.process.signal_interval(sig, interval, repeat);
     env.clone().yield_now_with_signals(&mut ctx)?;
 
     Ok(__WASI_ESUCCESS)

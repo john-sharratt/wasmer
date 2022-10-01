@@ -9,9 +9,9 @@ use std::{
 
 use tracing::log::trace;
 use wasmer_vbus::BusSpawnedProcess;
-use wasmer_wasi_types::{__wasi_signal_t, __wasi_exitcode_t};
+use wasmer_wasi_types::{__wasi_signal_t, __wasi_exitcode_t, __WASI_CLOCK_MONOTONIC};
 
-use crate::WasiEnv;
+use crate::{WasiEnv, syscalls::platform_clock_time_get};
 
 /// Represents the ID of a WASI thread
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -195,6 +195,19 @@ for WasiProcessId {
 }
 
 #[derive(Debug)]
+pub struct WasiSignalInterval
+{
+    /// Signal that will be raised
+    pub signal: u8,
+    /// Time between the signals
+    pub interval: Duration,
+    /// Flag that indicates if the signal should repeat
+    pub repeat: bool,
+    /// Last time that a signal was triggered
+    pub last_signal: u128,
+}
+
+#[derive(Debug)]
 pub struct WasiProcessInner
 {
     /// The threads that make up this process
@@ -209,6 +222,8 @@ pub struct WasiProcessInner
     pub thread_local_user_data: HashMap<u32, u64>,
     /// Seed used to generate thread locals
     pub thread_local_seed: u32,
+    /// Signals that will be triggered at specific intervals
+    pub signal_intervals: HashMap<u8, WasiSignalInterval>,
     /// Represents all the process spun up as a bus process
     pub bus_processes: HashMap<WasiProcessId, Box<BusSpawnedProcess<WasiEnv>>>,
     /// Indicates if the bus process can be reused
@@ -306,6 +321,29 @@ impl WasiProcess
         for thread in inner.threads.values() {
             thread.signal(signal);
         }
+    }
+
+    /// Signals one of the threads every interval
+    pub fn signal_interval(&self, signal: __wasi_signal_t, interval: Option<Duration>, repeat: bool) {
+        let mut inner = self.inner.write().unwrap();
+
+        let interval = match interval {
+            None => {
+                inner.signal_intervals.remove(&signal);
+                return;
+            },
+            Some(a) => a,
+        };
+
+        let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
+        inner.signal_intervals.insert(signal, 
+            WasiSignalInterval {
+                signal,
+                interval,
+                last_signal: now,
+                repeat
+            }
+        );
     }
 
     /// Returns the number of active threads for this process
@@ -438,6 +476,7 @@ impl WasiControlPlane
                 thread_local: Default::default(),
                 thread_local_user_data: Default::default(),
                 thread_local_seed: Default::default(),
+                signal_intervals: Default::default(),
                 bus_processes: Default::default(),
                 bus_process_reuse: Default::default() 
             })),

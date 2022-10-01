@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes};
 use std::convert::TryInto;
 use std::io::{self, Read};
 use std::ops::DerefMut;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Mutex;
 use std::time::Duration;
 use wasmer::WasmSlice;
@@ -46,6 +46,8 @@ impl WasiPipe {
         iov: WasmSlice<__wasi_iovec_t<M>>,
         timeout: Duration,
     ) -> Result<usize, __wasi_errno_t> {
+        let mut elapsed = Duration::ZERO;
+        let mut tick_wait = 0u64;
         loop {
             if let Some(buf) = self.read_buffer.as_mut() {
                 let buf_len = buf.len();
@@ -57,12 +59,21 @@ impl WasiPipe {
                 }
             }
             let rx = self.rx.lock().unwrap();
-            let data = match rx.recv_timeout(timeout) {
+            let data = match rx.try_recv() {
                 Ok(a) => a,
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(__WASI_ETIMEDOUT);
-                },
-                Err(RecvTimeoutError::Disconnected) => {
+                Err(TryRecvError::Empty) => {
+                    if elapsed > timeout {
+                        return Err(__WASI_ETIMEDOUT);
+                    }
+                    // Linearly increasing wait time
+                    tick_wait += 1;
+                    let wait_time = u64::min(tick_wait / 10, 20);
+                    let wait_time = std::time::Duration::from_millis(wait_time);
+                    std::thread::park_timeout(wait_time);
+                    elapsed += wait_time;
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => {
                     return Ok(0);
                 }
             };
