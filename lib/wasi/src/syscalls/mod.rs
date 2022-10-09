@@ -3858,7 +3858,7 @@ pub fn stack_checkpoint<M: MemorySize>(
     let secret = env.state().secret.clone();
 
     // Perform the unwind action
-    unwind::<M, _>(ctx, move |mut ctx, memory_stack, rewind_stack|
+    unwind::<M, _>(ctx, move |mut ctx, mut memory_stack, rewind_stack|
     {
         // We compute the hash again for two reasons... integrity so if there
         // is a long jump that goes to the wrong place it will fail gracefully.
@@ -3868,7 +3868,7 @@ pub fn stack_checkpoint<M: MemorySize>(
             use sha2::{Sha256, Digest};
             let mut hasher = Sha256::new();
             hasher.update(&secret[..]);
-            hasher.update(&memory_stack[..]);
+            //hasher.update(&memory_stack[..]); // We can not use the memory stack as part of the restore stack itself goes on the stack which (while unused) breaks the hash
             hasher.update(&rewind_stack[..]);
             let hash: [u8; 16] = hasher.finalize()[..16].try_into().unwrap();
             u128::from_le_bytes(hash)
@@ -3881,9 +3881,9 @@ pub fn stack_checkpoint<M: MemorySize>(
             .copy_from_slice(&rewind_stack[..upper_stack_clip]);
         
         let mut upper_memory_stack = [0u8; 256];
-        let upper_stack_clip = memory_stack.len().min(256);
-        upper_memory_stack[..upper_stack_clip]
-            .copy_from_slice(&memory_stack[..upper_stack_clip]);
+        let upper_memory_clip = memory_stack.len().min(256);
+        upper_memory_stack[..upper_memory_clip]
+            .copy_from_slice(&memory_stack[..upper_memory_clip]);
 
         // Build a stack snapshot
         let snapshot = __wasi_stack_snaphost_t {
@@ -3902,6 +3902,36 @@ pub fn stack_checkpoint<M: MemorySize>(
         if let Err(err) = snapshot_ptr.write(&memory, snapshot) {
             warn!("failed checkpoint - could not save stack snapshot - {}", err);
             return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
+        }
+
+        // Get a reference directly to the bytes of snapshot
+        let val_bytes = unsafe {
+            let p = &snapshot;
+            ::std::slice::from_raw_parts(
+                (p as *const __wasi_stack_snaphost_t) as *const u8,
+                ::std::mem::size_of::<__wasi_stack_snaphost_t>(),
+            )
+        };
+
+        // The snapshot may itself reside on the stack (which means we
+        // need to update the memory stack rather than write to the memory
+        // as otherwise the rewind will wipe out the structure)
+        let snapshot_offset: u64 = snapshot_offset.into();
+        if snapshot_offset >= env.stack_start && snapshot_offset < env.stack_base
+        {
+            // Make sure its within the "active" part of the memory stack
+            // (note - the area being written to might not go past the memory pointer)
+            let offset = env.stack_base - snapshot_offset;
+            if (offset as usize) < memory_stack.len() {
+                let left = memory_stack.len() - (offset as usize);
+                let end = offset + (val_bytes.len().min(left) as u64);
+                if end as usize <= memory_stack.len() {
+                    let pstart = memory_stack.len() - offset as usize;
+                    let pend = pstart + val_bytes.len();
+                    let pbytes = &mut memory_stack[pstart..pend];
+                    pbytes.clone_from_slice(&val_bytes);
+                }
+            }
         }
 
         // Rewind the stack and carry on
@@ -3989,13 +4019,13 @@ pub fn stack_restore<M: MemorySize>(
             use sha2::{Sha256, Digest};
             let mut hasher = Sha256::new();
             hasher.update(&secret[..]);
-            hasher.update(&memory_stack[..]);
+            //hasher.update(&memory_stack[..]);
             hasher.update(&rewind_stack[..]);
             let hash: [u8; 16] = hasher.finalize()[..16].try_into().unwrap();
             u128::from_le_bytes(hash)
         };
         if hash != snapshot.hash {
-            warn!("snapshot hash failed - the snapshot can not be restored ({} vs {})", hash, snapshot.hash);
+            warn!("snapshot hash failed - the snapshot can not be restored ({} vs {}) [memory_offset={}]", hash, snapshot.hash, snapshot.memory_offset);
             return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
         }
 
@@ -4005,18 +4035,19 @@ pub fn stack_restore<M: MemorySize>(
         if ret_val_offset >= env.stack_start && ret_val_offset < env.stack_base
         {
             // Make sure its within the "active" part of the memory stack
+            let val_bytes = val.to_ne_bytes();
             let offset = env.stack_base - ret_val_offset;
-            if offset as usize > memory_stack.len() {
+            let end = offset + (val_bytes.len() as u64);
+            if end as usize > memory_stack.len() {
                 warn!("snapshot failed - the return value is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
                 return OnCalledAction::Trap(Box::new(WasiError::Exit(__WASI_EFAULT as u32)));
+            } else {
+                // Update the memory stack with the new return value
+                let pstart = memory_stack.len() - offset as usize;
+                let pend = pstart + val_bytes.len();
+                let pbytes = &mut memory_stack[pstart..pend];
+                pbytes.clone_from_slice(&val_bytes);
             }
-            
-            // Update the memory stack with the new return value
-            let val_bytes = val.to_ne_bytes();
-            let pstart = memory_stack.len() - offset as usize;
-            let pend = pstart + val_bytes.len();
-            let pbytes = &mut memory_stack[pstart..pend];
-            pbytes.clone_from_slice(&val_bytes);
         } else {
             // Return return value must be on the stack otherwise it will cause
             // multithreading issues
