@@ -11,7 +11,7 @@ use tracing::log::trace;
 use wasmer_vbus::BusSpawnedProcess;
 use wasmer_wasi_types::{__wasi_signal_t, __wasi_exitcode_t, __WASI_CLOCK_MONOTONIC};
 
-use crate::{WasiEnv, syscalls::platform_clock_time_get};
+use crate::syscalls::platform_clock_time_get;
 
 /// Represents the ID of a WASI thread
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -176,6 +176,17 @@ impl WasiProcessId {
     }
 }
 
+impl From<i32> for WasiProcessId {
+    fn from(id: i32) -> Self {
+        Self(id as u32)
+    }
+}
+impl Into<i32> for WasiProcessId {
+    fn into(self) -> i32 {
+        self.0 as i32
+    }
+}
+
 impl From<u32> for WasiProcessId {
     fn from(id: u32) -> Self {
         Self(id)
@@ -225,7 +236,7 @@ pub struct WasiProcessInner
     /// Signals that will be triggered at specific intervals
     pub signal_intervals: HashMap<u8, WasiSignalInterval>,
     /// Represents all the process spun up as a bus process
-    pub bus_processes: HashMap<WasiProcessId, Box<BusSpawnedProcess<WasiEnv>>>,
+    pub bus_processes: HashMap<WasiProcessId, Box<BusSpawnedProcess>>,
     /// Indicates if the bus process can be reused
     pub bus_process_reuse: HashMap<Cow<'static, str>, WasiProcessId>,
 }

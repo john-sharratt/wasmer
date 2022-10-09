@@ -319,8 +319,8 @@ pub enum FsError {
     #[error("connection is not open")]
     NotConnected,
     /// The requested file or directory could not be found
-    #[error("entity not found")]
-    EntityNotFound,
+    #[error("entry not found")]
+    EntryNotFound,
     /// The requested device couldn't be accessed
     #[error("can't access device")]
     NoDevice,
@@ -361,7 +361,7 @@ impl From<io::Error> for FsError {
             io::ErrorKind::InvalidData => FsError::InvalidData,
             io::ErrorKind::InvalidInput => FsError::InvalidInput,
             io::ErrorKind::NotConnected => FsError::NotConnected,
-            io::ErrorKind::NotFound => FsError::EntityNotFound,
+            io::ErrorKind::NotFound => FsError::EntryNotFound,
             io::ErrorKind::PermissionDenied => FsError::PermissionDenied,
             io::ErrorKind::TimedOut => FsError::TimedOut,
             io::ErrorKind::UnexpectedEof => FsError::UnexpectedEof,

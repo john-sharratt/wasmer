@@ -241,11 +241,11 @@ impl<'a> MemoryView<'a> {
     }
 
     /// Copies the memory to another new memory object
-    pub fn copy_to_memory(&self, new_memory: &Self) -> Result<(), MemoryAccessError> {
+    pub fn copy_to_memory(&self, amount: u64, new_memory: &Self) -> Result<(), MemoryAccessError> {
         let mut offset = 0;
         let mut chunk = [0u8; 40960];
-        while offset < self.data_size() {
-            let remaining = self.data_size() - offset;
+        while offset < amount {
+            let remaining = amount - offset;
             let sublen = remaining.min(chunk.len() as u64) as usize;
             self.read(offset, &mut chunk[..sublen])?;
 

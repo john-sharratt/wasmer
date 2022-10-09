@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::{FileDescriptor, FsError, Result, VirtualFile};
+use std::borrow::Cow;
 use std::cmp;
 use std::convert::TryInto;
 use std::fmt;
@@ -95,6 +96,7 @@ impl VirtualFile for FileHandle {
         let inode = fs.storage.get(self.inode);
         match inode {
             Some(Node::File { file, .. }) => file.len().try_into().unwrap_or(0),
+            Some(Node::ReadOnlyFile { file, .. }) => file.len().try_into().unwrap_or(0),
             _ => 0,
         }
     }
@@ -112,6 +114,9 @@ impl VirtualFile for FileHandle {
                 file.buffer
                     .resize(new_size.try_into().map_err(|_| FsError::UnknownError)?, 0);
                 metadata.len = new_size;
+            },
+            Some(Node::ReadOnlyFile { .. }) => {
+                return Err(FsError::PermissionDenied)
             }
             _ => return Err(FsError::NotAFile),
         }
@@ -182,6 +187,7 @@ impl VirtualFile for FileHandle {
         let inode = fs.storage.get(self.inode);
         match inode {
             Some(Node::File { file, .. }) => Ok(file.buffer.len() - file.cursor),
+            Some(Node::ReadOnlyFile { file, .. }) => Ok(file.buffer.len() - file.cursor),
             _ => Err(FsError::NotAFile),
         }
     }
@@ -419,17 +425,16 @@ impl Read for FileHandle {
             })?;
 
         let inode = fs.storage.get_mut(self.inode);
-        let file = match inode {
-            Some(Node::File { file, .. }) => file,
+        match inode {
+            Some(Node::File { file, .. }) => file.read(buf),
+            Some(Node::ReadOnlyFile { file, .. }) => file.read(buf),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("inode `{}` doesn't match a file", self.inode),
                 ))
             }
-        };
-
-        file.read(buf)
+        }
     }
 
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -449,17 +454,16 @@ impl Read for FileHandle {
             })?;
 
         let inode = fs.storage.get_mut(self.inode);
-        let file = match inode {
-            Some(Node::File { file, .. }) => file,
+        match inode {
+            Some(Node::File { file, .. }) => file.read_to_end(buf),
+            Some(Node::ReadOnlyFile { file, .. }) => file.read_to_end(buf),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("inode `{}` doesn't match a file", self.inode),
                 ))
             }
-        };
-
-        file.read_to_end(buf)
+        }
     }
 
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
@@ -498,17 +502,16 @@ impl Read for FileHandle {
             })?;
 
         let inode = fs.storage.get_mut(self.inode);
-        let file = match inode {
-            Some(Node::File { file, .. }) => file,
+        match inode {
+            Some(Node::File { file, .. }) => file.read_exact(buf),
+            Some(Node::ReadOnlyFile { file, .. }) => file.read_exact(buf),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("inode `{}` doesn't match a file", self.inode),
                 ))
             }
-        };
-
-        file.read_exact(buf)
+        }
     }
 }
 
@@ -538,17 +541,16 @@ impl Seek for FileHandle {
             })?;
 
         let inode = fs.storage.get_mut(self.inode);
-        let file = match inode {
-            Some(Node::File { file, .. }) => file,
+        match inode {
+            Some(Node::File { file, .. }) => file.seek(position),
+            Some(Node::ReadOnlyFile { file, .. }) => file.seek(position),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("inode `{}` doesn't match a file", self.inode),
                 ))
             }
-        };
-
-        file.seek(position)
+        }
     }
 }
 
@@ -570,8 +572,17 @@ impl Write for FileHandle {
             })?;
 
         let inode = fs.storage.get_mut(self.inode);
-        let (file, metadata) = match inode {
-            Some(Node::File { file, metadata, .. }) => (file, metadata),
+        let bytes_written = match inode {
+            Some(Node::File { file, metadata, .. }) => {
+                let bytes_written = file.write(buf)?;
+                metadata.len = file.len().try_into().unwrap();
+                bytes_written
+            },
+            Some(Node::ReadOnlyFile { file, metadata, .. }) => {
+                let bytes_written = file.write(buf)?;
+                metadata.len = file.len().try_into().unwrap();
+                bytes_written
+            },
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -579,16 +590,26 @@ impl Write for FileHandle {
                 ))
             }
         };
-
-        let bytes_written = file.write(buf)?;
-
-        metadata.len = file.len().try_into().unwrap();
-
         Ok(bytes_written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        let mut fs =
+            self.filesystem.inner.try_write().map_err(|_| {
+                io::Error::new(io::ErrorKind::Other, "failed to acquire a write lock")
+            })?;
+
+        let inode = fs.storage.get_mut(self.inode);
+        match inode {
+            Some(Node::File { file, .. }) => file.flush(),
+            Some(Node::ReadOnlyFile { file, .. }) => file.flush(),
+            _ => {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("inode `{}` doesn't match a file", self.inode),
+                ))
+            }
+        }
     }
 
     #[allow(clippy::unused_io_amount)]
@@ -1001,6 +1022,107 @@ impl Write for File {
         self.cursor += buf.len();
 
         Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Read only file that uses copy-on-write
+#[derive(Debug)]
+pub(super) struct ReadOnlyFile {
+    buffer: Cow<'static, [u8]>,
+    cursor: usize,
+}
+
+impl ReadOnlyFile {
+    pub(super) fn new(buffer: Cow<'static, [u8]>) -> Self {
+        Self {
+            buffer,
+            cursor: 0,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+impl Read for ReadOnlyFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let max_to_read = cmp::min(self.buffer.len() - self.cursor, buf.len());
+        let data_to_copy = &self.buffer[self.cursor..][..max_to_read];
+
+        // SAFETY: `buf[..max_to_read]` and `data_to_copy` have the same size, due to
+        // how `max_to_read` is computed.
+        buf[..max_to_read].copy_from_slice(data_to_copy);
+
+        self.cursor += max_to_read;
+
+        Ok(max_to_read)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let data_to_copy = &self.buffer[self.cursor..];
+        let max_to_read = data_to_copy.len();
+
+        // `buf` is too small to contain the data. Let's resize it.
+        if max_to_read > buf.len() {
+            // Let's resize the capacity if needed.
+            if max_to_read > buf.capacity() {
+                buf.reserve_exact(max_to_read - buf.capacity());
+            }
+
+            // SAFETY: The space is reserved, and it's going to be
+            // filled with `copy_from_slice` below.
+            unsafe { buf.set_len(max_to_read) }
+        }
+
+        // SAFETY: `buf` and `data_to_copy` have the same size, see
+        // above.
+        buf.copy_from_slice(data_to_copy);
+
+        self.cursor += max_to_read;
+
+        Ok(max_to_read)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        if buf.len() > (self.buffer.len() - self.cursor) {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "not enough data available in file",
+            ));
+        }
+
+        let max_to_read = cmp::min(buf.len(), self.buffer.len() - self.cursor);
+        let data_to_copy = &self.buffer[self.cursor..][..max_to_read];
+
+        // SAFETY: `buf` and `data_to_copy` have the same size.
+        buf.copy_from_slice(data_to_copy);
+
+        self.cursor += data_to_copy.len();
+
+        Ok(())
+    }
+}
+
+impl Seek for ReadOnlyFile {
+    fn seek(&mut self, _position: io::SeekFrom) -> io::Result<u64> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "file is read-only",
+        ))
+    }
+}
+
+impl Write for ReadOnlyFile {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "file is read-only",
+        ))
     }
 
     fn flush(&mut self) -> io::Result<()> {

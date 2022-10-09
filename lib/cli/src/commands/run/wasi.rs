@@ -1,11 +1,11 @@
 use crate::utils::{parse_envvar, parse_mapdir};
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::Path};
 use std::path::PathBuf;
 use wasmer::{AsStoreMut, FunctionEnv, Instance, Module, RuntimeError, Value};
 use wasmer_wasi::{
     get_wasi_versions, import_object_for_all_wasi_versions, WasiEnv, WasiError,
-    WasiState, WasiVersion,
+    WasiState, WasiVersion, is_wasix_module,
 };
 
 use clap::Parser;
@@ -32,6 +32,10 @@ pub struct Wasi {
         parse(try_from_str = parse_envvar),
     )]
     env_vars: Vec<(String, String)>,
+
+    /// List of other containers this module depends on
+    #[clap(long = "inherit", name = "INHERIT", group = "wasi")]
+    inherits: Vec<String>,
 
     /// Enable experimental IO devices
     #[cfg(feature = "experimental-io-devices")]
@@ -80,8 +84,23 @@ impl Wasi {
         wasi_state_builder
             .args(args)
             .envs(self.env_vars.clone())
+            .inherits(self.inherits.clone())
             .preopen_dirs(self.pre_opened_directories.clone())?
             .map_dirs(self.mapped_dirs.clone())?;
+
+        if is_wasix_module(module) {
+            // WASIX modules run in a full sandbox with an emulated
+            // file system
+            wasi_state_builder.full_sandbox();
+
+            // If no pre-opened directories exist we open the root
+            if self.pre_opened_directories.is_empty() {
+                wasi_state_builder
+                    .preopen_dir(Path::new("/"))
+                    .unwrap()
+                    .map_dir(".", "/")?;
+            }
+        }
 
         #[cfg(feature = "experimental-io-devices")]
         {

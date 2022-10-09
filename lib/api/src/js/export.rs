@@ -5,10 +5,12 @@ use js_sys::Function;
 use js_sys::WebAssembly::{Memory, Table};
 use std::fmt;
 use wasm_bindgen::{JsCast, JsValue};
-use wasmer_types::{ExternType, FunctionType, GlobalType, MemoryType, TableType};
+use wasmer_types::{ExternType, FunctionType, GlobalType, MemoryType, TableType, Pages, WASM_PAGE_SIZE};
 use crate::MemoryView;
 #[cfg(feature="tracing")]
 use tracing::trace;
+
+pub use wasmer_types::MemoryError;
 
 /// Represents linear memory that is managed by the javascript runtime
 #[derive(Clone, Debug, PartialEq)]
@@ -39,8 +41,31 @@ impl VMMemory {
         trace!("memory copy started");
 
         let src = MemoryView::new_raw(&self.memory);
-        let dst = MemoryView::new_raw(&new_memory);
-        src.copy_to_memory(&dst)
+        let amount = src.data_size() as usize;
+        let mut dst = MemoryView::new_raw(&new_memory);
+        let dst_size = dst.data_size() as usize;
+
+        if amount > dst_size {
+            let delta = amount - dst_size;
+            let pages = ((delta - 1) / WASM_PAGE_SIZE) + 1;
+
+            let our_js_memory: &crate::js::externals::memory::JSMemory = JsCast::unchecked_from_js_ref(&new_memory);
+            our_js_memory.grow(pages as u32).map_err(|err| {
+                if err.is_instance_of::<js_sys::RangeError>() {
+                    let cur_pages = dst_size;
+                    MemoryError::CouldNotGrow {
+                        current: Pages(cur_pages as u32),
+                        attempted_delta: Pages(pages as u32),
+                    }
+                } else {
+                    MemoryError::Generic(err.as_string().unwrap())
+                }
+            })?;
+
+            dst = MemoryView::new_raw(&new_memory);
+        }
+
+        src.copy_to_memory(amount as u64, &dst)
             .map_err(|err| {
                 wasmer_types::MemoryError::Generic(format!("failed to copy the memory - {}", err))
             })?;

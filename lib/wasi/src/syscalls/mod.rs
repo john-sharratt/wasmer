@@ -4204,6 +4204,7 @@ pub fn getcwd<M: MemorySize>(
     let (_, cur_dir) = wasi_try!(state
         .fs
         .get_current_dir(inodes.deref_mut(), crate::VIRTUAL_ROOT_FD,));
+    trace!("wasi[{}]::getcwd(current_dir={})", ctx.data().pid(), cur_dir);
 
     let max_path_len = wasi_try_mem!(path_len.read(&memory));
     let path_slice = wasi_try_mem!(path.slice(&memory, max_path_len));
@@ -5368,12 +5369,20 @@ pub fn proc_exec<M: MemorySize>(
         }
     };
 
+    // Build a new store that will be passed to the thread
+    #[cfg(feature = "compiler")]
+    let engine = ctx.as_store_ref().engine().clone();
+    #[cfg(feature = "compiler")]
+    let new_store = Store::new(engine);
+    #[cfg(not(feature = "compiler"))]
+    let new_store = Store::default();
+
     // If we are in a vfork we need to first spawn a subprocess of this type
     // with the forked WasiEnv, then do a longjmp back to the vfork point.
     if let Some(mut vfork) = ctx.data_mut().vfork.take()
     {
         // We will need the child pid later
-        let child_pid = ctx.data().process.pid();
+        let mut child_pid = ctx.data().process.pid();
 
         // Restore the WasiEnv to the point when we vforked
         std::mem::swap(&mut vfork.env.inner, &mut ctx.data_mut().inner);
@@ -5393,16 +5402,18 @@ pub fn proc_exec<M: MemorySize>(
         // Spawn a new process with this current execution environment
         let bus = ctx.data().bus();
         let mut process = bus
-            .spawn_existing(wasi_env)
-            .spawn(name.as_str())
+            .spawn(wasi_env)
+            .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
             .map_err(|err| {
-                warn!("failed to execve as the process could not be spawned - {}", err);
-                WasiError::Exit(__WASI_ENOEXEC as __wasi_exitcode_t)
-            })?;
+                warn!("failed to execve as the process could not be spawned (vfork) - {}", err);
+                child_pid = WasiProcessId::from(-2i32);
+                err
+            })
+            .ok();
         
         // Add the process to the environment state
-        trace!("spawned sub-process (pid={})", child_pid.raw());
-        {
+        if let Some(process) = process {
+            trace!("spawned sub-process (pid={})", child_pid.raw());
             let mut inner = ctx.data().process.write();
             inner.bus_processes.insert(child_pid.into(), Box::new(process));
         };
@@ -5419,18 +5430,16 @@ pub fn proc_exec<M: MemorySize>(
             let offset = stack_base - pid_offset;
             if offset as usize > memory_stack.len() {
                 warn!("vfork failed - the return value (pid) is outside of the active part of the memory stack ({} vs {})", offset, memory_stack.len());
-                return Err(WasiError::Exit(__WASI_EFAULT as u32));
+            } else {            
+                // Update the memory stack with the new PID
+                let val_bytes = child_pid.raw().to_ne_bytes();
+                let pstart = memory_stack.len() - offset as usize;
+                let pend = pstart + val_bytes.len();
+                let pbytes = &mut memory_stack[pstart..pend];
+                pbytes.clone_from_slice(&val_bytes);
             }
-            
-            // Update the memory stack with the new PID
-            let val_bytes = child_pid.raw().to_ne_bytes();
-            let pstart = memory_stack.len() - offset as usize;
-            let pend = pstart + val_bytes.len();
-            let pbytes = &mut memory_stack[pstart..pend];
-            pbytes.clone_from_slice(&val_bytes);
         } else {
             warn!("vfork failed - the return value (pid) is not being returned on the stack - which is not supported");
-            return Err(WasiError::Exit(__WASI_EFAULT as u32));
         }
 
         // Jump back to the vfork point and current on execution
@@ -5464,10 +5473,10 @@ pub fn proc_exec<M: MemorySize>(
         //let pid = wasi_env.process.pid();
         let bus = ctx.data().bus();
         let mut process = bus
-            .spawn_existing(wasi_env)
-            .spawn(name.as_str())
+            .spawn(wasi_env)
+            .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
             .map_err(|err| {
-                warn!("failed to execve as the process could not be spawned - {}", err);
+                warn!("failed to execve as the process could not be spawned (fork) - {}", err);
                 WasiError::Exit(__WASI_ENOEXEC as __wasi_exitcode_t)
             })?;
 
@@ -5522,15 +5531,18 @@ pub fn proc_spawn<M: MemorySize>(
     ret_handles: WasmPtr<__wasi_bus_handles_t, M>,
 ) -> __bus_errno_t {
     let env = ctx.data();
-    let bus = env.runtime.bus();
     let control_plane = env.process.control_plane();
     let memory = env.memory_view(&ctx);
     let name = unsafe { get_input_str_bus!(&memory, name, name_len) };
     let args = unsafe { get_input_str_bus!(&memory, args, args_len) };
     let preopen = unsafe { get_input_str_bus!(&memory, preopen, preopen_len) };
     let working_dir = unsafe { get_input_str_bus!(&memory, working_dir, working_dir_len) };
-    let chroot = chroot == __WASI_BOOL_TRUE;
     debug!("wasi[{}]::process_spawn (name={})", ctx.data().pid(), name);
+
+    if chroot == __WASI_BOOL_TRUE {
+        warn!("wasi[{}]::chroot is not currently supported", ctx.data().pid());
+        return __BUS_EUNSUPPORTED;
+    }
 
     let args: Vec<_> = args.split(&['\n', '\r']).map(|a| a.to_string()).filter(|a| a.len() > 0).collect();
 
@@ -5540,88 +5552,146 @@ pub fn proc_spawn<M: MemorySize>(
         .filter(|a| a.len() > 0)
         .collect();
 
-    let conv_stdio_mode = |mode: __wasi_stdiomode_t| match mode {
-        __WASI_STDIO_MODE_PIPED => StdioMode::Piped,
-        __WASI_STDIO_MODE_INHERIT => StdioMode::Inherit,
-        __WASI_STDIO_MODE_LOG => StdioMode::Log,
-        __WASI_STDIO_MODE_NULL | _ => StdioMode::Null,
+    let (handles, ctx) = match proc_spawn_internal(
+        ctx,
+        name,
+        Some(args),
+        Some(preopen),
+        Some(working_dir),
+        stdin,
+        stdout,
+        stderr
+    ) {
+        Ok(a) => a,
+        Err(err) => {
+            return err;
+        }
     };
 
-    let mut process = wasi_try_bus!(bus
-        .spawn_new()
-        .chroot(chroot)
-        .args(args)
-        .preopen(preopen)
-        .stdin_mode(conv_stdio_mode(stdin))
-        .stdout_mode(conv_stdio_mode(stdout))
-        .stderr_mode(conv_stdio_mode(stderr))
-        .working_dir(working_dir)
-        .build()
-        .spawn(name.as_str())
-        .map_err(bus_error_into_wasi_err));
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+    wasi_try_mem_bus!(ret_handles.write(&memory, handles));
+    __BUS_ESUCCESS
+}
 
-    // Create the file descriptors used to access this process
-    let (fd_stdin, fd_stdout, fd_stderr) = {
-        let (memory, state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
+pub fn proc_spawn_internal(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    name: String,
+    args: Option<Vec<String>>,
+    preopen: Option<Vec<String>>,
+    working_dir: Option<String>,
+    stdin: __wasi_stdiomode_t,
+    stdout: __wasi_stdiomode_t,
+    stderr: __wasi_stdiomode_t,
+) -> Result<(__wasi_bus_handles_t, FunctionEnvMut<'_, WasiEnv>), __bus_errno_t>
+{
+    let env = ctx.data();
 
-        // Register the inodes for the stdio for this sub process
-        let fd_stdin = match process.stdin.take() {
-            Some(handle) => Some(
-                wasi_try_bus!(state.fs.create_fd(bus_write_rights(), bus_write_rights(), 0, 0,
-                    state.fs.create_inode_with_default_stat(
-                        inodes.deref_mut(),
-                        Kind::File { handle: Some(handle), path: "/dev/stdin".into(), fd: None },
-                        false,
-                        "stdin".into(),
-                    )
-                ).map_err(|_| __BUS_EINTERNAL))
-            ),
-            None => None,
-        };
-        let fd_stdout = match process.stdout.take() {
-            Some(handle) => Some(
-                wasi_try_bus!(state.fs.create_fd(bus_read_rights(), bus_read_rights(), 0, 0,
-                    state.fs.create_inode_with_default_stat(
-                        inodes.deref_mut(),
-                        Kind::File { handle: Some(handle), path: "/dev/stdout".into(), fd: None },
-                        false,
-                        "stdout".into(),
-                    )
-                ).map_err(|_| __BUS_EINTERNAL))
-            ),
-            None => None
-        };
-        let fd_stderr = match process.stderr.take() {
-            Some(handle) => Some(
-                wasi_try_bus!(state.fs.create_fd(bus_read_rights(), bus_read_rights(), 0, 0,
-                    state.fs.create_inode_with_default_stat(
-                        inodes.deref_mut(),
-                        Kind::File { handle: Some(handle), path: "/dev/stderr".into(), fd: None },
-                        false,
-                        "stderr".into(),
-                    )
-                ).map_err(|_| __BUS_EINTERNAL))
-            ),
-            None => None
-        };
-        (fd_stdin, fd_stdout, fd_stderr)
-    };    
+    // Build a new store that will be passed to the thread
+    #[cfg(feature = "compiler")]
+    let engine = ctx.as_store_ref().engine().clone();
+    #[cfg(feature = "compiler")]
+    let new_store = Store::new(engine);
+    #[cfg(not(feature = "compiler"))]
+    let new_store = Store::default();
 
-    let conv_stdio_fd = |a: Option<__wasi_fd_t>| match a {
-        Some(fd) => __wasi_option_fd_t {
-            tag: __WASI_OPTION_SOME,
-            fd: fd.into(),
-        },
-        None => __wasi_option_fd_t {
-            tag: __WASI_OPTION_NONE,
-            fd: 0,
-        },
+    // Fork the current environment and set the new arguments
+    let (mut child_env, handle) = ctx.data().fork();
+    if let Some(args) = args {
+        let mut child_state = env.state.fork();
+        child_state.args = args;
+        child_env.state = Arc::new(child_state);
+    }
+
+    // Take ownership of this child
+    ctx.data_mut().owned_handles.push(handle);
+    let env = ctx.data();
+
+    // Preopen
+    if let Some(preopen) = preopen {
+        if preopen.is_empty() == false {
+            for preopen in preopen {
+                warn!("wasi[{}]::preopens are not yet supported for spawned processes [{}]", ctx.data().pid(), preopen);
+            }
+            return Err(__BUS_EUNSUPPORTED);
+        }
+    }
+
+    // Change the current directory
+    if let Some(working_dir) = working_dir {
+        child_env.state.fs.set_current_dir(working_dir.as_str());
+    }
+
+    // Replace the STDIO
+    let (stdin, stdout, stderr) = {
+        let (_, child_state, mut child_inodes) = child_env.get_memory_and_wasi_state_and_inodes_mut(&new_store, 0);
+        let mut conv_stdio_mode = |mode: __wasi_stdiomode_t, fd: __wasi_fd_t| -> Result<__wasi_option_fd_t, __bus_errno_t>
+        {
+            match mode {
+                __WASI_STDIO_MODE_PIPED => {
+                    let (pipe1, pipe2) = WasiPipe::new();
+                    let inode1 = child_state.fs.create_inode_with_default_stat(
+                        child_inodes.deref_mut(),
+                        Kind::Pipe { pipe: pipe1 },
+                        false,
+                        "pipe".into(),
+                    );
+                    let inode2 = child_state.fs.create_inode_with_default_stat(
+                        child_inodes.deref_mut(),
+                        Kind::Pipe { pipe: pipe2 },
+                        false,
+                        "pipe".into(),
+                    );
+
+                    let rights = super::state::all_socket_rights();
+                    let pipe = ctx.data().state.fs.create_fd(rights, rights, 0, 0, inode1)?;
+                    child_state.fs.create_fd_ext(rights, rights, 0, 0, inode2, fd)?;
+                    
+                    trace!("wasi[{}]::fd_pipe (fd1={}, fd2={})", ctx.data().pid(), pipe, fd);
+                    Ok(
+                        __wasi_option_fd_t {
+                            tag: __WASI_OPTION_SOME,
+                            fd: pipe
+                        }
+                    )
+                },
+                __WASI_STDIO_MODE_INHERIT => {
+                    Ok(
+                        __wasi_option_fd_t {
+                            tag: __WASI_OPTION_NONE,
+                            fd: u32::MAX
+                        }
+                    )
+                },
+                __WASI_STDIO_MODE_LOG | __WASI_STDIO_MODE_NULL | _ => {
+                    child_state.fs.close_fd(child_inodes.deref(), fd);
+                    Ok(
+                        __wasi_option_fd_t {
+                            tag: __WASI_OPTION_NONE,
+                            fd: u32::MAX
+                        }
+                    )
+                },
+            }
+        };
+        let stdin = conv_stdio_mode(stdin, 0)?;
+        let stdout = conv_stdio_mode(stdout, 1)?;
+        let stderr = conv_stdio_mode(stderr, 2)?;
+        (stdin, stdout, stderr)
     };
+
+    // Create the new process
+    let bus = env.runtime.bus();
+    let mut process = bus
+        .spawn(child_env)
+        .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
+        .map_err(bus_error_into_wasi_err)?;
     
-    // Convert the stdio
-    let stdin = conv_stdio_fd(fd_stdin);
-    let stdout = conv_stdio_fd(fd_stdout);
-    let stderr = conv_stdio_fd(fd_stderr);
+    // Add the process to the environment state
+    let pid = env.process.pid();
+    ctx.data_mut().process.children.push(pid);
+    let env = ctx.data();
+    let memory = env.memory_view(&ctx);
 
     // Add the process to the environment state
     let pid = env.process.pid();
@@ -5640,10 +5710,7 @@ pub fn proc_spawn<M: MemorySize>(
         stdout,
         stderr,
     };
-
-    wasi_try_mem_bus!(ret_handles.write(&memory, handles));
-
-    __BUS_ESUCCESS
+    Ok((handles, ctx))
 }
 
 /// ### `proc_join()`
@@ -5688,10 +5755,33 @@ pub fn proc_join<M: MemorySize>(
                 break;
             }
         }
+        let env = ctx.data_mut();
+        env.process.children.retain(|a| *a != pid);
     } else {
-        debug!("process already terminated or not registered (pid={})", pid.raw());
-        let memory = env.memory_view(&ctx);
-        wasi_try_mem_ok!(exit_code_ptr.write(&memory, __WASI_ENOEXEC as u32));
+        if pid.raw() == u32::MAX {
+            let children = env.process.children.iter().map(|a| a.clone()).collect::<HashSet<_>>();
+            for child in children.iter() {
+                let process = env.process.control_plane().get_process(child.clone()).map(|a| a.clone());
+                if let Some(process) = process {
+                    loop {
+                        env.yield_now()?;
+                        if let Some(exit_code) = process.join(Duration::from_millis(50)) {
+                            trace!("child ({}) exited with {}", pid.raw(), exit_code);
+                            let env = ctx.data();
+                            let memory = env.memory_view(&ctx);
+                            wasi_try_mem_ok!(exit_code_ptr.write(&memory, exit_code));
+                            break;
+                        }
+                    }
+                }
+            }
+            let env = ctx.data_mut();
+            env.process.children.retain(|a| children.contains(a) == false);
+        } else {
+            debug!("process already terminated or not registered (pid={})", pid.raw());
+            let memory = env.memory_view(&ctx);
+            wasi_try_mem_ok!(exit_code_ptr.write(&memory, __WASI_ENOEXEC as u32));
+        }
     }
     Ok(__WASI_ESUCCESS)
 }
@@ -5774,7 +5864,6 @@ fn bus_open_internal<M: MemorySize>(
     ret_bid: WasmPtr<__wasi_bid_t, M>,
 ) -> Result<__bus_errno_t, WasiError> {
     let env = ctx.data();
-    let bus = env.runtime.bus();
     let memory = env.memory_view(&ctx);
     let name: Cow<'static, str> = name.into();
 
@@ -5789,40 +5878,27 @@ fn bus_open_internal<M: MemorySize>(
         }
     }
 
-    let mut process = bus
-        .spawn_new()
-        .reuse(reuse)
-        .stdin_mode(StdioMode::Null)
-        .stdout_mode(StdioMode::Null)
-        .stderr_mode(StdioMode::Log);
-
-    if let Some(instance) = instance {
-        process = process.remote_instance(instance);
-    }
-
-    if let Some(token) = token {
-        process = process.access_token(token);
-    }
-
-    // Spawn the process
-    let mut process = wasi_try_bus_ok!(process
-        .build()
-        .spawn(name.as_ref())
-        .map_err(bus_error_into_wasi_err));
-
-    // Add the process to the environment state
-    let pid = env.process.control_plane().reserve_pid();
-    ctx.data_mut().process.children.push(pid);
+    let (handles, ctx) = wasi_try_bus_ok!(proc_spawn_internal(
+        ctx,
+        name.to_string(),
+        None,
+        None,
+        None,
+        __WASI_STDIO_MODE_NULL,
+        __WASI_STDIO_MODE_NULL,
+        __WASI_STDIO_MODE_LOG
+    ));
     let env = ctx.data();
+    let memory = env.memory_view(&ctx);
+
+    let pid: WasiProcessId = handles.bid.into();
     let memory = env.memory_view(&ctx);
     {
         let mut inner = env.process.write();
-        inner.bus_processes.insert(pid, Box::new(process));
         inner.bus_process_reuse.insert(name, pid);
     };
 
     wasi_try_mem_bus_ok!(ret_bid.write(&memory, pid.into()));
-
     Ok(__BUS_ESUCCESS)
 }
 
@@ -5880,7 +5956,7 @@ pub fn bus_call<M: MemorySize>(
     let mut guard = env.process.read();
     let bid: WasiProcessId = bid.into();
     let process = if let Some(process) = {
-        guard.bus_processes.get(&bid).map(|p| p.clone())
+        guard.bus_processes.get(&bid)
     } { process } else {
         return Ok(__BUS_EBADHANDLE);
     };

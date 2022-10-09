@@ -19,6 +19,16 @@ pub struct FileSystem {
     pub(super) inner: Arc<RwLock<FileSystemInner>>,
 }
 
+impl FileSystem
+{
+    pub fn new_open_options_ext(&self) -> FileOpener {
+        let opener = FileOpener {
+            filesystem: self.clone(),
+        };
+        opener
+    }
+}
+
 impl crate::FileSystem for FileSystem {
     fn read_dir(&self, path: &Path) -> Result<ReadDir> {
         // Read lock.
@@ -320,7 +330,7 @@ impl FileSystemInner {
                     .iter()
                     .filter_map(|inode| self.storage.get(*inode))
                     .find(|node| node.name() == component.as_os_str())
-                    .ok_or(FsError::NotAFile)?,
+                    .ok_or(FsError::EntryNotFound)?,
                 _ => return Err(FsError::BaseNotDirectory),
             };
         }
@@ -336,7 +346,9 @@ impl FileSystemInner {
         // Ensure it is a directory.
         match self.storage.get(inode_of_parent) {
             Some(Node::Directory { .. }) => Ok(inode_of_parent),
-            _ => Err(FsError::BaseNotDirectory),
+            _ => {
+                Err(FsError::BaseNotDirectory)
+            },
         }
     }
 
@@ -390,8 +402,10 @@ impl FileSystemInner {
                 .find_map(|(nth, node)| match node {
                     Node::File { inode, name, .. } if name.as_os_str() == name_of_file => {
                         Some(Some((nth, *inode)))
-                    }
-
+                    },
+                    Node::ReadOnlyFile { inode, name, .. } if name.as_os_str() == name_of_file => {
+                        Some(Some((nth, *inode)))
+                    },
                     _ => None,
                 })
                 .or(Some(None))
@@ -419,8 +433,12 @@ impl FileSystemInner {
                         if name.as_os_str() == name_of =>
                     {
                         Some(Some((nth, *inode)))
-                    }
-
+                    },
+                    Node::ReadOnlyFile { inode, name, .. } | Node::Directory { inode, name, .. }
+                        if name.as_os_str() == name_of =>
+                    {
+                        Some(Some((nth, *inode)))
+                    },
                     _ => None,
                 })
                 .or(Some(None))
@@ -568,6 +586,7 @@ impl fmt::Debug for FileSystemInner {
                     inode = node.inode(),
                     ty = match node {
                         Node::File { .. } => "file",
+                        Node::ReadOnlyFile { .. } => "ro-file",
                         Node::Directory { .. } => "dir",
                     },
                     name = node.name().to_string_lossy(),

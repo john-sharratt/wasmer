@@ -83,6 +83,7 @@ wat = ["wasmer/wat"]
 compiler = [
     "wasmer-compiler/translator",
     "wasmer-compiler/compiler",
+    "wasmer-wasi/compiler"
 ]
 wasmer-artifact-create = ["compiler",
  "wasmer/wasmer-artifact-load",

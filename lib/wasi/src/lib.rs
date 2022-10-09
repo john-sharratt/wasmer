@@ -39,6 +39,12 @@ mod runtime;
 mod state;
 mod syscalls;
 mod utils;
+#[cfg(feature = "os")]
+pub mod fs;
+#[cfg(feature = "os")]
+pub mod wapm;
+#[cfg(feature = "os")]
+pub mod bin_factory;
 
 pub use crate::state::{
     Fd, Pipe, Stderr, Stdin, Stdout, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
@@ -49,6 +55,7 @@ pub use crate::syscalls::types;
 pub use crate::utils::{
     get_wasi_version, get_wasi_versions, is_wasi_module, is_wasix_module, WasiVersion,
 };
+use bin_factory::BinFactory;
 use bytes::BytesMut;
 #[allow(unused_imports)]
 #[cfg(feature = "js")]
@@ -57,7 +64,7 @@ use derivative::Derivative;
 use syscalls::platform_clock_time_get;
 use tracing::{trace, warn, error};
 use wasmer_vbus::SpawnEnvironmentIntrinsics;
-pub use wasmer_vbus::{UnsupportedVirtualBus, VirtualBus};
+pub use wasmer_vbus::{DefaultVirtualBus, VirtualBus};
 #[deprecated(since = "2.1.0", note = "Please use `wasmer_vfs::FsError`")]
 pub use wasmer_vfs::FsError as WasiFsError;
 #[deprecated(since = "2.1.0", note = "Please use `wasmer_vfs::VirtualFile`")]
@@ -240,7 +247,8 @@ pub struct WasiVFork {
 }
 
 /// The environment provided to the WASI imports.
-#[derive(Debug, Clone)]
+#[derive(Derivative, Clone)]
+#[derivative(Debug)]
 pub struct WasiEnv
 where
 {
@@ -257,6 +265,9 @@ where
     /// Shared state of the WASI system. Manages all the data that the
     /// executing WASI program can see.
     pub state: Arc<WasiState>,
+    /// Binary factory attached to this environment
+    #[derivative(Debug = "ignore")]
+    pub bin_factory: BinFactory,
     /// Inner functions and references that are loaded before the environment starts
     pub inner: Option<WasiEnvInner>,
     /// List of the handles that are owned by this context 
@@ -273,6 +284,10 @@ impl WasiEnv {
         let process = self.process.compute.new_process();        
         let handle = process.new_thread();
         
+        let state = Arc::new(self.state.fork());
+        let compiled_modules = self.bin_factory.compiled_modules.clone();
+        let cache_webc_dir = self.bin_factory.cache_webc_dir();
+
         (
             Self {
                 process: process,
@@ -280,7 +295,13 @@ impl WasiEnv {
                 vfork: None,
                 stack_base: self.stack_base,
                 stack_start: self.stack_start,
-                state: Arc::new(self.state.fork()),
+                bin_factory: BinFactory::new(
+                    state.clone(),
+                    compiled_modules,
+                    Some(cache_webc_dir),
+                    self.runtime.clone()
+                ),
+                state,
                 inner: None,
                 owned_handles: Vec::new(),
                 runtime: self.runtime.clone()
@@ -317,18 +338,24 @@ pub fn current_caller_id() -> WasiCallingId {
 }
 
 impl WasiEnv {
-    pub fn new(state: WasiState, process: WasiProcess, thread: WasiThreadHandle) -> Self {
+    pub fn new(state: WasiState, compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle) -> Self {
         let state = Arc::new(state);
-        let mut ret = Self::new_ext(state, process, thread.as_thread());
-        ret.owned_handles.push(thread);
-        ret
+        Self::new_ext(state, compiled_modules, process, thread, None, None)
     }
 
-    fn new_ext(state: Arc<WasiState>, process: WasiProcess, thread: WasiThread) -> Self {
-        let runtime = Arc::new(PluggableRuntimeImplementation::default());
-        let ret = Self {
+    pub fn new_ext(state: Arc<WasiState>, compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle, cache_webc_dir: Option<String>, runtime: Option<Arc<dyn WasiRuntimeImplementation + Send + Sync>>) -> Self {
+        let runtime = runtime.unwrap_or_else( || {
+            Arc::new(PluggableRuntimeImplementation::default())
+        });
+        let bin_factory = BinFactory::new(
+            state.clone(),
+            compiled_modules,
+            cache_webc_dir,
+            runtime.clone()
+        );
+        let mut ret = Self {
             process,
-            thread,
+            thread: thread.as_thread(),
             vfork: None,
             stack_base: DEFAULT_STACK_SIZE,
             stack_start: 0,
@@ -336,7 +363,9 @@ impl WasiEnv {
             inner: None,
             owned_handles: Vec::new(),
             runtime,
+            bin_factory
         };
+        ret.owned_handles.push(thread);
         ret
     }
     
@@ -418,7 +447,7 @@ impl WasiEnv {
         if let Some(forced_exit) = self.process.try_join() {
             return Err(WasiError::Exit(forced_exit));
         }
-        self.runtime.yield_now(current_caller_id())?;
+        self.runtime.sleep_now(current_caller_id(), 0)?;
         Ok(())
     }
 
@@ -444,7 +473,7 @@ impl WasiEnv {
                     break;
                 }
             };
-            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+            self.runtime.sleep_now(current_caller_id(), remaining.min(Duration::from_millis(10)).as_millis())?;
             self.yield_now_with_signals(store)?;
         }
         Ok(())
@@ -529,10 +558,6 @@ impl WasiEnv {
 impl SpawnEnvironmentIntrinsics
 for WasiEnv
 {
-    fn chroot(&self) -> bool {
-        self.state.chroot
-    }
-
     fn args(&self) -> &Vec<String> {
         &self.state.args
     }

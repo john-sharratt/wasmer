@@ -3,7 +3,7 @@ mod file_opener;
 mod filesystem;
 mod stdio;
 
-use file::{File, FileHandle};
+use file::{File, ReadOnlyFile, FileHandle};
 pub use file_opener::FileOpener;
 pub use filesystem::FileSystem;
 pub use stdio::{Stderr, Stdin, Stdout};
@@ -22,6 +22,12 @@ enum Node {
         file: File,
         metadata: Metadata,
     },
+    ReadOnlyFile {
+        inode: Inode,
+        name: OsString,
+        file: ReadOnlyFile,
+        metadata: Metadata,
+    },
     Directory {
         inode: Inode,
         name: OsString,
@@ -34,6 +40,7 @@ impl Node {
     fn inode(&self) -> Inode {
         *match self {
             Self::File { inode, .. } => inode,
+            Self::ReadOnlyFile { inode, .. } => inode,
             Self::Directory { inode, .. } => inode,
         }
     }
@@ -41,6 +48,7 @@ impl Node {
     fn name(&self) -> &OsStr {
         match self {
             Self::File { name, .. } => name.as_os_str(),
+            Self::ReadOnlyFile { name, .. } => name.as_os_str(),
             Self::Directory { name, .. } => name.as_os_str(),
         }
     }
@@ -48,6 +56,7 @@ impl Node {
     fn metadata(&self) -> &Metadata {
         match self {
             Self::File { metadata, .. } => metadata,
+            Self::ReadOnlyFile { metadata, .. } => metadata,
             Self::Directory { metadata, .. } => metadata,
         }
     }
@@ -55,6 +64,7 @@ impl Node {
     fn metadata_mut(&mut self) -> &mut Metadata {
         match self {
             Self::File { metadata, .. } => metadata,
+            Self::ReadOnlyFile { metadata, .. } => metadata,
             Self::Directory { metadata, .. } => metadata,
         }
     }
@@ -62,6 +72,7 @@ impl Node {
     fn set_name(&mut self, new_name: OsString) {
         match self {
             Self::File { name, .. } => *name = new_name,
+            Self::ReadOnlyFile { name, .. } => *name = new_name,
             Self::Directory { name, .. } => *name = new_name,
         }
     }

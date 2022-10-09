@@ -1,5 +1,7 @@
 //! Builder system for configuring a [`WasiState`] and creating it.
 
+use crate::bin_factory::CachedCompiledModules;
+use crate::fs::{RootFileSystemBuilder, ArcFileSystem, TmpFileSystem};
 use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane};
@@ -12,7 +14,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use thiserror::Error;
 use wasmer::AsStoreMut;
-use wasmer_vfs::{FsError, VirtualFile};
+use wasmer_vfs::{FsError, VirtualFile, FileSystem};
 
 /// Creates an empty [`WasiStateBuilder`].
 ///
@@ -45,7 +47,11 @@ pub struct WasiStateBuilder {
     args: Vec<String>,
     envs: Vec<(String, Vec<u8>)>,
     preopens: Vec<PreopenedDir>,
+    inherits: Vec<String>,
     vfs_preopens: Vec<String>,
+    full_sandbox: bool,
+    compiled_modules: Arc<CachedCompiledModules>,
+    cache_webc_dir: Option<String>,
     #[allow(clippy::type_complexity)]
     setup_fs_fn: Option<Box<dyn Fn(&mut WasiInodes, &mut WasiFs) -> Result<(), String> + Send>>,
     stdout_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
@@ -62,6 +68,7 @@ impl std::fmt::Debug for WasiStateBuilder {
             .field("args", &self.args)
             .field("envs", &self.envs)
             .field("preopens", &self.preopens)
+            .field("inherits", &self.inherits)
             .field("setup_fs_fn exists", &self.setup_fs_fn.is_some())
             .field("stdout_override exists", &self.stdout_override.is_some())
             .field("stderr_override exists", &self.stderr_override.is_some())
@@ -90,6 +97,8 @@ pub enum WasiStateCreationError {
     WasiFsSetupError(String),
     #[error(transparent)]
     FileSystemError(FsError),
+    #[error("wasi inherit error: `{0}`")]
+    WasiInheritError(String),
 }
 
 fn validate_mapped_dir_alias(alias: &str) -> Result<(), WasiStateCreationError> {
@@ -150,6 +159,26 @@ impl WasiStateBuilder {
             self.env(key, value);
         });
 
+        self
+    }
+
+    /// Adds a container this module inherits from
+    pub fn inherit<Name>(&mut self, inherit: Name) -> &mut Self
+    where
+        Name: AsRef<str>,
+    {
+        self.inherits.push(inherit.as_ref().to_string());
+        self
+    }
+
+    /// Adds a list of other containers this module inherits from
+    pub fn inherits<I>(&mut self, inherits: I) -> &mut Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        inherits.into_iter().for_each(|inherit| {
+            self.inherits.push(inherit);
+        });
         self
     }
 
@@ -286,6 +315,18 @@ impl WasiStateBuilder {
         Ok(self)
     }
 
+    /// Sets if this state will use a full sandbox
+    pub fn full_sandbox(&mut self) -> &mut Self {
+        self.full_sandbox = true;
+        self
+    }
+
+    /// Sets the caching WebC directory
+    pub fn cache_webc_dir(&mut self, cache_webc_dir: String) -> &mut Self {
+        self.cache_webc_dir = Some(cache_webc_dir);
+        self
+    }
+
     /// Overwrite the default WASI `stdout`, if you want to hold on to the
     /// original `stdout` use [`WasiFs::swap_file`] after building.
     pub fn stdout(&mut self, new_file: Box<dyn VirtualFile + Send + Sync + 'static>) -> &mut Self {
@@ -334,6 +375,14 @@ impl WasiStateBuilder {
         R: crate::WasiRuntimeImplementation + Send + Sync + 'static,
     {
         self.runtime_override = Some(Arc::new(runtime));
+        self
+    }
+
+    /// Sets the compiled modules to use with this builder (sharing the
+    /// cached modules is better for performance and memory consumption)
+    pub fn compiled_modules(&mut self, compiled_modules: &Arc<CachedCompiledModules>) -> &mut Self {
+        let mut compiled_modules = compiled_modules.clone();
+        std::mem::swap(&mut self.compiled_modules, &mut compiled_modules);
         self
     }
 
@@ -413,7 +462,20 @@ impl WasiStateBuilder {
             }
         }
 
-        let fs_backing = self.fs_override.take().unwrap_or_else(default_fs_backing);
+        // If we are running WASIX then we start a full sandbox FS
+        // otherwise we drop through to a default file system
+        let fs_backing = self.fs_override
+            .take()
+            .unwrap_or_else(|| -> Box<dyn FileSystem> {
+                if self.full_sandbox {
+                    Box::new(
+                        RootFileSystemBuilder::new()
+                            .build()
+                    )
+                } else {
+                    default_fs_backing()
+                }
+            });
 
         // self.preopens are checked in [`PreopenDirBuilder::build`]
         let inodes = RwLock::new(crate::state::WasiInodes {
@@ -464,7 +526,6 @@ impl WasiStateBuilder {
             inodes: Arc::new(inodes),
             args: self.args.clone(),
             preopen: self.vfs_preopens.clone(),
-            chroot: false,
             threading: Default::default(),
             futexs: Default::default(),
             clock_offset: Default::default(),
@@ -518,15 +579,59 @@ impl WasiStateBuilder {
         store: &mut impl AsStoreMut,
         control_plane: &WasiControlPlane,
     ) -> Result<WasiFunctionEnv, WasiStateCreationError> {
-        let state = self.build()?;
+        let state = Arc::new(self.build()?);
 
         let process = control_plane.new_process();
         let thread = process.new_thread();
 
-        let mut env = WasiEnv::new(state, process, thread);
-        if let Some(runtime) = self.runtime_override.as_ref() {
-            env.runtime = runtime.clone();
+        let env = WasiEnv::new_ext(
+            state,
+            self.compiled_modules.clone(),
+            process,
+            thread,
+            self.cache_webc_dir.clone(),
+            self.runtime_override.clone()
+        );
+        
+        // Load all the containers that we inherit from
+        for mut inherit in self.inherits.iter().rev().map(|a| a.as_str()) {
+            let inherit_store;
+            if inherit.starts_with("@") == false {
+                inherit_store = format!("@{}", inherit);
+                inherit = inherit_store.as_str();
+            }
+            if let Some(package) = env.bin_factory.get(inherit)
+            {
+                // We first need to copy any files in the package over to the temporary file system
+                if let Some(fs) = package.webc_fs {
+                    let mut union_fs = env.state.fs.union_fs.write().unwrap();
+                    union_fs.mount("/", "/", false, Box::new(ArcFileSystem::new(fs.clone())), None);
+                }
+
+                // Add all the commands as binaries in the bin folder
+                let commands = package.commands.read().unwrap();
+                if commands.is_empty() == false {
+                    let bin_fs = TmpFileSystem::new();
+                    let _ = bin_fs.create_dir(Path::new("/bin"));
+                    for command in commands.iter() {
+                        let path = format!("/bin/{}", command.name);
+                        let path = Path::new(path.as_str());
+                        if let Err(err) = bin_fs
+                            .new_open_options_ext()
+                            .insert_ro_file(path, command.atom.clone())
+                        {
+                            tracing::debug!("failed to add package [{}] command [{}] - {}", inherit, command.name, err);
+                            continue;
+                        }
+                    }
+                    let mut union_fs = env.state.fs.union_fs.write().unwrap();
+                    union_fs.mount("/", "/", false, Box::new(bin_fs), None);
+                }
+            } else {
+                return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", inherit)));
+            }
         }
+
         Ok(WasiFunctionEnv::new(store, env))
     }
 }

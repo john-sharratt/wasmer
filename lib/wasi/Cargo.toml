@@ -37,6 +37,20 @@ sha2 = { version = "0.10" }
 waker-fn = { version = "1.1" }
 cooked-waker = "^5"
 rand = "0.8"
+webc = { version = "0.1", path = "../../../pirita/crates/webc" }
+# used by feature='os'
+tokio = { version = "1", features = [ "sync", "macros" ], default_features = false, optional = true }
+async-trait = { version = "^0.1", optional = true }
+urlencoding = { version = "^2", optional = true }
+webc-vfs = { version = "0.1", path = "../../../pirita/crates/webc-vfs", optional = true }
+serde_derive = { version = "^1", optional = true }
+serde_json = { version = "^1", optional = true }
+serde_yaml = { version = "^0.8", optional = true }
+shellexpand = { version = "^2", optional = true }
+weezl = { version = "^0.1", optional = true }
+hex = { version = "^0.4", optional = true }
+# used by feature='host-reqwest'
+reqwest = { version = "0.11", features = ["blocking", "json"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "^0.2", default-features = false }
@@ -57,17 +71,22 @@ tracing-subscriber = { version = "^0.2" }
 [features]
 default = ["sys-default"]
 
-sys = ["wasmer/sys"]
-sys-default = ["wasmer/wat", "wasmer/compiler", "sys", "logging", "host-fs", "sys-poll", "sys-thread", "host-vnet", "host-threads" ]
+sys = ["wasmer/sys", "webc/mmap"]
+sys-default = ["wasmer/wat", "wasmer/compiler", "sys", "logging", "host-fs", "sys-poll", "sys-thread", "host-vnet", "host-threads", "host-reqwest", "os" ]
 sys-poll = []
-sys-thread = []
+sys-thread = ["tokio/rt", "tokio/rt-multi-thread"]
+
+compiler = []
 
 js = ["wasmer/js", "mem-fs", "wasmer-vfs/no-time", "getrandom/js", "chrono"]
 js-default = ["js", "wasmer/js-default"]
 test-js = ["js", "wasmer/js-default", "wasmer/wat"]
 
+os = [ "tokio", "async-trait", "urlencoding", "webc-vfs", "serde", "serde_derive", "serde_json", "serde_yaml", "shellexpand", "weezl", "hex" ]
+
 host-vnet = [ "wasmer-wasi-local-networking" ]
 host-threads = []
+host-reqwest = ["reqwest"]
 host-fs = ["wasmer-vfs/host-fs"]
 mem-fs = ["wasmer-vfs/mem-fs"]
 

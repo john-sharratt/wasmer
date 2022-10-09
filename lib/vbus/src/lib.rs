@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use thiserror::Error;
 
+use wasmer::Store;
 pub use wasmer_vfs::FileDescriptor;
 pub use wasmer_vfs::StdioMode;
 use wasmer_vfs::VirtualFile;
@@ -29,16 +30,11 @@ pub trait VirtualBus<T>: fmt::Debug + Send + Sync + 'static
 where T: SpawnEnvironmentIntrinsics,
       T: std::fmt::Debug + Send + Sync + 'static
 {
-    /// Spawns a brand new process
-    fn spawn_new(&self) -> NewSpawnBuilder<T> {
-        NewSpawnBuilder::new(Box::new(UnsupportedVirtualBusSpawner::default()))
-    }
-
     /// Starts a new WAPM sub process
-    fn spawn_existing(&self, env: T) -> SpawnOptions<T> {
+    fn spawn(&self, env: T) -> SpawnOptions<T> {
         SpawnOptions::new(
-            Box::new(UnsupportedVirtualBusSpawner::default()),
-            SpawnType::Existing { env }
+            Box::new(DefaultVirtualBusSpawner::default()),
+            env
         )
     }
 
@@ -48,141 +44,31 @@ where T: SpawnEnvironmentIntrinsics,
     }
 }
 
-pub struct NewSpawnBuilder<T>
-{
-    spawner: Box<dyn VirtualBusSpawner<T>>,
-    reuse: bool,
-    chroot: bool,
-    args: Vec<String>,
-    preopen: Vec<String>,
-    stdin_mode: StdioMode,
-    stdout_mode: StdioMode,
-    stderr_mode: StdioMode,
-    working_dir: Option<String>,
-    remote_instance: Option<String>,
-    access_token: Option<String>,
-}
-
-impl<T> NewSpawnBuilder<T>
-{
-    pub fn new(spawner: Box<dyn VirtualBusSpawner<T>>) -> Self {
-        Self {
-            spawner,
-            reuse: false,
-            chroot: false,
-            args: Vec::new(),
-            preopen: Vec::new(),
-            stdin_mode: StdioMode::Null,
-            stdout_mode: StdioMode::Null,
-            stderr_mode: StdioMode::Null,
-            working_dir: None,
-            remote_instance: None,
-            access_token: None,
-        }
-    }
-
-    pub fn reuse(mut self, reuse: bool) -> Self {
-        self.reuse = reuse;
-        self
-    }
-
-    pub fn chroot(mut self, chroot: bool) -> Self {
-        self.chroot = chroot;
-        self
-    }
-
-    pub fn args(mut self, args: Vec<String>) -> Self {
-        self.args = args;
-        self
-    }
-
-    pub fn preopen(mut self, preopen: Vec<String>) -> Self {
-        self.preopen = preopen;
-        self
-    }
-
-    pub fn working_dir(mut self, working_dir: String) -> Self {
-        self.working_dir = Some(working_dir);
-        self
-    }
-
-    pub fn stdin_mode(mut self, stdin_mode: StdioMode) -> Self {
-        self.stdin_mode = stdin_mode;
-        self
-    }
-
-    pub fn stdout_mode(mut self, stdout_mode: StdioMode) -> Self {
-        self.stdout_mode = stdout_mode;
-        self
-    }
-
-    pub fn stderr_mode(mut self, stderr_mode: StdioMode) -> Self {
-        self.stderr_mode = stderr_mode;
-        self
-    }
-
-    pub fn remote_instance(mut self, remote_instance: String) -> Self {
-        self.remote_instance = Some(remote_instance);
-        self
-    }
-
-    pub fn access_token(mut self, access_token: String) -> Self {
-        self.access_token = Some(access_token);
-        self
-    }
-
-    pub fn build(self) -> SpawnOptions<T>
-    where T: SpawnEnvironmentIntrinsics,
-          T: std::fmt::Debug + Send + Sync + 'static
-    {
-        let mut ret = SpawnOptions::new(self.spawner, SpawnType::New {
-            chroot: self.chroot,
-            args: self.args,
-            preopen: self.preopen,
-            stdin_mode: self.stdin_mode,
-            stdout_mode: self.stdout_mode,
-            stderr_mode: self.stderr_mode,
-            working_dir: self.working_dir
-        });
-        ret.conf.reuse = self.reuse;
-        ret.conf.access_token = self.access_token;
-        ret.conf.remote_instance = self.remote_instance;
-        ret
-    }
-}
-
 pub trait VirtualBusSpawner<T> {
     /// Spawns a new WAPM process by its name
-    fn spawn(&mut self, name: &str, config: &SpawnOptionsConfig<T>) -> Result<BusSpawnedProcess<T>>;
+    fn spawn(&self, name: &str, store: Store, config: SpawnOptionsConfig<T>, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
+        fallback.spawn(name, store, config, &mut UnsupportedVirtualBusSpawner::default())
+    }
 }
 
-#[derive(Debug, Clone)]
-pub enum SpawnType<T> {
-    New {
-        chroot: bool,
-        args: Vec<String>,
-        preopen: Vec<String>,
-        stdin_mode: StdioMode,
-        stdout_mode: StdioMode,
-        stderr_mode: StdioMode,
-        working_dir: Option<String>,
-    },
-    Existing {
-        env: T,
+#[derive(Debug, Default)]
+pub struct UnsupportedVirtualBusSpawner { }
+impl<T> VirtualBusSpawner<T>
+for UnsupportedVirtualBusSpawner {
+    fn spawn(&self, _name: &str, _store: Store, _config: SpawnOptionsConfig<T>, _fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
+        Err(VirtualBusError::Unsupported)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SpawnOptionsConfig<T> {
     reuse: bool,
-    spawn_type: SpawnType<T>,
+    env: T,
     remote_instance: Option<String>,
     access_token: Option<String>,
 }
 
 pub trait SpawnEnvironmentIntrinsics {
-    fn chroot(&self) -> bool;
-
     fn args(&self) -> &Vec<String>;
 
     fn preopen(&self) -> &Vec<String>;
@@ -203,64 +89,8 @@ where T: SpawnEnvironmentIntrinsics
         self.reuse
     }
 
-    pub fn spawn_type(&self) -> &SpawnType<T> {
-        &self.spawn_type
-    }
-
-    pub fn env(&self) -> Option<&T> {
-        match &self.spawn_type {
-            SpawnType::New { .. } => None,
-            SpawnType::Existing { env } => Some(&env)
-        }
-    }
-
-    pub fn chroot(&self) -> bool {
-        match &self.spawn_type {
-            SpawnType::New { chroot, .. } => *chroot,
-            SpawnType::Existing { env } => env.chroot()
-        }
-    }
-
-    pub fn args(&self) -> &Vec<String> {
-        match &self.spawn_type {
-            SpawnType::New { args, .. } => args,
-            SpawnType::Existing { env } => env.args()
-        }
-    }
-
-    pub fn preopen(&self) -> &Vec<String> {
-        match &self.spawn_type {
-            SpawnType::New { preopen, .. } => preopen,
-            SpawnType::Existing { env } => env.preopen()
-        }
-    }
-
-    pub fn stdin_mode(&self) -> StdioMode {
-        match &self.spawn_type {
-            SpawnType::New { stdin_mode, .. } => *stdin_mode,
-            SpawnType::Existing { env } => env.stdin_mode()
-        }
-    }
-
-    pub fn stdout_mode(&self) -> StdioMode {
-        match &self.spawn_type {
-            SpawnType::New { stdout_mode, .. } => *stdout_mode,
-            SpawnType::Existing { env } => env.stdout_mode()
-        }
-    }
-
-    pub fn stderr_mode(&self) -> StdioMode {
-        match &self.spawn_type {
-            SpawnType::New { stderr_mode, .. } => *stderr_mode,
-            SpawnType::Existing { env } => env.stderr_mode()
-        }
-    }
-
-    pub fn working_dir(&self) -> Option<String> {
-        match &self.spawn_type {
-            SpawnType::New { working_dir, .. } => working_dir.as_ref().map(|a| a.clone()),
-            SpawnType::Existing { env } => Some(env.working_dir())
-        }
+    pub fn env(&self) -> &T {
+        &self.env
     }
 
     pub fn remote_instance(&self) -> Option<&str> {
@@ -280,35 +110,33 @@ pub struct SpawnOptions<T> {
 impl<T> SpawnOptions<T>
 where T: SpawnEnvironmentIntrinsics
 {
-    pub fn new(spawner: Box<dyn VirtualBusSpawner<T>>, spawn_type: SpawnType<T>) -> Self {
+    pub fn new(spawner: Box<dyn VirtualBusSpawner<T>>, env: T) -> Self {
         Self {
             spawner,
             conf: SpawnOptionsConfig {
                 reuse: false,
-                spawn_type,
+                env,
                 remote_instance: None,
                 access_token: None,
             },
         }
     }
 
-    pub fn options(&mut self, options: SpawnOptionsConfig<T>) -> &mut Self {
+    pub fn options(mut self, options: SpawnOptionsConfig<T>) -> Self {
         self.conf = options;
         self
     }
 
     /// Spawns a new bus instance by its reference name
-    pub fn spawn(&mut self, name: &str) -> Result<BusSpawnedProcess<T>> {
-        self.spawner.spawn(name, &self.conf)
+    pub fn spawn(self, name: &str, store: Store, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess> {
+        self.spawner.spawn(name, store, self.conf, fallback)
     }
 }
 
 #[derive(Debug)]
-pub struct BusSpawnedProcess<T> {
+pub struct BusSpawnedProcess {
     /// Name of the spawned process
     pub name: String,
-    /// Configuration applied to this spawned thread
-    pub config: SpawnOptionsConfig<T>,
     /// Reference to the spawned instance
     pub inst: Box<dyn VirtualBusProcess + Sync + Unpin>,
     /// Virtual file used for stdin
@@ -326,12 +154,26 @@ pub trait VirtualBusScope: fmt::Debug + Send + Sync + 'static {
 
 pub trait VirtualBusInvokable: fmt::Debug + Send + Sync + 'static {
     /// Invokes a service within this instance
+    #[allow(unused_variables)]
     fn invoke(
         &self,
         topic_hash: u128,
         format: BusDataFormat,
         buf: Vec<u8>,
-    ) -> Box<dyn VirtualBusInvoked>;
+    ) -> Box<dyn VirtualBusInvoked> {
+        Box::new(UnsupportedBusInvoker::default())
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnsupportedBusInvoker { }
+
+impl VirtualBusInvoked
+for UnsupportedBusInvoker {
+    #[allow(unused_variables)]
+    fn poll_invoked(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Box<dyn VirtualBusInvocation + Sync>>> {
+        Poll::Ready(Err(VirtualBusError::Unsupported))
+    }
 }
 
 pub trait VirtualBusInvoked: fmt::Debug + Unpin + 'static {
@@ -519,27 +361,24 @@ pub enum BusDataFormat {
 }
 
 #[derive(Debug, Default)]
-pub struct UnsupportedVirtualBus
+pub struct DefaultVirtualBus
 {
 }
 
-impl<T> VirtualBus<T> for UnsupportedVirtualBus
+impl<T> VirtualBus<T> for DefaultVirtualBus
 where T: SpawnEnvironmentIntrinsics,
       T: std::fmt::Debug + Send + Sync + 'static
 {
 }
 
 #[derive(Debug, Default)]
-pub struct UnsupportedVirtualBusSpawner
+pub struct DefaultVirtualBusSpawner
 {
 }
 
-impl<T> VirtualBusSpawner<T> for UnsupportedVirtualBusSpawner
+impl<T> VirtualBusSpawner<T> for DefaultVirtualBusSpawner
 where T: std::fmt::Debug + Send + Sync + 'static
 {
-    fn spawn(&mut self, _name: &str, _config: &SpawnOptionsConfig<T>) -> Result<BusSpawnedProcess<T>> {
-        Err(VirtualBusError::Unsupported)
-    }
 }
 
 #[derive(Error, Copy, Clone, Debug, PartialEq, Eq)]
