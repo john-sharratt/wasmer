@@ -9,7 +9,7 @@ pub use filesystem::FileSystem;
 pub use stdio::{Stderr, Stdin, Stdout};
 
 use crate::Metadata;
-use std::{ffi::{OsStr, OsString}, sync::Arc, path::PathBuf};
+use std::{ffi::{OsStr, OsString}, sync::{Arc, Mutex}, path::PathBuf};
 
 type Inode = usize;
 const ROOT_INODE: Inode = 0;
@@ -38,7 +38,7 @@ enum Node {
     CustomFile {
         inode: Inode,
         name: OsString,
-        file: Box<dyn crate::VirtualFile + Send + Sync>,
+        file: Mutex<Box<dyn crate::VirtualFile + Send + Sync>>,
         metadata: Metadata,
     },
     Directory {

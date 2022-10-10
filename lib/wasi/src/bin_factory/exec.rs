@@ -41,7 +41,7 @@ for BinFactory
             None => {
                 let module = Module::new(&store, &binary.entry[..])
                     .map_err(|err| {
-                        error!("failed to compile module [{}] - {}", name, err);
+                        error!("failed to compile module [{}, len={}] - {}", name, binary.entry.len(), err);
                         VirtualBusError::CompileError
                     })?;
                 self.set_compiled_module(

@@ -285,8 +285,9 @@ impl WasiEnv {
         let handle = process.new_thread();
         
         let state = Arc::new(self.state.fork());
-        let compiled_modules = self.bin_factory.compiled_modules.clone();
-        let cache_webc_dir = self.bin_factory.cache_webc_dir();
+        
+        let mut bin_factory = self.bin_factory.clone();
+        bin_factory.state = state.clone();
 
         (
             Self {
@@ -295,12 +296,7 @@ impl WasiEnv {
                 vfork: None,
                 stack_base: self.stack_base,
                 stack_start: self.stack_start,
-                bin_factory: BinFactory::new(
-                    state.clone(),
-                    compiled_modules,
-                    Some(cache_webc_dir),
-                    self.runtime.clone()
-                ),
+                bin_factory,
                 state,
                 inner: None,
                 owned_handles: Vec::new(),

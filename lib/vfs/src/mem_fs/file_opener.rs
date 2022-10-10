@@ -164,7 +164,7 @@ impl FileOpener
                 let real_inode_of_file = fs_lock.storage.insert(Node::CustomFile {
                     inode: inode_of_file,
                     name: name_of_file,
-                    file,
+                    file: Mutex::new(file),
                     metadata: {
                         let time = time();
                         Metadata {
@@ -261,6 +261,7 @@ impl crate::FileOpener for FileOpener {
         let (inode_of_parent, maybe_inode_of_file, name_of_file) = 
             self.insert_inode(path)?;
         
+        let mut cursor = 0u64;
         let inode_of_file = match maybe_inode_of_file {
             // The file already exists, and a _new_ one _must_ be
             // created; it's not OK.
@@ -290,15 +291,11 @@ impl crate::FileOpener for FileOpener {
 
                         // Move the cursor to the end if needed.
                         if append {
-                            file.seek(io::SeekFrom::End(0))?;
-                        }
-                        // Otherwise, move the cursor to the start.
-                        else {
-                            file.seek(io::SeekFrom::Start(0))?;
+                            cursor = file.len() as u64;
                         }
                     },
 
-                    Some(Node::ReadOnlyFile { metadata, file, .. }) => {
+                    Some(Node::ReadOnlyFile { metadata, .. }) => {
                         // Update the accessed time.
                         metadata.accessed = time();
 
@@ -306,8 +303,6 @@ impl crate::FileOpener for FileOpener {
                         if truncate || append {
                             return Err(FsError::PermissionDenied);
                         }
-
-                        let _ = file.seek(io::SeekFrom::Start(0));
                     }
 
                     Some(Node::CustomFile { metadata, file, .. }) => {
@@ -315,6 +310,7 @@ impl crate::FileOpener for FileOpener {
                         metadata.accessed = time();
 
                         // Truncate if needed.
+                        let mut file = file.lock().unwrap();
                         if truncate {
                             file.set_len(0)?;
                             metadata.len = 0;
@@ -322,11 +318,7 @@ impl crate::FileOpener for FileOpener {
 
                         // Move the cursor to the end if needed.
                         if append {
-                            file.seek(io::SeekFrom::End(0))?;
-                        }
-                        // Otherwise, move the cursor to the start.
-                        else {
-                            file.seek(io::SeekFrom::Start(0))?;
+                            cursor = file.size() as u64;
                         }
                     }
 
@@ -421,6 +413,7 @@ impl crate::FileOpener for FileOpener {
             read,
             write || append || truncate,
             append,
+            cursor
         )))
     }
 }

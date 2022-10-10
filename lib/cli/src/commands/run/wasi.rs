@@ -1,5 +1,6 @@
 use crate::utils::{parse_envvar, parse_mapdir};
 use anyhow::Result;
+use std::collections::HashMap;
 use std::{collections::BTreeSet, path::Path};
 use std::path::PathBuf;
 use wasmer::{AsStoreMut, FunctionEnv, Instance, Module, RuntimeError, Value};
@@ -34,8 +35,12 @@ pub struct Wasi {
     env_vars: Vec<(String, String)>,
 
     /// List of other containers this module depends on
-    #[clap(long = "inherit", name = "INHERIT", group = "wasi")]
+    #[clap(long = "inherit", name = "INHERIT")]
     inherits: Vec<String>,
+
+    /// List of injected atoms
+    #[clap(long = "map-atom", name = "MAPATOM")]
+    map_atoms: Vec<String>,
 
     /// Enable experimental IO devices
     #[cfg(feature = "experimental-io-devices")]
@@ -80,11 +85,18 @@ impl Wasi {
     ) -> Result<(FunctionEnv<WasiEnv>, Instance)> {
         let args = args.iter().cloned().map(|arg| arg.into_bytes());
 
+        let map_atoms = self.map_atoms
+            .iter()
+            .map(|map| map.split_once("=").unwrap())
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect::<HashMap<_, _>>();
+
         let mut wasi_state_builder = WasiState::new(program_name);
         wasi_state_builder
             .args(args)
             .envs(self.env_vars.clone())
             .inherits(self.inherits.clone())
+            .map_atoms(map_atoms.clone())
             .preopen_dirs(self.pre_opened_directories.clone())?
             .map_dirs(self.mapped_dirs.clone())?;
 

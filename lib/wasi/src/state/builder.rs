@@ -7,6 +7,7 @@ use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_S
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane};
 use generational_arena::Arena;
 use rand::Rng;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -48,6 +49,8 @@ pub struct WasiStateBuilder {
     envs: Vec<(String, Vec<u8>)>,
     preopens: Vec<PreopenedDir>,
     inherits: Vec<String>,
+    #[cfg(feature = "sys")]
+    map_atoms: HashMap<String, PathBuf>,
     vfs_preopens: Vec<String>,
     full_sandbox: bool,
     compiled_modules: Arc<CachedCompiledModules>,
@@ -178,6 +181,33 @@ impl WasiStateBuilder {
     {
         inherits.into_iter().for_each(|inherit| {
             self.inherits.push(inherit);
+        });
+        self
+    }
+
+    /// Map an atom to a local binary
+    #[cfg(feature = "sys")]
+    pub fn map_atom<Name, Target>(&mut self, name: Name, target: Target) -> &mut Self
+    where
+        Name: AsRef<str>,
+        Target: AsRef<str>,
+    {
+        let path_buf = PathBuf::from(target.as_ref().to_string());
+        self.map_atoms.insert(name.as_ref().to_string(), path_buf);
+        self
+    }
+
+    /// Maps a series of atoms to the local binaries
+    #[cfg(feature = "sys")]
+    pub fn map_atoms<I, Name, Target>(&mut self, map_atoms: I) -> &mut Self
+    where
+        I: IntoIterator<Item = (Name, Target)>,
+        Name: AsRef<str>,
+        Target: AsRef<str>,
+    {
+        map_atoms.into_iter().for_each(|(name, target)| {
+            let path_buf = PathBuf::from(target.as_ref().to_string());
+            self.map_atoms.insert(name.as_ref().to_string(), path_buf);
         });
         self
     }
@@ -625,6 +655,30 @@ impl WasiStateBuilder {
                 }
             } else {
                 return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", inherit)));
+            }
+        }
+
+        // Load all the mapped atoms
+        #[cfg(feature = "sys")]
+        for (command, target) in self.map_atoms.iter() {
+            // Read the file
+            let file = std::fs::read(target)
+                .map_err(|err| {
+                    WasiStateCreationError::WasiInheritError(format!("failed to read local binary [{}] - {}", target.as_os_str().to_string_lossy(), err))
+                })?;
+            let file: Cow<'static, [u8]> = file.into();
+            
+            let root_fs = &env.state.fs.root_fs;
+            let _ = root_fs.create_dir(Path::new("/bin"));
+            
+            let path = format!("/bin/{}", command);
+            let path = Path::new(path.as_str());
+            if let Err(err) = root_fs
+                .new_open_options_ext()
+                .insert_ro_file(path, file)
+            {
+                tracing::debug!("failed to add atom command [{}] - {}", command, err);
+                continue;
             }
         }
 

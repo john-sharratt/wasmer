@@ -32,7 +32,7 @@ pub const DEFAULT_WEBC_PATH: &'static str = "~/.wasmer/webc";
 
 #[derive(Derivative, Clone)]
 pub struct BinFactory {
-    state: Arc<WasiState>,
+    pub(crate) state: Arc<WasiState>,
     cache: Arc<RwLock<HashMap<String, Option<BinaryPackage>>>>,
     cache_webc_dir: String,
     runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
