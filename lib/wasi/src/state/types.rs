@@ -107,6 +107,7 @@ pub fn bus_error_into_wasi_err(bus_error: VirtualBusError) -> __bus_errno_t {
     match bus_error {
         Serialization => __BUS_ESER,
         Deserialization => __BUS_EDES,
+        NotFound => __BUS_EWAPM,
         InvalidWapm => __BUS_EWAPM,
         FetchFailed => __BUS_EFETCH,
         CompileError => __BUS_ECOMPILE,

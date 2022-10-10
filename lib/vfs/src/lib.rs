@@ -18,7 +18,7 @@ pub mod mem_fs;
 
 pub type Result<T> = std::result::Result<T, FsError>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct FileDescriptor(usize);
 
@@ -223,6 +223,12 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable {
         true
     }
 
+    /// Returns a special file descriptor when opening this file rather than
+    /// generating a new one
+    fn get_special_fd(&self) -> Option<u32> {
+        None
+    }
+
     /// Used for polling.  Default returns `None` because this method cannot be implemented for most types
     /// Returns the underlying host fd
     fn get_fd(&self) -> Option<FileDescriptor> {
@@ -371,6 +377,39 @@ impl From<io::Error> for FsError {
             // if the following triggers, a new error type was added to this non-exhaustive enum
             _ => FsError::UnknownError,
         }
+    }
+}
+
+impl Into<io::Error> for FsError {
+    fn into(self) -> io::Error {
+        let kind = match self {
+            FsError::AddressInUse => io::ErrorKind::AddrInUse,
+            FsError::AddressNotAvailable => io::ErrorKind::AddrNotAvailable,
+            FsError::AlreadyExists => io::ErrorKind::AlreadyExists,
+            FsError::BrokenPipe => io::ErrorKind::BrokenPipe,
+            FsError::ConnectionAborted => io::ErrorKind::ConnectionAborted,
+            FsError::ConnectionRefused => io::ErrorKind::ConnectionRefused,
+            FsError::ConnectionReset => io::ErrorKind::ConnectionReset,
+            FsError::Interrupted => io::ErrorKind::Interrupted,
+            FsError::InvalidData => io::ErrorKind::InvalidData,
+            FsError::InvalidInput => io::ErrorKind::InvalidInput,
+            FsError::NotConnected => io::ErrorKind::NotConnected,
+            FsError::EntryNotFound => io::ErrorKind::NotFound,
+            FsError::PermissionDenied => io::ErrorKind::PermissionDenied,
+            FsError::TimedOut => io::ErrorKind::TimedOut,
+            FsError::UnexpectedEof => io::ErrorKind::UnexpectedEof,
+            FsError::WouldBlock => io::ErrorKind::WouldBlock,
+            FsError::WriteZero => io::ErrorKind::WriteZero,
+            FsError::IOError => io::ErrorKind::Other,
+            FsError::BaseNotDirectory => io::ErrorKind::Other,
+            FsError::NotAFile => io::ErrorKind::Other,
+            FsError::InvalidFd => io::ErrorKind::Other,
+            FsError::Lock => io::ErrorKind::Other,
+            FsError::NoDevice => io::ErrorKind::Other,
+            FsError::DirectoryNotEmpty => io::ErrorKind::Other,
+            FsError::UnknownError => io::ErrorKind::Other,
+        };
+        kind.into()
     }
 }
 

@@ -416,6 +416,9 @@ pub enum VirtualBusError {
     /// Call is unsupported
     #[error("unsupported")]
     Unsupported,
+    /// Not found
+    #[error("not found")]
+    NotFound,
     /// Bad request
     #[error("bad request")]
     BadRequest,

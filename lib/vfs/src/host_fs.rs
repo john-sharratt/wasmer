@@ -430,6 +430,10 @@ impl VirtualFile for File {
     fn bytes_available(&self) -> Result<usize> {
         Err(FsError::InvalidFd)
     }
+
+    fn get_special_fd(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -560,6 +564,10 @@ impl VirtualFile for Stdout {
     fn get_fd(&self) -> Option<FileDescriptor> {
         None
     }
+
+    fn get_special_fd(&self) -> Option<u32> {
+        Some(1)
+    }
 }
 
 /// A wrapper type around Stderr that implements `VirtualFile` and
@@ -668,6 +676,10 @@ impl VirtualFile for Stderr {
     fn get_fd(&self) -> Option<FileDescriptor> {
         None
     }
+
+    fn get_special_fd(&self) -> Option<u32> {
+        Some(2)
+    }
 }
 
 /// A wrapper type around Stdin that implements `VirtualFile` and
@@ -774,5 +786,9 @@ impl VirtualFile for Stdin {
     #[cfg(feature = "js")]
     fn get_fd(&self) -> Option<FileDescriptor> {
         None
+    }
+
+    fn get_special_fd(&self) -> Option<u32> {
+        Some(0)
     }
 }

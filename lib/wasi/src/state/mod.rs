@@ -33,7 +33,8 @@ pub use self::thread::*;
 pub use self::parking::*;
 use crate::WasiCallingId;
 use crate::WasiFunctionEnv;
-use crate::fs::UnionFileSystem;
+use crate::fs::PassthruFileSystem;
+use crate::fs::TmpFileSystem;
 use crate::syscalls::types::*;
 use crate::utils::map_io_err;
 use cooked_waker::ViaRawPointer;
@@ -350,13 +351,13 @@ pub struct WasiFs {
     //pub repo: Repo,
     pub preopen_fds: RwLock<Vec<u32>>,
     pub name_map: HashMap<String, Inode>,
-    pub fd_map: RwLock<HashMap<u32, Fd>>,
+    pub fd_map: Arc<RwLock<HashMap<u32, Fd>>>,
     pub next_fd: AtomicU32,
     inode_counter: AtomicU64,
     pub current_dir: Mutex<String>,
     pub is_wasix: AtomicBool,
-    #[cfg_attr(feature = "enable-serde", serde(skip, default = "default_fs_backing"))]
-    pub union_fs: Arc<RwLock<UnionFileSystem>>,
+    #[cfg_attr(feature = "enable-serde", serde(skip, default))]
+    pub root_fs: TmpFileSystem,
 }
 
 impl WasiFs
@@ -371,12 +372,12 @@ impl WasiFs
         Self {
             preopen_fds: RwLock::new(self.preopen_fds.read().unwrap().clone()),
             name_map: self.name_map.clone(),
-            fd_map: RwLock::new(fd_map),
+            fd_map: Arc::new(RwLock::new(fd_map)),
             next_fd: AtomicU32::new(self.next_fd.load(Ordering::Acquire)),
             inode_counter: AtomicU64::new(self.inode_counter.load(Ordering::Acquire)),
             current_dir: Mutex::new(self.current_dir.lock().unwrap().clone()),
             is_wasix: AtomicBool::new(self.is_wasix.load(Ordering::Acquire)),
-            union_fs: self.union_fs.clone(),
+            root_fs: self.root_fs.clone(),
         }
     }
 
@@ -394,7 +395,7 @@ impl WasiFs
 }
 
 /// Returns the default filesystem backing
-pub(crate) fn default_fs_backing() -> Box<dyn wasmer_vfs::FileSystem> {
+pub(crate) fn default_fs_backing() -> Box<dyn wasmer_vfs::FileSystem + Send + Sync> {
     cfg_if::cfg_if! {
         if #[cfg(feature = "host-fs")] {
             Box::new(wasmer_vfs::host_fs::FileSystem::default())
@@ -448,7 +449,7 @@ impl WasiFs {
         inodes: &mut WasiInodes,
         preopens: &[PreopenedDir],
         vfs_preopens: &[String],
-        fs_backing: Box<dyn FileSystem>,
+        fs_backing: Box<dyn FileSystem + Send + Sync>,
     ) -> Result<Self, String> {
         let (wasi_fs, root_inode) = Self::new_init(fs_backing, inodes)?;
 
@@ -499,7 +500,6 @@ impl WasiFs {
             wasi_fs.preopen_fds.write().unwrap().push(fd);
         }
 
-        let fs_backing = wasi_fs.union_fs.read().unwrap();
         for PreopenedDir {
             path,
             alias,
@@ -513,7 +513,8 @@ impl WasiFs {
                 &path.to_string_lossy(),
                 &alias
             );
-            let cur_dir_metadata = fs_backing
+            let cur_dir_metadata = wasi_fs
+                .root_fs
                 .metadata(path)
                 .map_err(|e| format!("Could not get metadata for file {:?}: {}", path, e))?;
 
@@ -619,7 +620,6 @@ impl WasiFs {
             }
             wasi_fs.preopen_fds.write().unwrap().push(fd);
         }
-        drop(fs_backing);
 
         Ok(wasi_fs)
     }
@@ -627,23 +627,26 @@ impl WasiFs {
     /// Private helper function to init the filesystem, called in `new` and
     /// `new_with_preopen`
     fn new_init(
-        fs_backing: Box<dyn FileSystem>,
+        fs_backing: Box<dyn FileSystem + Send + Sync>,
         inodes: &mut WasiInodes,
     ) -> Result<(Self, Inode), String> {
         debug!("Initializing WASI filesystem");
 
-        let mut union_fs = UnionFileSystem::new();
-        union_fs.mount("/", "/", false, fs_backing, None);
+        let fs_backing: Arc<dyn FileSystem + Send + Sync> =
+            Arc::new(PassthruFileSystem::new(fs_backing));
+
+        let root_fs = TmpFileSystem::new();
+        root_fs.union(&fs_backing);
 
         let wasi_fs = Self {
             preopen_fds: RwLock::new(vec![]),
             name_map: HashMap::new(),
-            fd_map: RwLock::new(HashMap::new()),
+            fd_map: Arc::new(RwLock::new(HashMap::new())),
             next_fd: AtomicU32::new(3),
             inode_counter: AtomicU64::new(1024),
             current_dir: Mutex::new("/".to_string()),
             is_wasix: AtomicBool::new(false),
-            union_fs: Arc::new(RwLock::new(union_fs)),
+            root_fs,
         };
         wasi_fs.create_stdin(inodes);
         wasi_fs.create_stdout(inodes);
@@ -951,7 +954,6 @@ impl WasiFs {
         let n_components = path.components().count();
 
         // TODO: rights checks
-        let union_fs = self.union_fs.read().unwrap();
         'path_iter: for (i, component) in path.components().enumerate() {
             // used to terminate symlink resolution properly
             let last_component = i + 1 == n_components;
@@ -991,7 +993,7 @@ impl WasiFs {
                                 cd.push(component);
                                 cd
                             };
-                            let metadata = union_fs
+                            let metadata = self.root_fs
                                 .symlink_metadata(&file)
                                 .ok()
                                 .ok_or(__WASI_ENOENT)?;
@@ -1689,7 +1691,6 @@ impl WasiFs {
         inodes: &WasiInodes,
         kind: &Kind,
     ) -> Result<__wasi_filestat_t, __wasi_errno_t> {
-        let union_fs = self.union_fs.read().unwrap();
         let md = match kind {
             Kind::File { handle, path, .. } => match handle {
                 Some(wf) => {
@@ -1703,11 +1704,11 @@ impl WasiFs {
                         ..__wasi_filestat_t::default()
                     })
                 }
-                None => union_fs
+                None => self.root_fs
                     .metadata(path)
                     .map_err(fs_error_into_wasi_err)?,
             },
-            Kind::Dir { path, .. } => union_fs
+            Kind::Dir { path, .. } => self.root_fs
                 .metadata(path)
                 .map_err(fs_error_into_wasi_err)?,
             Kind::Symlink {
@@ -1720,7 +1721,7 @@ impl WasiFs {
                 let guard = base_po_inode_v.read();
                 match guard.deref() {
                     Kind::Root { .. } => {
-                        union_fs.symlink_metadata(path_to_symlink).map_err(fs_error_into_wasi_err)?
+                        self.root_fs.symlink_metadata(path_to_symlink).map_err(fs_error_into_wasi_err)?
                     }
                     Kind::Dir { path, .. } => {
                         let mut real_path = path.clone();
@@ -1731,7 +1732,7 @@ impl WasiFs {
                         // TODO: adjust size of symlink, too
                         //      for all paths adjusted think about this
                         real_path.push(path_to_symlink);
-                        union_fs.symlink_metadata(&real_path).map_err(fs_error_into_wasi_err)?
+                        self.root_fs.symlink_metadata(&real_path).map_err(fs_error_into_wasi_err)?
                     }
                     // if this triggers, there's a bug in the symlink code
                     _ => unreachable!("Symlink pointing to something that's not a directory as its base preopened directory"),
@@ -1851,22 +1852,19 @@ impl WasiState {
         &self,
         path: P,
     ) -> Result<wasmer_vfs::ReadDir, __wasi_errno_t> {
-        let union_fs = self.fs.union_fs.read().unwrap();
-        union_fs
+        self.fs.root_fs
             .read_dir(path.as_ref())
             .map_err(fs_error_into_wasi_err)
     }
 
     pub(crate) fn fs_create_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), __wasi_errno_t> {
-        let union_fs = self.fs.union_fs.read().unwrap();
-        union_fs
+        self.fs.root_fs
             .create_dir(path.as_ref())
             .map_err(fs_error_into_wasi_err)
     }
 
     pub(crate) fn fs_remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), __wasi_errno_t> {
-        let union_fs = self.fs.union_fs.read().unwrap();
-        union_fs
+        self.fs.root_fs
             .remove_dir(path.as_ref())
             .map_err(fs_error_into_wasi_err)
     }
@@ -1876,15 +1874,13 @@ impl WasiState {
         from: P,
         to: Q,
     ) -> Result<(), __wasi_errno_t> {
-        let union_fs = self.fs.union_fs.read().unwrap();
-        union_fs
+        self.fs.root_fs
             .rename(from.as_ref(), to.as_ref())
             .map_err(fs_error_into_wasi_err)
     }
 
     pub(crate) fn fs_remove_file<P: AsRef<Path>>(&self, path: P) -> Result<(), __wasi_errno_t> {
-        let union_fs = self.fs.union_fs.read().unwrap();
-        union_fs
+        self.fs.root_fs
             .remove_file(path.as_ref())
             .map_err(fs_error_into_wasi_err)
     }
@@ -1893,7 +1889,7 @@ impl WasiState {
         OpenOptions::new(
             Box::new(
                 WasiStateOpener {
-                    union_fs: self.fs.union_fs.clone(),
+                    root_fs: self.fs.root_fs.clone(),
                 }
             )
         )
@@ -1902,7 +1898,7 @@ impl WasiState {
 
 struct WasiStateOpener
 {
-    union_fs: Arc<RwLock<UnionFileSystem>>
+    root_fs: TmpFileSystem
 }
 
 impl FileOpener
@@ -1913,8 +1909,7 @@ for WasiStateOpener
         path: &Path,
         conf: &wasmer_vfs::OpenOptionsConfig,
     ) -> wasmer_vfs::Result<Box<dyn VirtualFile + Send + Sync + 'static>> {
-        let union_fs = self.union_fs.read().unwrap();
-        let mut new_options = union_fs.new_open_options();
+        let mut new_options = self.root_fs.new_open_options();
         new_options.options(conf.clone());
         new_options.open(path)
     }

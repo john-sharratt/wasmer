@@ -19,6 +19,7 @@ pub mod windows;
 pub mod legacy;
 
 use self::types::*;
+use crate::bin_factory::ExitedProcess;
 use crate::state::{bus_error_into_wasi_err, wasi_error_into_bus_err, InodeHttpSocketType, WasiFutex, bus_write_rights, bus_read_rights, WasiBusCall, WasiThreadContext, WasiParkingLot, WasiDummyWaker, WasiThreadId, WasiProcessId};
 use crate::utils::map_io_err;
 use crate::{WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE, WasiVFork};
@@ -45,6 +46,7 @@ use std::mem::transmute;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicU32};
 use std::sync::{atomic::Ordering, Mutex};
@@ -58,8 +60,8 @@ use wasmer::{
     WasmPtr, WasmSlice, FunctionEnv, Instance, Module, Extern, MemoryView, TypedFunction, Store, Pages, Global, AsStoreRef,
     MemoryAccessError, OnCalledAction, MemoryError, Function
 };
-use wasmer_vbus::{FileDescriptor, StdioMode, BusDataFormat, BusInvocationEvent};
-use wasmer_vfs::{FsError, VirtualFile};
+use wasmer_vbus::{FileDescriptor, StdioMode, BusDataFormat, BusInvocationEvent, BusSpawnedProcess, VirtualBusError};
+use wasmer_vfs::{FsError, VirtualFile, FileSystem};
 use wasmer_vnet::{SocketHttpRequest, StreamSecurity};
 use wasmer_types::LinearMemory;
 
@@ -2379,7 +2381,7 @@ pub fn path_open<M: MemorySize>(
     }
     let path_string = unsafe { get_input_str!(&memory, path, path_len) };
 
-    debug!("=> fd: {}, path: {}", dirfd, &path_string);
+    debug!("=> dirfd: {}, path: {}", dirfd, &path_string);
 
     let path_arg = std::path::PathBuf::from(&path_string);
     let maybe_inode = state.fs.get_inode_at_path(
@@ -2449,6 +2451,19 @@ pub fn path_open<M: MemorySize>(
                 *handle = Some(wasi_try!(open_options
                     .open(&path)
                     .map_err(fs_error_into_wasi_err)));
+                
+                if let Some(handle) = handle {
+                    if let Some(special_fd) = handle.get_special_fd() {
+                        // We close the file descriptor so that when its closed
+                        // nothing bad happens
+                        let special_fd = wasi_try!(state.fs.clone_fd(special_fd));
+
+                        // some special files will return a constant FD rather than
+                        // actually open the file (/dev/stdin, /dev/stdout, /dev/stderr)
+                        wasi_try_mem!(fd_ref.write(special_fd));
+                        return __WASI_ESUCCESS;
+                    }
+                }
             }
             Kind::Buffer { .. } => unimplemented!("wasi::path_open for Buffer type files"),
             Kind::Dir { .. }
@@ -4270,10 +4285,15 @@ pub fn chdir<M: MemorySize>(
     path: WasmPtr<u8, M>,
     path_len: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}]::chdir", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
     let path = unsafe { get_input_str!(&memory, path, path_len) };
+    debug!("wasi[{}]::chdir [{}]", ctx.data().pid(), path);
+
+    // Check if the directory exists
+    if state.fs.root_fs.read_dir(Path::new(path.as_str())).is_err() {
+        return __WASI_ENOENT;
+    }
 
     state.fs.set_current_dir(path.as_str());
     __WASI_ESUCCESS
@@ -5408,12 +5428,19 @@ pub fn proc_exec<M: MemorySize>(
     #[cfg(not(feature = "compiler"))]
     let new_store = Store::default();
 
+    let conv_bus_err_to_exit_code = |err: VirtualBusError| match err {
+        VirtualBusError::AccessDenied => -1i32 as u32,
+        VirtualBusError::NotFound => -2i32 as u32,
+        VirtualBusError::Unsupported => -22i32 as u32,
+        VirtualBusError::BadRequest | _ => -8i32 as u32
+    };
+
     // If we are in a vfork we need to first spawn a subprocess of this type
     // with the forked WasiEnv, then do a longjmp back to the vfork point.
     if let Some(mut vfork) = ctx.data_mut().vfork.take()
     {
         // We will need the child pid later
-        let mut child_pid = ctx.data().process.pid();
+        let child_pid = ctx.data().process.pid();
 
         // Restore the WasiEnv to the point when we vforked
         std::mem::swap(&mut vfork.env.inner, &mut ctx.data_mut().inner);
@@ -5431,23 +5458,43 @@ pub fn proc_exec<M: MemorySize>(
         let stack_start = wasi_env.stack_start;
         
         // Spawn a new process with this current execution environment
+        let mut err_exit_code = -2i32 as u32;
         let bus = ctx.data().bus();
         let mut process = bus
             .spawn(wasi_env)
             .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
             .map_err(|err| {
+                err_exit_code = conv_bus_err_to_exit_code(err);
                 warn!("failed to execve as the process could not be spawned (vfork) - {}", err);
-                child_pid = WasiProcessId::from(-2i32);
                 err
             })
             .ok();
         
+        // If no process was created then we create a dummy one so that an
+        // exit code can be processed
+        let process = match process {
+            Some(a) => a,
+            None => {
+                BusSpawnedProcess {
+                    name: name.clone(),
+                    inst: Box::new(
+                        ExitedProcess {
+                            exit_code: err_exit_code
+                        }
+                    ),
+                    stdin: None,
+                    stdout: None,
+                    stderr: None
+                }
+            }
+        };
+        
         // Add the process to the environment state
-        if let Some(process) = process {
+        {
             trace!("spawned sub-process (pid={})", child_pid.raw());
             let mut inner = ctx.data().process.write();
             inner.bus_processes.insert(child_pid.into(), Box::new(process));
-        };
+        }
 
         let mut memory_stack = vfork.memory_stack;
         let rewind_stack = vfork.rewind_stack;
@@ -5508,7 +5555,8 @@ pub fn proc_exec<M: MemorySize>(
             .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
             .map_err(|err| {
                 warn!("failed to execve as the process could not be spawned (fork) - {}", err);
-                WasiError::Exit(__WASI_ENOEXEC as __wasi_exitcode_t)
+                let exit_code = conv_bus_err_to_exit_code(err);
+                WasiError::Exit(exit_code as __wasi_exitcode_t)
             })?;
 
         // Wait for the sub-process to exit itself - then we will exit

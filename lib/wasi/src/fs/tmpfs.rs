@@ -33,6 +33,10 @@ impl TmpFileSystem {
     pub fn new_open_options_ext(&self) -> mem_fs::FileOpener {
         self.fs.new_open_options_ext()
     }
+
+    pub fn union(&self, other: &Arc<dyn FileSystem + Send + Sync>) {
+        self.fs.union(other)
+    }
 }
 
 impl FileSystem for TmpFileSystem {

@@ -1,7 +1,7 @@
 //! Builder system for configuring a [`WasiState`] and creating it.
 
 use crate::bin_factory::CachedCompiledModules;
-use crate::fs::{RootFileSystemBuilder, ArcFileSystem, TmpFileSystem};
+use crate::fs::RootFileSystemBuilder;
 use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane};
@@ -57,7 +57,7 @@ pub struct WasiStateBuilder {
     stdout_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
     stderr_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
     stdin_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
-    fs_override: Option<Box<dyn wasmer_vfs::FileSystem>>,
+    fs_override: Option<Box<dyn wasmer_vfs::FileSystem + Send + Sync>>,
     runtime_override: Option<Arc<dyn crate::WasiRuntimeImplementation + Send + Sync + 'static>>,
 }
 
@@ -354,7 +354,7 @@ impl WasiStateBuilder {
     /// Sets the FileSystem to be used with this WASI instance.
     ///
     /// This is usually used in case a custom `wasmer_vfs::FileSystem` is needed.
-    pub fn set_fs(&mut self, fs: Box<dyn wasmer_vfs::FileSystem>) -> &mut Self {
+    pub fn set_fs(&mut self, fs: Box<dyn wasmer_vfs::FileSystem + Send + Sync>) -> &mut Self {
         self.fs_override = Some(fs);
 
         self
@@ -466,12 +466,10 @@ impl WasiStateBuilder {
         // otherwise we drop through to a default file system
         let fs_backing = self.fs_override
             .take()
-            .unwrap_or_else(|| -> Box<dyn FileSystem> {
+            .unwrap_or_else(|| -> Box<dyn FileSystem + Send + Sync> {
                 if self.full_sandbox {
-                    Box::new(
-                        RootFileSystemBuilder::new()
-                            .build()
-                    )
+                    RootFileSystemBuilder::new()
+                        .build()
                 } else {
                     default_fs_backing()
                 }
@@ -519,11 +517,12 @@ impl WasiStateBuilder {
             }
             wasi_fs
         };
+        let inodes = Arc::new(inodes);
 
         Ok(WasiState {
             fs: wasi_fs,
             secret: rand::thread_rng().gen::<[u8; 32]>(),
-            inodes: Arc::new(inodes),
+            inodes,
             args: self.args.clone(),
             preopen: self.vfs_preopens.clone(),
             threading: Default::default(),
@@ -604,19 +603,18 @@ impl WasiStateBuilder {
             {
                 // We first need to copy any files in the package over to the temporary file system
                 if let Some(fs) = package.webc_fs {
-                    let mut union_fs = env.state.fs.union_fs.write().unwrap();
-                    union_fs.mount("/", "/", false, Box::new(ArcFileSystem::new(fs.clone())), None);
+                    env.state.fs.root_fs.union(&fs);
                 }
 
                 // Add all the commands as binaries in the bin folder
                 let commands = package.commands.read().unwrap();
                 if commands.is_empty() == false {
-                    let bin_fs = TmpFileSystem::new();
-                    let _ = bin_fs.create_dir(Path::new("/bin"));
+                    let root_fs = &env.state.fs.root_fs;
+                    let _ = root_fs.create_dir(Path::new("/bin"));
                     for command in commands.iter() {
                         let path = format!("/bin/{}", command.name);
                         let path = Path::new(path.as_str());
-                        if let Err(err) = bin_fs
+                        if let Err(err) = root_fs
                             .new_open_options_ext()
                             .insert_ro_file(path, command.atom.clone())
                         {
@@ -624,8 +622,6 @@ impl WasiStateBuilder {
                             continue;
                         }
                     }
-                    let mut union_fs = env.state.fs.union_fs.write().unwrap();
-                    union_fs.mount("/", "/", false, Box::new(bin_fs), None);
                 }
             } else {
                 return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", inherit)));

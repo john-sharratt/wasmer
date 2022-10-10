@@ -29,7 +29,8 @@ for BinFactory
         }
 
         // Find the binary (or die trying) and make the spawn type
-        let binary = self.get(name).ok_or(VirtualBusError::BadRequest)?;
+        let binary = self.get(name)
+            .ok_or(VirtualBusError::NotFound)?;
         let module = self.get_compiled_module(
             &store,
             binary.hash().as_str(),
@@ -248,3 +249,30 @@ for SpawnedProcess {
 
 impl VirtualBusInvokable
 for SpawnedProcess { }
+
+#[derive(Debug)]
+pub struct ExitedProcess {
+    pub exit_code: u32,
+}
+
+impl VirtualBusProcess
+for ExitedProcess {
+    fn exit_code(&self) -> Option<u32>
+    {
+        Some(self.exit_code.clone())
+    }
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
+}
+
+impl VirtualBusScope
+for ExitedProcess {
+    fn poll_finished(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        VirtualBusProcess::poll_ready(self, cx)
+    }
+}
+
+impl VirtualBusInvokable
+for ExitedProcess { }
