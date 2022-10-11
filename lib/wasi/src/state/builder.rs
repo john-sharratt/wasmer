@@ -1,13 +1,14 @@
 //! Builder system for configuring a [`WasiState`] and creating it.
 
+#[cfg(feature = "os")]
 use crate::bin_factory::CachedCompiledModules;
+#[cfg(feature = "os")]
 use crate::fs::RootFileSystemBuilder;
 use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane};
 use generational_arena::Arena;
 use rand::Rng;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -53,7 +54,9 @@ pub struct WasiStateBuilder {
     map_atoms: HashMap<String, PathBuf>,
     vfs_preopens: Vec<String>,
     full_sandbox: bool,
+    #[cfg(feature = "os")]
     compiled_modules: Arc<CachedCompiledModules>,
+    #[cfg(feature = "os")] 
     cache_webc_dir: Option<String>,
     #[allow(clippy::type_complexity)]
     setup_fs_fn: Option<Box<dyn Fn(&mut WasiInodes, &mut WasiFs) -> Result<(), String> + Send>>,
@@ -352,6 +355,7 @@ impl WasiStateBuilder {
     }
 
     /// Sets the caching WebC directory
+    #[cfg(feature = "os")] 
     pub fn cache_webc_dir(&mut self, cache_webc_dir: String) -> &mut Self {
         self.cache_webc_dir = Some(cache_webc_dir);
         self
@@ -410,6 +414,7 @@ impl WasiStateBuilder {
 
     /// Sets the compiled modules to use with this builder (sharing the
     /// cached modules is better for performance and memory consumption)
+    #[cfg(feature = "os")]
     pub fn compiled_modules(&mut self, compiled_modules: &Arc<CachedCompiledModules>) -> &mut Self {
         let mut compiled_modules = compiled_modules.clone();
         std::mem::swap(&mut self.compiled_modules, &mut compiled_modules);
@@ -497,12 +502,15 @@ impl WasiStateBuilder {
         let fs_backing = self.fs_override
             .take()
             .unwrap_or_else(|| -> Box<dyn FileSystem + Send + Sync> {
+                #[cfg(feature = "os")]
                 if self.full_sandbox {
                     RootFileSystemBuilder::new()
                         .build()
                 } else {
                     default_fs_backing()
                 }
+                #[cfg(not(feature = "os"))]
+                default_fs_backing()
             });
 
         // self.preopens are checked in [`PreopenDirBuilder::build`]
@@ -615,20 +623,18 @@ impl WasiStateBuilder {
 
         let env = WasiEnv::new_ext(
             state,
+            #[cfg(feature = "os")]
             self.compiled_modules.clone(),
             process,
             thread,
+            #[cfg(feature = "os")] 
             self.cache_webc_dir.clone(),
             self.runtime_override.clone()
         );
         
         // Load all the containers that we inherit from
-        for mut inherit in self.inherits.iter().rev().map(|a| a.as_str()) {
-            let inherit_store;
-            if inherit.starts_with("@") == false {
-                inherit_store = format!("@{}", inherit);
-                inherit = inherit_store.as_str();
-            }
+        #[cfg(feature = "os")]
+        for inherit in self.inherits.iter().rev().map(|a| a.as_str()) {
             if let Some(package) = env.bin_factory.get(inherit)
             {
                 // We first need to copy any files in the package over to the temporary file system
@@ -666,7 +672,7 @@ impl WasiStateBuilder {
                 .map_err(|err| {
                     WasiStateCreationError::WasiInheritError(format!("failed to read local binary [{}] - {}", target.as_os_str().to_string_lossy(), err))
                 })?;
-            let file: Cow<'static, [u8]> = file.into();
+            let file: std::borrow::Cow<'static, [u8]> = file.into();
             
             let root_fs = &env.state.fs.root_fs;
             let _ = root_fs.create_dir(Path::new("/bin"));

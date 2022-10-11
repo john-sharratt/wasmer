@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+use crate::WasiRuntimeImplementation;
+
 // This ABI implements a general purpose web socket
 #[async_trait]
 pub trait WebSocketAbi {
@@ -7,7 +9,7 @@ pub trait WebSocketAbi {
 
     fn set_onclose(&mut self, callback: Box<dyn Fn() + Send + 'static>);
 
-    fn set_onmessage(&mut self, callback: Box<dyn Fn(Vec<u8>) + Send + 'static>);
+    fn set_onmessage(&mut self, callback: Box<dyn Fn(Vec<u8>) + Send + 'static>, runtime: &dyn WasiRuntimeImplementation);
 
     #[cfg(feature = "async_ws")]
     async fn send(&mut self, data: Vec<u8>) -> Result<(), String>;

@@ -22,7 +22,7 @@ getrandom = "0.2"
 wasmer-wasi-types = { path = "../wasi-types", version = "=3.0.0-beta" }
 wasmer = { path = "../api", version = "=3.0.0-beta", default-features = false }
 wasmer-types = { path = "../types", version = "=3.0.0-beta" }
-wasmer-vfs = { path = "../vfs", version = "=3.0.0-beta", default-features = false }
+wasmer-vfs = { path = "../vfs", version = "=3.0.0-beta", default-features = false, features = ["mem-fs"] }
 wasmer-vbus = { path = "../vbus", version = "=3.0.0-beta", default-features = false }
 wasmer-vnet = { path = "../vnet", version = "=3.0.0-beta", default-features = false }
 wasmer-wasi-local-networking = { path = "../wasi-local-networking", version = "=3.0.0-beta", default-features = false, optional = true }
@@ -49,8 +49,11 @@ serde_yaml = { version = "^0.8", optional = true }
 shellexpand = { version = "^2", optional = true }
 weezl = { version = "^0.1", optional = true }
 hex = { version = "^0.4", optional = true }
+term_size = { version = "0.3", optional = true }
 # used by feature='host-reqwest'
 reqwest = { version = "0.11", features = ["blocking", "json"], optional = true }
+# used by feature='host-termios'
+termios = { version = "0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "^0.2", default-features = false }
@@ -82,13 +85,14 @@ js = ["wasmer/js", "mem-fs", "wasmer-vfs/no-time", "getrandom/js", "chrono"]
 js-default = ["js", "wasmer/js-default"]
 test-js = ["js", "wasmer/js-default", "wasmer/wat"]
 
-os = [ "tokio", "async-trait", "urlencoding", "webc-vfs", "serde", "serde_derive", "serde_json", "serde_yaml", "shellexpand", "weezl", "hex" ]
+os = [ "tokio", "async-trait", "urlencoding", "webc-vfs", "serde", "serde_derive", "serde_json", "serde_yaml", "shellexpand", "weezl", "hex", "term_size" ]
 
 host-vnet = [ "wasmer-wasi-local-networking" ]
 host-threads = []
 host-reqwest = ["reqwest"]
 host-fs = ["wasmer-vfs/host-fs"]
-mem-fs = ["wasmer-vfs/mem-fs"]
+host-termios = ["termios"]
+mem-fs = []
 
 logging = ["tracing/log"]
 disable-all-logging = [

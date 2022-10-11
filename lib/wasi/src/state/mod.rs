@@ -33,8 +33,6 @@ pub use self::thread::*;
 pub use self::parking::*;
 use crate::WasiCallingId;
 use crate::WasiFunctionEnv;
-use crate::fs::PassthruFileSystem;
-use crate::fs::TmpFileSystem;
 use crate::syscalls::types::*;
 use crate::utils::map_io_err;
 use cooked_waker::ViaRawPointer;
@@ -357,7 +355,7 @@ pub struct WasiFs {
     pub current_dir: Mutex<String>,
     pub is_wasix: AtomicBool,
     #[cfg_attr(feature = "enable-serde", serde(skip, default))]
-    pub root_fs: TmpFileSystem,
+    pub root_fs: crate::fs::TmpFileSystem,
 }
 
 impl WasiFs
@@ -632,11 +630,14 @@ impl WasiFs {
     ) -> Result<(Self, Inode), String> {
         debug!("Initializing WASI filesystem");
 
-        let fs_backing: Arc<dyn FileSystem + Send + Sync> =
-            Arc::new(PassthruFileSystem::new(fs_backing));
+        let root_fs = {
+            let fs_backing: Arc<dyn FileSystem + Send + Sync> =
+                Arc::new(crate::fs::PassthruFileSystem::new(fs_backing));
 
-        let root_fs = TmpFileSystem::new();
-        root_fs.union(&fs_backing);
+            let root_fs = crate::fs::TmpFileSystem::new();
+            root_fs.union(&fs_backing);
+            root_fs
+        };
 
         let wasi_fs = Self {
             preopen_fds: RwLock::new(vec![]),
@@ -1425,7 +1426,7 @@ impl WasiFs {
         fd: __wasi_fd_t,
     ) -> Result<__wasi_prestat_t, __wasi_errno_t> {
         let inode = self.get_fd_inode(fd)?;
-        trace!("in prestat_fd {:?}", self.get_fd(fd)?);
+        //trace!("in prestat_fd {:?}", self.get_fd(fd)?);
 
         let inode_val = &inodes.arena[inode];
 
@@ -1898,7 +1899,7 @@ impl WasiState {
 
 struct WasiStateOpener
 {
-    root_fs: TmpFileSystem
+    root_fs: crate::fs::TmpFileSystem
 }
 
 impl FileOpener

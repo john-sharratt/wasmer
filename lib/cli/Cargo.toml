@@ -32,7 +32,7 @@ wasmer-compiler-singlepass = { version = "=3.0.0-beta", path = "../compiler-sing
 wasmer-compiler-llvm = { version = "=3.0.0-beta", path = "../compiler-llvm", optional = true }
 wasmer-emscripten = { version = "=3.0.0-beta", path = "../emscripten", optional = true }
 wasmer-vm = { version = "=3.0.0-beta", path = "../vm", features = [ "tracing" ] }
-wasmer-wasi = { version = "=3.0.0-beta", path = "../wasi", optional = true }
+wasmer-wasi = { version = "=3.0.0-beta", path = "../wasi", features = [], optional = true }
 wasmer-wasi-experimental-io-devices = { version = "=3.0.0-beta", path = "../wasi-experimental-io-devices", optional = true, features = ["link_external_libs"] }
 wasmer-wast = { version = "=3.0.0-beta", path = "../../tests/lib/wast", optional = true }
 wasmer-cache = { version = "=3.0.0-beta", path = "../cache", optional = true }
@@ -128,6 +128,7 @@ debug = ["fern", "log", "wasmer-wasi/logging"]
 disable-all-logging = ["wasmer-wasi/disable-all-logging"]
 headless = []
 headless-minimal = ["headless", "disable-all-logging", "wasi"]
+termios = ["wasmer-wasi/host-termios"]
 
 # Optional
 enable-serde = [

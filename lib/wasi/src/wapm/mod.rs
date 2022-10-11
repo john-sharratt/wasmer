@@ -24,6 +24,7 @@ mod manifest;
 use pirita::*;
 
 pub(crate) fn fetch_webc(cache_dir: &str, name: &str, runtime: &dyn WasiRuntimeImplementation) -> Option<BinaryPackage> {
+    let name = name.split_once(":").map(|a| a.0).unwrap_or_else(|| name);
     let url = format!(
         "{}{}",
         WAPM_WEBC_URL,

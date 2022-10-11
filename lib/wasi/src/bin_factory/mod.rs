@@ -111,8 +111,8 @@ impl BinFactory {
         }
 
         // Now try for the WebC
-        if name.starts_with("@") {
-            let wapm_name = &name[1..];
+        {
+            let wapm_name = name.split_once(":").map(|a| a.0).unwrap_or_else(|| name.as_str());
             let cache_webc_dir = self.cache_webc_dir.as_str();
             if let Some(data) = crate::wapm::fetch_webc(cache_webc_dir, wapm_name, self.runtime()) {
                 cache.insert(name, Some(data.clone()));

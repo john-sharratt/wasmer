@@ -3,7 +3,11 @@ use tracing::*;
 use wasmer_vfs::{FileSystem, VirtualFile};
 use wasmer_wasi_types::{__WASI_STDIN_FILENO, __WASI_STDOUT_FILENO, __WASI_STDERR_FILENO};
 
-use super::{TmpFileSystem, NullFile, SpecialFile};
+use super::TmpFileSystem;
+use super::{
+    NullFile,
+    SpecialFile
+};
 
 pub struct RootFileSystemBuilder
 {

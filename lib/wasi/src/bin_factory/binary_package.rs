@@ -9,8 +9,7 @@ use std::{
 
 use derivative::*;
 use wasmer_vfs::FileSystem;
-
-use crate::fs::{TmpFileSystem};
+use crate::fs::TmpFileSystem;
 
 use super::hash_of_binary;
 

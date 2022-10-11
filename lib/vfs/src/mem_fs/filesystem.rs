@@ -104,6 +104,10 @@ impl crate::FileSystem for FileSystem {
     }
 
     fn create_dir(&self, path: &Path) -> Result<()> {
+        if self.read_dir(path).is_ok() {
+            return Err(FsError::AlreadyExists);
+        }
+
         let (inode_of_parent, name_of_directory) = {
             // Read lock.
             let fs = self.inner.try_read().map_err(|_| FsError::Lock)?;

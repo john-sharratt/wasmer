@@ -28,18 +28,12 @@ compile_error!(
     "The `js` feature must be enabled only for the `wasm32` target (either `wasm32-unknown-unknown` or `wasm32-wasi`)."
 );
 
-#[cfg(all(feature = "host-fs", feature = "mem-fs"))]
-compile_error!(
-    "Cannot have both `host-fs` and `mem-fs` features enabled at the same time. Please, pick one."
-);
-
 #[macro_use]
 mod macros;
-mod runtime;
+pub mod runtime;
 mod state;
 mod syscalls;
 mod utils;
-#[cfg(feature = "os")]
 pub mod fs;
 #[cfg(feature = "os")]
 pub mod wapm;
@@ -47,7 +41,7 @@ pub mod wapm;
 pub mod bin_factory;
 
 pub use crate::state::{
-    Fd, Pipe, Stderr, Stdin, Stdout, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
+    Fd, Pipe, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
     WasiThreadId, WasiThreadHandle, WasiProcessId, WasiControlPlane, WasiThread, WasiProcess,
     WasiStateCreationError, ALL_RIGHTS, VIRTUAL_ROOT_FD,
 };
@@ -55,6 +49,7 @@ pub use crate::syscalls::types;
 pub use crate::utils::{
     get_wasi_version, get_wasi_versions, is_wasi_module, is_wasix_module, WasiVersion,
 };
+#[cfg(feature = "os")]
 use bin_factory::BinFactory;
 use bytes::BytesMut;
 #[allow(unused_imports)]
@@ -83,7 +78,8 @@ use wasmer::{
 };
 
 pub use runtime::{
-    PluggableRuntimeImplementation, WasiRuntimeImplementation, WasiThreadError, WasiTtyState
+    PluggableRuntimeImplementation, WasiRuntimeImplementation, WasiThreadError, WasiTtyState,
+    WebSocketAbi
 };
 use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
@@ -266,6 +262,7 @@ where
     /// executing WASI program can see.
     pub state: Arc<WasiState>,
     /// Binary factory attached to this environment
+    #[cfg(feature = "os")]
     #[derivative(Debug = "ignore")]
     pub bin_factory: BinFactory,
     /// Inner functions and references that are loaded before the environment starts
@@ -286,8 +283,12 @@ impl WasiEnv {
         
         let state = Arc::new(self.state.fork());
         
-        let mut bin_factory = self.bin_factory.clone();
-        bin_factory.state = state.clone();
+        #[cfg(feature = "os")]
+        let bin_factory = {
+            let mut bin_factory = self.bin_factory.clone();
+            bin_factory.state = state.clone();
+            bin_factory
+        };
 
         (
             Self {
@@ -296,6 +297,7 @@ impl WasiEnv {
                 vfork: None,
                 stack_base: self.stack_base,
                 stack_start: self.stack_start,
+                #[cfg(feature = "os")]
                 bin_factory,
                 state,
                 inner: None,
@@ -334,15 +336,16 @@ pub fn current_caller_id() -> WasiCallingId {
 }
 
 impl WasiEnv {
-    pub fn new(state: WasiState, compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle) -> Self {
+    pub fn new(state: WasiState, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle) -> Self {
         let state = Arc::new(state);
-        Self::new_ext(state, compiled_modules, process, thread, None, None)
+        Self::new_ext(state, #[cfg(feature = "os")] compiled_modules, process, thread, #[cfg(feature = "os")] None, None)
     }
 
-    pub fn new_ext(state: Arc<WasiState>, compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle, cache_webc_dir: Option<String>, runtime: Option<Arc<dyn WasiRuntimeImplementation + Send + Sync>>) -> Self {
+    pub fn new_ext(state: Arc<WasiState>, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle, #[cfg(feature = "os")] cache_webc_dir: Option<String>, runtime: Option<Arc<dyn WasiRuntimeImplementation + Send + Sync>>) -> Self {
         let runtime = runtime.unwrap_or_else( || {
             Arc::new(PluggableRuntimeImplementation::default())
         });
+        #[cfg(feature = "os")]
         let bin_factory = BinFactory::new(
             state.clone(),
             compiled_modules,
@@ -359,6 +362,7 @@ impl WasiEnv {
             inner: None,
             owned_handles: Vec::new(),
             runtime,
+            #[cfg(feature = "os")]
             bin_factory
         };
         ret.owned_handles.push(thread);
