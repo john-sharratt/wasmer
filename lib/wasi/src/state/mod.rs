@@ -33,6 +33,7 @@ pub use self::thread::*;
 pub use self::parking::*;
 use crate::WasiCallingId;
 use crate::WasiFunctionEnv;
+use crate::WasiRuntimeImplementation;
 use crate::syscalls::types::*;
 use crate::utils::map_io_err;
 use cooked_waker::ViaRawPointer;
@@ -620,6 +621,17 @@ impl WasiFs {
         }
 
         Ok(wasi_fs)
+    }
+
+    /// Converts a relative path into an absolute path
+    pub(crate) fn relative_path_to_absolute(&self, mut path: String) -> String
+    {
+        if path.starts_with("./") {
+            let current_dir = self.current_dir.lock().unwrap();
+            path = format!("{}{}", current_dir.as_str(), &path[1..]);
+            path = path.replace("//", "/").to_string();
+        }
+        path
     }
 
     /// Private helper function to init the filesystem, called in `new` and
@@ -2041,6 +2053,7 @@ pub struct WasiState {
     pub args: Vec<String>,
     pub envs: Vec<Vec<u8>>,
     pub preopen: Vec<String>,
+    pub(crate) runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync>
 }
 
 impl WasiState {
@@ -2136,6 +2149,7 @@ impl WasiState {
             args: self.args.clone(),
             envs: self.envs.clone(),
             preopen: self.preopen.clone(),
+            runtime: self.runtime.clone(),
         }
     }
 }

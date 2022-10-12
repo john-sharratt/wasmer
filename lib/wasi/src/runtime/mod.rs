@@ -24,9 +24,9 @@ mod ws;
 pub use ws::*;
 
 #[cfg(feature = "termios")]
-mod term;
+pub mod term;
 #[cfg(feature = "termios")]
-use term::*;
+pub use term::*;
 
 #[cfg(feature = "sys-thread")]
 use tokio::runtime::{

@@ -2,7 +2,7 @@
 #[cfg(unix)]
 use {
     libc::{
-        c_int, tcsetattr, termios, ECHO, ECHONL, ICANON, ICRNL, IEXTEN, ISIG, IXON, OPOST, TCSANOW,
+        c_int, tcsetattr, termios, ECHO, ECHOE, ECHONL, ICANON, ICRNL, IEXTEN, ISIG, IXON, OPOST, TCSANOW,
     },
     std::mem,
     std::os::unix::io::AsRawFd,
@@ -26,6 +26,7 @@ pub fn set_mode_no_echo() -> std::fs::File {
     let mut termios = unsafe { termios.assume_init() };
 
     termios.c_lflag &= !ECHO;
+    termios.c_lflag &= !ECHOE;
     termios.c_lflag &= !ISIG;
     termios.c_lflag &= !IXON;
     termios.c_lflag &= !IEXTEN;
@@ -46,6 +47,7 @@ pub fn set_mode_echo() -> std::fs::File {
     let mut termios = unsafe { termios.assume_init() };
 
     termios.c_lflag |= ECHO;
+    termios.c_lflag |= ECHOE;
     termios.c_lflag |= ISIG;
     termios.c_lflag |= IXON;
     termios.c_lflag |= IEXTEN;

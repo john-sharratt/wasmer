@@ -39,6 +39,8 @@ pub mod fs;
 pub mod wapm;
 #[cfg(feature = "os")]
 pub mod bin_factory;
+#[cfg(feature = "os")]
+pub mod builtins;
 
 pub use crate::state::{
     Fd, Pipe, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
@@ -338,13 +340,11 @@ pub fn current_caller_id() -> WasiCallingId {
 impl WasiEnv {
     pub fn new(state: WasiState, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle) -> Self {
         let state = Arc::new(state);
-        Self::new_ext(state, #[cfg(feature = "os")] compiled_modules, process, thread, #[cfg(feature = "os")] None, None)
+        let runtime = Arc::new(PluggableRuntimeImplementation::default());
+        Self::new_ext(state, #[cfg(feature = "os")] compiled_modules, process, thread, #[cfg(feature = "os")] None, runtime)
     }
 
-    pub fn new_ext(state: Arc<WasiState>, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle, #[cfg(feature = "os")] cache_webc_dir: Option<String>, runtime: Option<Arc<dyn WasiRuntimeImplementation + Send + Sync>>) -> Self {
-        let runtime = runtime.unwrap_or_else( || {
-            Arc::new(PluggableRuntimeImplementation::default())
-        });
+    pub fn new_ext(state: Arc<WasiState>, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle, #[cfg(feature = "os")] cache_webc_dir: Option<String>, runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync>) -> Self {
         #[cfg(feature = "os")]
         let bin_factory = BinFactory::new(
             state.clone(),

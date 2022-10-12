@@ -244,6 +244,9 @@ pub trait Upcastable {
     fn upcast_any_box(self: Box<Self>) -> Box<dyn Any>;
 }
 
+pub trait ClonableVirtualFile: VirtualFile + Clone {
+}
+
 impl<T: Any + fmt::Debug + 'static> Upcastable for T {
     #[inline]
     fn upcast_any_ref(&'_ self) -> &'_ dyn Any {

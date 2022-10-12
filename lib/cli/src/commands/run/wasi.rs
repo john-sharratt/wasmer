@@ -35,12 +35,12 @@ pub struct Wasi {
     env_vars: Vec<(String, String)>,
 
     /// List of other containers this module depends on
-    #[clap(long = "inherit", name = "INHERIT")]
-    inherits: Vec<String>,
+    #[clap(long = "use", name = "USE")]
+    uses: Vec<String>,
 
     /// List of injected atoms
-    #[clap(long = "map-atom", name = "MAPATOM")]
-    map_atoms: Vec<String>,
+    #[clap(long = "map-command", name = "MAPCMD")]
+    map_commands: Vec<String>,
 
     /// Enable experimental IO devices
     #[cfg(feature = "experimental-io-devices")]
@@ -85,7 +85,7 @@ impl Wasi {
     ) -> Result<(FunctionEnv<WasiEnv>, Instance)> {
         let args = args.iter().cloned().map(|arg| arg.into_bytes());
 
-        let map_atoms = self.map_atoms
+        let map_commands = self.map_commands
             .iter()
             .map(|map| map.split_once("=").unwrap())
             .map(|(a, b)| (a.to_string(), b.to_string()))
@@ -95,8 +95,8 @@ impl Wasi {
         wasi_state_builder
             .args(args)
             .envs(self.env_vars.clone())
-            .inherits(self.inherits.clone())
-            .map_atoms(map_atoms.clone())
+            .uses(self.uses.clone())
+            .map_commands(map_commands.clone())
             .preopen_dirs(self.pre_opened_directories.clone())?
             .map_dirs(self.mapped_dirs.clone())?;
 

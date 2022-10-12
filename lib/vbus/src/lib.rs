@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use thiserror::Error;
 
-use wasmer::Store;
+use wasmer::{Store, FunctionEnvMut};
 pub use wasmer_vfs::FileDescriptor;
 pub use wasmer_vfs::StdioMode;
 use wasmer_vfs::VirtualFile;
@@ -46,8 +46,8 @@ where T: SpawnEnvironmentIntrinsics,
 
 pub trait VirtualBusSpawner<T> {
     /// Spawns a new WAPM process by its name
-    fn spawn(&self, name: &str, store: Store, config: SpawnOptionsConfig<T>, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
-        fallback.spawn(name, store, config, &mut UnsupportedVirtualBusSpawner::default())
+    fn spawn<'a>(&self, ctx: &FunctionEnvMut<'a, T>, name: &str, store: Store, config: SpawnOptionsConfig<T>, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
+        fallback.spawn(ctx, name, store, config, &mut UnsupportedVirtualBusSpawner::default())
     }
 }
 
@@ -55,7 +55,7 @@ pub trait VirtualBusSpawner<T> {
 pub struct UnsupportedVirtualBusSpawner { }
 impl<T> VirtualBusSpawner<T>
 for UnsupportedVirtualBusSpawner {
-    fn spawn(&self, _name: &str, _store: Store, _config: SpawnOptionsConfig<T>, _fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
+    fn spawn<'a>(&self, _ctx: &FunctionEnvMut<'a, T>, _name: &str, _store: Store, _config: SpawnOptionsConfig<T>, _fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
         Err(VirtualBusError::Unsupported)
     }
 }
@@ -93,6 +93,10 @@ where T: SpawnEnvironmentIntrinsics
         &self.env
     }
 
+    pub fn env_mut(&mut self) -> &mut T {
+        &mut self.env
+    }
+
     pub fn remote_instance(&self) -> Option<&str> {
         self.remote_instance.as_deref()
     }
@@ -128,8 +132,8 @@ where T: SpawnEnvironmentIntrinsics
     }
 
     /// Spawns a new bus instance by its reference name
-    pub fn spawn(self, name: &str, store: Store, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess> {
-        self.spawner.spawn(name, store, self.conf, fallback)
+    pub fn spawn<'a>(self, ctx: &FunctionEnvMut<'a, T>, name: &str, store: Store, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess> {
+        self.spawner.spawn(ctx, name, store, self.conf, fallback)
     }
 }
 
@@ -145,6 +149,23 @@ pub struct BusSpawnedProcess {
     pub stdout: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
     /// Virtual file used for stderr
     pub stderr: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
+}
+
+impl BusSpawnedProcess
+{
+    pub fn exited_process(name: &str, exit_code: u32) -> Self {
+        Self {
+            name: name.to_string(),
+            inst: Box::new(
+                ExitedProcess {
+                    exit_code
+                }
+            ),
+            stdin: None,
+            stdout: None,
+            stderr: None
+        }
+    }
 }
 
 pub trait VirtualBusScope: fmt::Debug + Send + Sync + 'static {
@@ -444,3 +465,30 @@ pub enum VirtualBusError {
     #[error("unknown error found")]
     UnknownError,
 }
+
+#[derive(Debug)]
+pub struct ExitedProcess {
+    pub exit_code: u32,
+}
+
+impl VirtualBusProcess
+for ExitedProcess {
+    fn exit_code(&self) -> Option<u32>
+    {
+        Some(self.exit_code.clone())
+    }
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
+}
+
+impl VirtualBusScope
+for ExitedProcess {
+    fn poll_finished(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        VirtualBusProcess::poll_ready(self, cx)
+    }
+}
+
+impl VirtualBusInvokable
+for ExitedProcess { }

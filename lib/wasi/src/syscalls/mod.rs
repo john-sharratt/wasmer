@@ -20,7 +20,6 @@ pub mod legacy;
 
 use self::types::*;
 #[cfg(feature = "os")]
-use crate::bin_factory::ExitedProcess;
 use crate::state::{bus_error_into_wasi_err, wasi_error_into_bus_err, InodeHttpSocketType, WasiFutex, bus_write_rights, bus_read_rights, WasiBusCall, WasiThreadContext, WasiParkingLot, WasiDummyWaker, WasiThreadId, WasiProcessId};
 use crate::utils::map_io_err;
 use crate::{WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE, WasiVFork};
@@ -1993,8 +1992,14 @@ pub fn path_create_directory<M: MemorySize>(
     if !has_rights(working_dir.rights, __WASI_RIGHT_PATH_CREATE_DIRECTORY) {
         return __WASI_EACCES;
     }
-    let path_string = unsafe { get_input_str!(&memory, path, path_len) };
+    let mut path_string = unsafe { get_input_str!(&memory, path, path_len) };
     debug!("=> fd: {}, path: {}", fd, &path_string);
+    
+    // Convert relative paths into absolute paths
+    if path_string.starts_with("./") {
+        path_string = ctx.data().state.fs.relative_path_to_absolute(path_string);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), path_string);        
+    }
 
     let path = std::path::PathBuf::from(&path_string);
     let path_vec = wasi_try!(path
@@ -2109,11 +2114,17 @@ pub fn path_filestat_get<M: MemorySize>(
     path_len: M::Offset,
     buf: WasmPtr<__wasi_filestat_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}]::path_filestat_get (fd={})", ctx.data().pid(), fd);
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
-    let path_string = unsafe { get_input_str!(&memory, path, path_len) };
+    let mut path_string = unsafe { get_input_str!(&memory, path, path_len) };
+    debug!("wasi[{}]::path_filestat_get (fd={}, path={})", ctx.data().pid(), fd, path_string);
+
+    // Convert relative paths into absolute paths
+    if path_string.starts_with("./") {
+        path_string = ctx.data().state.fs.relative_path_to_absolute(path_string);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), path_string);        
+    }
 
     let stat = wasi_try!(path_filestat_get_internal(
         &memory,
@@ -2156,8 +2167,7 @@ pub fn path_filestat_get_internal(
     if !has_rights(root_dir.rights, __WASI_RIGHT_PATH_FILESTAT_GET) {
         return Err(__WASI_EACCES);
     }
-    debug!("=> base_fd: {}, path: {}", fd, path_string);
-
+    
     let file_inode = state.fs.get_inode_at_path(
         inodes,
         fd,
@@ -2214,8 +2224,14 @@ pub fn path_filestat_set_times<M: MemorySize>(
         return __WASI_EINVAL;
     }
 
-    let path_string = unsafe { get_input_str!(&memory, path, path_len) };
+    let mut path_string = unsafe { get_input_str!(&memory, path, path_len) };
     debug!("=> base_fd: {}, path: {}", fd, &path_string);
+
+    // Convert relative paths into absolute paths
+    if path_string.starts_with("./") {
+        path_string = ctx.data().state.fs.relative_path_to_absolute(path_string);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), path_string);        
+    }
 
     let file_inode = wasi_try!(state.fs.get_inode_at_path(
         inodes.deref_mut(),
@@ -2283,8 +2299,8 @@ pub fn path_link<M: MemorySize>(
     }
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
-    let old_path_str = unsafe { get_input_str!(&memory, old_path, old_path_len) };
-    let new_path_str = unsafe { get_input_str!(&memory, new_path, new_path_len) };
+    let mut old_path_str = unsafe { get_input_str!(&memory, old_path, old_path_len) };
+    let mut new_path_str = unsafe { get_input_str!(&memory, new_path, new_path_len) };
     let source_fd = wasi_try!(state.fs.get_fd(old_fd));
     let target_fd = wasi_try!(state.fs.get_fd(new_fd));
     debug!(
@@ -2297,6 +2313,10 @@ pub fn path_link<M: MemorySize>(
     {
         return __WASI_EACCES;
     }
+
+    // Convert relative paths into absolute paths
+    old_path_str = ctx.data().state.fs.relative_path_to_absolute(old_path_str);
+    new_path_str = ctx.data().state.fs.relative_path_to_absolute(new_path_str);
 
     let source_inode = wasi_try!(state.fs.get_inode_at_path(
         inodes.deref_mut(),
@@ -2402,9 +2422,15 @@ pub fn path_open<M: MemorySize>(
     if !has_rights(working_dir.rights, __WASI_RIGHT_PATH_OPEN) {
         return __WASI_EACCES;
     }
-    let path_string = unsafe { get_input_str!(&memory, path, path_len) };
+    let mut path_string = unsafe { get_input_str!(&memory, path, path_len) };
 
     debug!("=> dirfd: {}, path: {}", dirfd, &path_string);
+
+    // Convert relative paths into absolute paths
+    if path_string.starts_with("./") {
+        path_string = ctx.data().state.fs.relative_path_to_absolute(path_string);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), path_string);        
+    }
 
     let path_arg = std::path::PathBuf::from(&path_string);
     let maybe_inode = state.fs.get_inode_at_path(
@@ -2632,7 +2658,14 @@ pub fn path_readlink<M: MemorySize>(
     if !has_rights(base_dir.rights, __WASI_RIGHT_PATH_READLINK) {
         return __WASI_EACCES;
     }
-    let path_str = unsafe { get_input_str!(&memory, path, path_len) };
+    let mut path_str = unsafe { get_input_str!(&memory, path, path_len) };
+
+    // Convert relative paths into absolute paths
+    if path_str.starts_with("./") {
+        path_str = ctx.data().state.fs.relative_path_to_absolute(path_str);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), path_str);
+    }
+
     let inode = wasi_try!(state
         .fs
         .get_inode_at_path(inodes.deref_mut(), dir_fd, &path_str, false));
@@ -2678,7 +2711,13 @@ pub fn path_remove_directory<M: MemorySize>(
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
 
     let base_dir = wasi_try!(state.fs.get_fd(fd));
-    let path_str = unsafe { get_input_str!(&memory, path, path_len) };
+    let mut path_str = unsafe { get_input_str!(&memory, path, path_len) };
+
+    // Convert relative paths into absolute paths
+    if path_str.starts_with("./") {
+        path_str = ctx.data().state.fs.relative_path_to_absolute(path_str);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), path_str);
+    }
 
     let inode = wasi_try!(state
         .fs
@@ -2766,9 +2805,11 @@ pub fn path_rename<M: MemorySize>(
     );
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
-    let source_str = unsafe { get_input_str!(&memory, old_path, old_path_len) };
+    let mut source_str = unsafe { get_input_str!(&memory, old_path, old_path_len) };
+    source_str = ctx.data().state.fs.relative_path_to_absolute(source_str);
     let source_path = std::path::Path::new(&source_str);
-    let target_str = unsafe { get_input_str!(&memory, new_path, new_path_len) };
+    let mut target_str = unsafe { get_input_str!(&memory, new_path, new_path_len) };
+    target_str = ctx.data().state.fs.relative_path_to_absolute(target_str);
     let target_path = std::path::Path::new(&target_str);
     debug!("=> rename from {} to {}", &source_str, &target_str);
 
@@ -2945,8 +2986,10 @@ pub fn path_symlink<M: MemorySize>(
     debug!("wasi[{}]::path_symlink", ctx.data().pid());
     let env = ctx.data();
     let (memory, mut state, mut inodes) = env.get_memory_and_wasi_state_and_inodes_mut(&ctx, 0);
-    let old_path_str = unsafe { get_input_str!(&memory, old_path, old_path_len) };
-    let new_path_str = unsafe { get_input_str!(&memory, new_path, new_path_len) };
+    let mut old_path_str = unsafe { get_input_str!(&memory, old_path, old_path_len) };
+    let mut new_path_str = unsafe { get_input_str!(&memory, new_path, new_path_len) };
+    old_path_str = ctx.data().state.fs.relative_path_to_absolute(old_path_str);
+    new_path_str = ctx.data().state.fs.relative_path_to_absolute(new_path_str);
     let base_fd = wasi_try!(state.fs.get_fd(fd));
     if !has_rights(base_fd.rights, __WASI_RIGHT_PATH_SYMLINK) {
         return __WASI_EACCES;
@@ -3048,8 +3091,14 @@ pub fn path_unlink_file<M: MemorySize>(
     if !has_rights(base_dir.rights, __WASI_RIGHT_PATH_UNLINK_FILE) {
         return __WASI_EACCES;
     }
-    let path_str = unsafe { get_input_str!(&memory, path, path_len) };
+    let mut path_str = unsafe { get_input_str!(&memory, path, path_len) };
     debug!("Requested file: {}", path_str);
+
+    // Convert relative paths into absolute paths
+    if path_str.starts_with("./") {
+        path_str = ctx.data().state.fs.relative_path_to_absolute(path_str);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), path_str);
+    }
 
     let inode = wasi_try!(state
         .fs
@@ -4215,11 +4264,21 @@ pub fn tty_set<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     tty_state: WasmPtr<__wasi_tty_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}]::tty_set", ctx.data().pid());
-
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let state = wasi_try_mem!(tty_state.read(&memory));
+    let echo = match state.echo {
+        __WASI_BOOL_FALSE => false,
+        __WASI_BOOL_TRUE => true,
+        _ => return __WASI_EINVAL,
+    };
+    let line_buffered = match state.line_buffered {
+        __WASI_BOOL_FALSE => false,
+        __WASI_BOOL_TRUE => true,
+        _ => return __WASI_EINVAL,
+    };
+    debug!("wasi[{}]::tty_set(echo={}, line_buffered={})", ctx.data().pid(), echo, line_buffered);
+
     let state = super::runtime::WasiTtyState {
         cols: state.cols,
         rows: state.rows,
@@ -4240,16 +4299,8 @@ pub fn tty_set<M: MemorySize>(
             __WASI_BOOL_TRUE => true,
             _ => return __WASI_EINVAL,
         },
-        echo: match state.echo {
-            __WASI_BOOL_FALSE => false,
-            __WASI_BOOL_TRUE => true,
-            _ => return __WASI_EINVAL,
-        },
-        line_buffered: match state.line_buffered {
-            __WASI_BOOL_FALSE => false,
-            __WASI_BOOL_TRUE => true,
-            _ => return __WASI_EINVAL,
-        },
+        echo,
+        line_buffered,
     };
 
     env.runtime.tty_set(state);
@@ -5425,7 +5476,7 @@ pub fn proc_exec<M: MemorySize>(
     args_len: M::Offset,
 ) -> Result<(), WasiError> {
     let memory = ctx.data().memory_view(&ctx);
-    let name = name.read_utf8_string(&memory, name_len).map_err(|err| {
+    let mut name = name.read_utf8_string(&memory, name_len).map_err(|err| {
         warn!("failed to execve as the name could not be read - {}", err);
         WasiError::Exit(__WASI_EFAULT as __wasi_exitcode_t)
     })?;
@@ -5436,6 +5487,12 @@ pub fn proc_exec<M: MemorySize>(
         WasiError::Exit(__WASI_EFAULT as __wasi_exitcode_t)
     })?;
     let args: Vec<_> = args.split(&['\n', '\r']).map(|a| a.to_string()).filter(|a| a.len() > 0).collect();
+
+    // Convert relative paths into absolute paths
+    if name.starts_with("./") {
+        name = ctx.data().state.fs.relative_path_to_absolute(name);
+        trace!("wasi[{}]::rel_to_abs (name={}))", ctx.data().pid(), name);        
+    }
     
     // Convert the preopen directories
     let preopen = ctx.data().state.preopen.clone();
@@ -5524,11 +5581,11 @@ pub fn proc_exec<M: MemorySize>(
         let bus = ctx.data().bus();
         let mut process = bus
             .spawn(wasi_env)
-            .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
+            .spawn(&ctx, name.as_str(), new_store, &ctx.data().bin_factory)
             .map_err(|err| {
                 err_exit_code = conv_bus_err_to_exit_code(err);
                 warn!("failed to execve as the process could not be spawned (vfork) - {}", err);
-                let _ = stderr_write(&ctx, format!("wasm not found - {}\n", name.as_str()).as_bytes());
+                let _ = stderr_write(&ctx, format!("wasm execute failed [{}] - {}\n", name.as_str(), err).as_bytes());
                 err
             })
             .ok();
@@ -5538,17 +5595,7 @@ pub fn proc_exec<M: MemorySize>(
         let process = match process {
             Some(a) => a,
             None => {
-                BusSpawnedProcess {
-                    name: name.clone(),
-                    inst: Box::new(
-                        ExitedProcess {
-                            exit_code: err_exit_code
-                        }
-                    ),
-                    stdin: None,
-                    stdout: None,
-                    stderr: None
-                }
+                BusSpawnedProcess::exited_process(name.as_str(), err_exit_code)
             }
         };
         
@@ -5613,7 +5660,7 @@ pub fn proc_exec<M: MemorySize>(
         let bus = ctx.data().bus();
         let mut process = bus
             .spawn(wasi_env)
-            .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
+            .spawn(&ctx, name.as_str(), new_store, &ctx.data().bin_factory)
             .map_err(|err| {
                 warn!("failed to execve as the process could not be spawned (fork) - {}", err);
                 let _ = stderr_write(&ctx, format!("wasm not found - {}\n", name.as_str()).as_bytes());
@@ -5838,7 +5885,7 @@ pub fn proc_spawn_internal(
     let bus = env.runtime.bus();
     let mut process = bus
         .spawn(child_env)
-        .spawn(name.as_str(), new_store, &ctx.data().bin_factory)
+        .spawn(&ctx, name.as_str(), new_store, &ctx.data().bin_factory)
         .map_err(bus_error_into_wasi_err)?;
     
     // Add the process to the environment state

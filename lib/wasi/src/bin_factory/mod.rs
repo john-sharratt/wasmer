@@ -18,14 +18,13 @@ mod exec;
 
 pub use binary_package::*;
 pub use cached_modules::*;
-pub use exec::*;
+pub(crate) use exec::spawn_exec;
 
 use sha2::*;
-use wasmer::{AsStoreRef, Module};
 
 use crate::{
     WasiState,
-    WasiRuntimeImplementation
+    WasiRuntimeImplementation, builtins::BuiltIns
 };
 
 pub const DEFAULT_WEBC_PATH: &'static str = "~/.wasmer/webc";
@@ -33,6 +32,7 @@ pub const DEFAULT_WEBC_PATH: &'static str = "~/.wasmer/webc";
 #[derive(Derivative, Clone)]
 pub struct BinFactory {
     pub(crate) state: Arc<WasiState>,
+    pub(crate) builtins: BuiltIns,
     cache: Arc<RwLock<HashMap<String, Option<BinaryPackage>>>>,
     cache_webc_dir: String,
     runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
@@ -46,6 +46,7 @@ impl BinFactory {
         cache_webc_dir: Option<String>,
         runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
     ) -> BinFactory {
+        let cache = Arc::new(RwLock::new(HashMap::new()));
         let cache_webc_dir = shellexpand::tilde(cache_webc_dir
             .as_ref()
             .map(|a| a.as_str())
@@ -54,7 +55,8 @@ impl BinFactory {
         let _ = std::fs::create_dir_all(PathBuf::from(cache_webc_dir.clone()));
         BinFactory {
             state,
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            builtins: BuiltIns::new(cache.clone(), cache_webc_dir.clone(), runtime.clone(), compiled_modules.clone()),
+            cache,
             cache_webc_dir,
             runtime,
             compiled_modules
@@ -110,29 +112,9 @@ impl BinFactory {
             }
         }
 
-        // Now try for the WebC
-        {
-            let wapm_name = name.split_once(":").map(|a| a.0).unwrap_or_else(|| name.as_str());
-            let cache_webc_dir = self.cache_webc_dir.as_str();
-            if let Some(data) = crate::wapm::fetch_webc(cache_webc_dir, wapm_name, self.runtime()) {
-                cache.insert(name, Some(data.clone()));
-                return Some(data);
-            }
-        }
-
         // NAK
         cache.insert(name, None);
         return None;
-    }
-
-    pub(crate) fn get_compiled_module(&self, store: &impl AsStoreRef, data_hash: &str, engine: &str) -> Option<Module> {
-        self.compiled_modules
-            .get_compiled_module(store, data_hash, engine)
-    }
-
-    pub(crate) fn set_compiled_module(&self, data_hash: &str, engine: &str, compiled_module: &Module) {
-        self.compiled_modules
-            .set_compiled_module(data_hash, engine, compiled_module)
     }
 }
 

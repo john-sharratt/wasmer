@@ -4,9 +4,10 @@
 use crate::bin_factory::CachedCompiledModules;
 #[cfg(feature = "os")]
 use crate::fs::RootFileSystemBuilder;
+use crate::fs::{TtyFile, ArcFile};
 use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
-use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane};
+use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane, PluggableRuntimeImplementation};
 use generational_arena::Arena;
 use rand::Rng;
 use std::collections::HashMap;
@@ -49,9 +50,9 @@ pub struct WasiStateBuilder {
     args: Vec<String>,
     envs: Vec<(String, Vec<u8>)>,
     preopens: Vec<PreopenedDir>,
-    inherits: Vec<String>,
+    uses: Vec<String>,
     #[cfg(feature = "sys")]
-    map_atoms: HashMap<String, PathBuf>,
+    map_commands: HashMap<String, PathBuf>,
     vfs_preopens: Vec<String>,
     full_sandbox: bool,
     #[cfg(feature = "os")]
@@ -74,7 +75,7 @@ impl std::fmt::Debug for WasiStateBuilder {
             .field("args", &self.args)
             .field("envs", &self.envs)
             .field("preopens", &self.preopens)
-            .field("inherits", &self.inherits)
+            .field("uses", &self.uses)
             .field("setup_fs_fn exists", &self.setup_fs_fn.is_some())
             .field("stdout_override exists", &self.stdout_override.is_some())
             .field("stderr_override exists", &self.stderr_override.is_some())
@@ -169,48 +170,48 @@ impl WasiStateBuilder {
     }
 
     /// Adds a container this module inherits from
-    pub fn inherit<Name>(&mut self, inherit: Name) -> &mut Self
+    pub fn use_webc<Name>(&mut self, webc: Name) -> &mut Self
     where
         Name: AsRef<str>,
     {
-        self.inherits.push(inherit.as_ref().to_string());
+        self.uses.push(webc.as_ref().to_string());
         self
     }
 
     /// Adds a list of other containers this module inherits from
-    pub fn inherits<I>(&mut self, inherits: I) -> &mut Self
+    pub fn uses<I>(&mut self, uses: I) -> &mut Self
     where
         I: IntoIterator<Item = String>,
     {
-        inherits.into_iter().for_each(|inherit| {
-            self.inherits.push(inherit);
+        uses.into_iter().for_each(|inherit| {
+            self.uses.push(inherit);
         });
         self
     }
 
     /// Map an atom to a local binary
     #[cfg(feature = "sys")]
-    pub fn map_atom<Name, Target>(&mut self, name: Name, target: Target) -> &mut Self
+    pub fn map_command<Name, Target>(&mut self, name: Name, target: Target) -> &mut Self
     where
         Name: AsRef<str>,
         Target: AsRef<str>,
     {
         let path_buf = PathBuf::from(target.as_ref().to_string());
-        self.map_atoms.insert(name.as_ref().to_string(), path_buf);
+        self.map_commands.insert(name.as_ref().to_string(), path_buf);
         self
     }
 
     /// Maps a series of atoms to the local binaries
     #[cfg(feature = "sys")]
-    pub fn map_atoms<I, Name, Target>(&mut self, map_atoms: I) -> &mut Self
+    pub fn map_commands<I, Name, Target>(&mut self, map_commands: I) -> &mut Self
     where
         I: IntoIterator<Item = (Name, Target)>,
         Name: AsRef<str>,
         Target: AsRef<str>,
     {
-        map_atoms.into_iter().for_each(|(name, target)| {
+        map_commands.into_iter().for_each(|(name, target)| {
             let path_buf = PathBuf::from(target.as_ref().to_string());
-            self.map_atoms.insert(name.as_ref().to_string(), path_buf);
+            self.map_commands.insert(name.as_ref().to_string(), path_buf);
         });
         self
     }
@@ -497,6 +498,19 @@ impl WasiStateBuilder {
             }
         }
 
+        // Get a reference to the runtime        
+        let runtime = self.runtime_override.clone().unwrap_or_else( || {
+            Arc::new(PluggableRuntimeImplementation::default())
+        });
+
+        // Determine the STDIN
+        let stdin: Box<ArcFile> = self.stdin_override
+            .take()
+            .map(|a| Box::new(ArcFile::new(a)))
+            .unwrap_or_else(|| {
+                Box::new(ArcFile::new(Box::new(super::Stdin::default())))
+            });
+
         // If we are running WASIX then we start a full sandbox FS
         // otherwise we drop through to a default file system
         let fs_backing = self.fs_override
@@ -505,6 +519,7 @@ impl WasiStateBuilder {
                 #[cfg(feature = "os")]
                 if self.full_sandbox {
                     RootFileSystemBuilder::new()
+                        .with_tty(Box::new(TtyFile::new(runtime.clone(), stdin.clone())))
                         .build()
                 } else {
                     default_fs_backing()
@@ -531,11 +546,9 @@ impl WasiStateBuilder {
             .map_err(WasiStateCreationError::WasiFsCreationError)?;
 
             // set up the file system, overriding base files and calling the setup function
-            if let Some(stdin_override) = self.stdin_override.take() {
-                wasi_fs
-                    .swap_file(inodes.deref(), __WASI_STDIN_FILENO, stdin_override)
-                    .map_err(WasiStateCreationError::FileSystemError)?;
-            }
+            wasi_fs
+                .swap_file(inodes.deref(), __WASI_STDIN_FILENO, stdin)
+                .map_err(WasiStateCreationError::FileSystemError)?;
 
             if let Some(stdout_override) = self.stdout_override.take() {
                 wasi_fs
@@ -567,6 +580,7 @@ impl WasiStateBuilder {
             futexs: Default::default(),
             clock_offset: Default::default(),
             bus: Default::default(),
+            runtime,
             envs: self
                 .envs
                 .iter()
@@ -617,6 +631,7 @@ impl WasiStateBuilder {
         control_plane: &WasiControlPlane,
     ) -> Result<WasiFunctionEnv, WasiStateCreationError> {
         let state = Arc::new(self.build()?);
+        let runtime = state.runtime.clone();
 
         let process = control_plane.new_process();
         let thread = process.new_thread();
@@ -629,13 +644,13 @@ impl WasiStateBuilder {
             thread,
             #[cfg(feature = "os")] 
             self.cache_webc_dir.clone(),
-            self.runtime_override.clone()
+            runtime
         );
         
         // Load all the containers that we inherit from
         #[cfg(feature = "os")]
-        for inherit in self.inherits.iter().rev().map(|a| a.as_str()) {
-            if let Some(package) = env.bin_factory.get(inherit)
+        for uses in self.uses.iter().rev().map(|a| a.as_str()) {
+            if let Some(package) = env.bin_factory.builtins.cmd_wasmer.get(uses.to_string())
             {
                 // We first need to copy any files in the package over to the temporary file system
                 if let Some(fs) = package.webc_fs {
@@ -654,19 +669,19 @@ impl WasiStateBuilder {
                             .new_open_options_ext()
                             .insert_ro_file(path, command.atom.clone())
                         {
-                            tracing::debug!("failed to add package [{}] command [{}] - {}", inherit, command.name, err);
+                            tracing::debug!("failed to add package [{}] command [{}] - {}", uses, command.name, err);
                             continue;
                         }
                     }
                 }
             } else {
-                return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", inherit)));
+                return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", uses)));
             }
         }
 
         // Load all the mapped atoms
         #[cfg(feature = "sys")]
-        for (command, target) in self.map_atoms.iter() {
+        for (command, target) in self.map_commands.iter() {
             // Read the file
             let file = std::fs::read(target)
                 .map_err(|err| {
