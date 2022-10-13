@@ -181,14 +181,16 @@ pub(crate) fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config
 impl VirtualBusSpawner<WasiEnv>
 for BinFactory
 {
-    fn spawn<'a>(&self, ctx: &FunctionEnvMut<'a, WasiEnv>, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, _fallback: &dyn VirtualBusSpawner<WasiEnv>) -> wasmer_vbus::Result<BusSpawnedProcess> {
+    fn spawn<'a>(&self, parent_ctx: Option<&FunctionEnvMut<'a, WasiEnv>>, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, _fallback: &dyn VirtualBusSpawner<WasiEnv>) -> wasmer_vbus::Result<BusSpawnedProcess> {
         if config.remote_instance().is_some() {
             return Err(VirtualBusError::Unsupported);
         }
 
         // We check for built in commands
-        if self.builtins.exists(name) {
-            return self.builtins.exec(ctx, name, store, config);
+        if let Some(parent_ctx) = parent_ctx {
+            if self.builtins.exists(name) {
+                return self.builtins.exec(parent_ctx, name, store, config);
+            }
         }
 
         // Find the binary (or die trying) and make the spawn type

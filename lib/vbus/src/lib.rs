@@ -46,8 +46,8 @@ where T: SpawnEnvironmentIntrinsics,
 
 pub trait VirtualBusSpawner<T> {
     /// Spawns a new WAPM process by its name
-    fn spawn<'a>(&self, ctx: &FunctionEnvMut<'a, T>, name: &str, store: Store, config: SpawnOptionsConfig<T>, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
-        fallback.spawn(ctx, name, store, config, &mut UnsupportedVirtualBusSpawner::default())
+    fn spawn<'a>(&self, parent_ctx: Option<&FunctionEnvMut<'a, T>>, name: &str, store: Store, config: SpawnOptionsConfig<T>, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
+        fallback.spawn(parent_ctx, name, store, config, &mut UnsupportedVirtualBusSpawner::default())
     }
 }
 
@@ -55,7 +55,7 @@ pub trait VirtualBusSpawner<T> {
 pub struct UnsupportedVirtualBusSpawner { }
 impl<T> VirtualBusSpawner<T>
 for UnsupportedVirtualBusSpawner {
-    fn spawn<'a>(&self, _ctx: &FunctionEnvMut<'a, T>, _name: &str, _store: Store, _config: SpawnOptionsConfig<T>, _fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
+    fn spawn<'a>(&self, _parent_ctx: Option<&FunctionEnvMut<'a, T>>, _name: &str, _store: Store, _config: SpawnOptionsConfig<T>, _fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess>  {
         Err(VirtualBusError::Unsupported)
     }
 }
@@ -132,8 +132,8 @@ where T: SpawnEnvironmentIntrinsics
     }
 
     /// Spawns a new bus instance by its reference name
-    pub fn spawn<'a>(self, ctx: &FunctionEnvMut<'a, T>, name: &str, store: Store, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess> {
-        self.spawner.spawn(ctx, name, store, self.conf, fallback)
+    pub fn spawn<'a>(self, parent_ctx: Option<&FunctionEnvMut<'a, T>>, name: &str, store: Store, fallback: &dyn VirtualBusSpawner<T>) -> Result<BusSpawnedProcess> {
+        self.spawner.spawn(parent_ctx, name, store, self.conf, fallback)
     }
 }
 

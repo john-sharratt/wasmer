@@ -3,11 +3,7 @@ use wasmer_derive::ValueType;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ValueType)]
 #[repr(C)]
 pub struct __wasi_stack_snaphost_t {
-    pub memory_offset: u32,
-    pub host_offset: u32,
     pub user: u64,
-    pub upper_rewind_stack: [u8; 256],
-    pub upper_memory_stack: [u8; 256],
     pub hash: u128,
 }
 

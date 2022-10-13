@@ -445,7 +445,10 @@ impl Function {
                         Ok(wasmer_types::OnCalledAction::InvokeAgain) => { continue; }
                         Ok(wasmer_types::OnCalledAction::Finish) => { break; }
                         Ok(wasmer_types::OnCalledAction::Trap(trap)) => { return Err(RuntimeError::user(trap)) },
-                        Err(trap) => { return Err(RuntimeError::user(trap)) },
+                        Err(trap) => {
+                            eprintln!("BLAH");
+                            return Err(RuntimeError::user(trap))
+                        },
                     }
                 }
                 break;

@@ -283,6 +283,9 @@ impl WasiEnv {
         let process = self.process.compute.new_process();        
         let handle = process.new_thread();
         
+        let thread = handle.as_thread();
+        thread.copy_stack_from(&self.thread);
+        
         let state = Arc::new(self.state.fork());
         
         #[cfg(feature = "os")]
@@ -295,7 +298,7 @@ impl WasiEnv {
         (
             Self {
                 process: process,
-                thread: handle.as_thread(),
+                thread,
                 vfork: None,
                 stack_base: self.stack_base,
                 stack_start: self.stack_start,

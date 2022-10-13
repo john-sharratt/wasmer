@@ -4,12 +4,13 @@ use std::{
         Arc,
         Condvar, RwLock, atomic::{AtomicU32, Ordering}, RwLockWriteGuard, RwLockReadGuard
     },
-    time::Duration, collections::{HashMap, HashSet}, borrow::Cow
+    time::Duration, collections::{HashMap, HashSet}, borrow::Cow, ops::{Deref, DerefMut}
 };
 
+use bytes::{BytesMut, Bytes};
 use tracing::log::trace;
 use wasmer_vbus::BusSpawnedProcess;
-use wasmer_wasi_types::{__wasi_signal_t, __wasi_exitcode_t, __WASI_CLOCK_MONOTONIC};
+use wasmer_wasi_types::{__wasi_signal_t, __wasi_exitcode_t, __WASI_CLOCK_MONOTONIC, __wasi_errno_t, __WASI_ECHILD};
 
 use crate::syscalls::platform_clock_time_get;
 
@@ -47,6 +48,22 @@ for WasiThreadId {
     }
 }
 
+/// Represents a linked list of stack snapshots
+#[derive(Debug, Clone)]
+struct ThreadSnapshot
+{
+    call_stack: Bytes,
+}
+
+/// Represents a linked list of stack snapshots
+#[derive(Debug, Clone, Default)]
+struct ThreadStack
+{
+    memory_stack: Vec<u8>,
+    snapshots: HashMap<u128, ThreadSnapshot>,
+    next: Option<Box<ThreadStack>>,
+}
+
 /// Represents a running thread which allows a joiner to
 /// wait for the thread to exit
 #[derive(Debug, Clone)]
@@ -56,6 +73,7 @@ pub struct WasiThread
     pub(crate) id: WasiThreadId,
     finished: Arc<(Mutex<Option<u32>>, Condvar)>,
     pub(crate) signals: Arc<Mutex<Vec<__wasi_signal_t>>>,
+    stack: Arc<Mutex<ThreadStack>>,
 }
 
 impl WasiThread
@@ -116,6 +134,75 @@ impl WasiThread
     pub fn pop_signals(&self) -> Vec<__wasi_signal_t> {
         let mut guard = self.signals.lock().unwrap();
         guard.drain(..).collect()
+    }
+
+    /// Adds a stack snapshot and removes dead ones
+    pub fn add_snapshot(&self, mut memory_stack: &[u8], hash: u128, rewind_stack: &[u8]) {
+        // Lock the stack
+        let mut stack = self.stack.lock().unwrap();
+        let mut pstack = stack.deref_mut();
+        loop {
+            // First we validate if the stack is no longer valid
+            if pstack.memory_stack.len() > memory_stack.len() ||
+                pstack.memory_stack.iter().zip(memory_stack.iter()).any(|(a, b)| *a != *b)
+            {
+                // The stacks have changed so need to start again at this segment
+                let mut new_stack = ThreadStack::default();
+                new_stack.memory_stack = memory_stack.to_vec();
+                std::mem::swap(pstack, &mut new_stack);
+                memory_stack = &memory_stack[memory_stack.len()..];
+            } else {
+                memory_stack = &memory_stack[pstack.memory_stack.len()..];
+            }
+
+            // If there is no more memory stack then we are done and can add the call stack
+            if memory_stack.len() <= 0 {
+                break;
+            }
+
+            // Otherwise we need to add a next stack pointer and continue the iterations
+            if pstack.next.is_none() {
+                let mut new_stack = ThreadStack::default();
+                new_stack.memory_stack = memory_stack.to_vec();
+                pstack.next.replace(Box::new(new_stack));
+            }
+            pstack = pstack.next.as_mut().unwrap();
+        }
+
+        // Add the call stack
+        pstack.snapshots.insert(hash, ThreadSnapshot {
+            call_stack: BytesMut::from(rewind_stack).freeze()
+        });
+    }
+
+    /// Gets a snapshot that was previously addedf
+    pub fn get_snapshot(&self, hash: u128) -> Option<(BytesMut, Bytes)> {
+        let mut memory_stack = BytesMut::new();
+
+        let stack = self.stack.lock().unwrap();
+        let mut pstack = stack.deref();
+        loop {
+            memory_stack.extend(pstack.memory_stack.iter());
+            if let Some(snapshot) = pstack.snapshots.get(&hash) {
+                return Some((memory_stack, snapshot.call_stack.clone()));
+            }
+            if let Some(next) = pstack.next.as_ref() {
+                pstack = next.deref();
+            } else {
+                return None;
+            }
+        }
+    }
+
+    // Copy the stacks from another thread
+    pub fn copy_stack_from(&self, other: &WasiThread) {
+        let mut stack = {
+            let stack_guard = other.stack.lock().unwrap();
+            stack_guard.clone()
+        };
+
+        let mut stack_guard = self.stack.lock().unwrap();
+        std::mem::swap(stack_guard.deref_mut(), &mut stack);
     }
 }
 
@@ -299,6 +386,7 @@ impl WasiProcess
             is_main,
             finished,
             signals: Arc::new(Mutex::new(Vec::new())),
+            stack: Arc::new(Mutex::new(ThreadStack::default()))
         };
         inner.threads.insert(id, ctrl.clone());
         inner.thread_count += 1;
@@ -397,6 +485,23 @@ impl WasiProcess
             }
         }
         Some(exit_code)
+    }
+
+    /// Waits for all the children to be finished
+    pub fn join_any_child(&mut self, timeout: Duration) -> Result<Option<(WasiProcessId, __wasi_exitcode_t)>, __wasi_errno_t> {
+        if self.children.is_empty() {
+            return Err(__WASI_ECHILD);
+        }
+        for pid in self.children.iter() {
+            if let Some(process) = self.compute.get_process(pid.clone()) {
+                if let Some(exit_code) = process.join(timeout) {
+                    let pid = process.pid();
+                    self.children.retain(|a| *a != pid);
+                    return Ok(Some((pid, exit_code)))
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Attempts to join on the process
