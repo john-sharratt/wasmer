@@ -9,7 +9,8 @@ use std::{
 
 use derivative::*;
 use wasmer_vfs::FileSystem;
-use crate::fs::TmpFileSystem;
+use wasmer_wasi_types::__WASI_CLOCK_MONOTONIC;
+use crate::{fs::TmpFileSystem, syscalls::platform_clock_time_get};
 
 use super::hash_of_binary;
 
@@ -54,6 +55,7 @@ impl BinaryPackageCommand {
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
 pub struct BinaryPackage {
+    pub when_cached: u128,
     pub ownership: Option<Arc<dyn Any + Send + Sync + 'static>>,
     #[derivative(Debug = "ignore")]
     pub entry: Cow<'static, [u8]>,
@@ -70,7 +72,9 @@ pub struct BinaryPackage {
 
 impl BinaryPackage {
     pub fn new(entry: Cow<'static, [u8]>) -> Self {
+        let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
         Self {
+            when_cached: now,
             ownership: None,
             entry,
             hash: Arc::new(Mutex::new(None)),

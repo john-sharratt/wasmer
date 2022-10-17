@@ -8,9 +8,7 @@ use std::{
     ops::Deref,
     sync::{
         Arc,
-        RwLock
     },
-    collections::HashMap
 };
 
 use crate::{
@@ -46,19 +44,15 @@ use super::BuiltInCommand;
 
 #[derive(Debug, Clone)]
 pub struct CmdWasmer {
-    cache: Arc<RwLock<HashMap<String, Option<BinaryPackage>>>>,
-    cache_webc_dir: String,
     runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
-    compiled_modules: Arc<CachedCompiledModules>,
+    cache: Arc<CachedCompiledModules>,
 }
 
 impl CmdWasmer {
-    pub fn new(cache: Arc<RwLock<HashMap<String, Option<BinaryPackage>>>>, cache_webc_dir: String, runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: Arc<CachedCompiledModules>) -> Self {
+    pub fn new(runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: Arc<CachedCompiledModules>) -> Self {
         Self {
-            cache,
-            cache_webc_dir,
             runtime,
-            compiled_modules
+            cache: compiled_modules
         }
     }
 }
@@ -76,7 +70,7 @@ impl CmdWasmer{
             if let Some(binary) = self.get(what.clone())
             {
                 // Now run the module
-                spawn_exec(binary, name, store, config, &self.runtime, &self.compiled_modules)
+                spawn_exec(binary, name, store, config, &self.runtime, &self.cache)
             } else {
                 let _ = stderr_write(parent_ctx, format!("package not found - {}\r\n", what).as_bytes());
                 Ok(BusSpawnedProcess::exited_process(name, __WASI_ENOENT as u32))   
@@ -89,32 +83,10 @@ impl CmdWasmer{
 
     pub fn get(&self, name: String) -> Option<BinaryPackage>
     {
-        // Fast path
-        {
-            let cache = self.cache.read().unwrap();
-            if let Some(data) = cache.get(&name) {
-                return data.clone();
-            }
-        }
-
-        // Slow path
-        let mut cache = self.cache.write().unwrap();
-
-        // Check the cache
-        if let Some(data) = cache.get(&name) {
-            return data.clone();
-        }
-
-        // Now try for the WebC
-        let wapm_name = name.split_once(":").map(|a| a.0).unwrap_or_else(|| name.as_str());
-        let cache_webc_dir = self.cache_webc_dir.as_str();
-        if let Some(data) = crate::wapm::fetch_webc(cache_webc_dir, wapm_name, self.runtime.deref()) {
-            cache.insert(name, Some(data.clone()));
-            return Some(data);
-        }
-
-        // The WebC is not found
-        None
+        self.cache.get_webc(
+            name.as_str(),
+            self.runtime.deref()
+        )
     }
 }
 

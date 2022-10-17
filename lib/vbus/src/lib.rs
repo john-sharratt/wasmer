@@ -62,10 +62,10 @@ for UnsupportedVirtualBusSpawner {
 
 #[derive(Debug, Clone)]
 pub struct SpawnOptionsConfig<T> {
-    reuse: bool,
-    env: T,
-    remote_instance: Option<String>,
-    access_token: Option<String>,
+    pub reuse: bool,
+    pub env: T,
+    pub remote_instance: Option<String>,
+    pub access_token: Option<String>,
 }
 
 pub trait SpawnEnvironmentIntrinsics {

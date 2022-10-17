@@ -1,13 +1,13 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock}
+    sync::Arc
 };
 
 use wasmer::{FunctionEnvMut, Store};
 use wasmer_vbus::{SpawnOptionsConfig, BusSpawnedProcess};
 use wasmer_wasi_types::__WASI_ENOENT;
 
-use crate::{WasiEnv, syscalls::stderr_write, bin_factory::{BinaryPackage, CachedCompiledModules}, WasiRuntimeImplementation};
+use crate::{WasiEnv, syscalls::stderr_write, bin_factory::CachedCompiledModules, WasiRuntimeImplementation};
 mod cmd_wasmer;
 
 pub trait BuiltInCommand
@@ -22,10 +22,8 @@ pub struct BuiltIns {
 }
 
 impl BuiltIns {
-    pub(crate) fn new(cache: Arc<RwLock<HashMap<String, Option<BinaryPackage>>>>, cache_webc_dir: String, runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: Arc<CachedCompiledModules>) -> Self {
+    pub(crate) fn new(runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: Arc<CachedCompiledModules>) -> Self {
         let cmd_wasmer = cmd_wasmer::CmdWasmer::new(
-            cache.clone(),
-            cache_webc_dir.clone(),
             runtime.clone(),
             compiled_modules.clone());
         let mut commands: HashMap<String, Arc<dyn BuiltInCommand + Send + Sync + 'static>>

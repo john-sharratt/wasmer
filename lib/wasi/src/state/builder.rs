@@ -57,8 +57,6 @@ pub struct WasiStateBuilder {
     full_sandbox: bool,
     #[cfg(feature = "os")]
     compiled_modules: Arc<CachedCompiledModules>,
-    #[cfg(feature = "os")] 
-    cache_webc_dir: Option<String>,
     #[allow(clippy::type_complexity)]
     setup_fs_fn: Option<Box<dyn Fn(&mut WasiInodes, &mut WasiFs) -> Result<(), String> + Send>>,
     stdout_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
@@ -355,13 +353,6 @@ impl WasiStateBuilder {
         self
     }
 
-    /// Sets the caching WebC directory
-    #[cfg(feature = "os")] 
-    pub fn cache_webc_dir(&mut self, cache_webc_dir: String) -> &mut Self {
-        self.cache_webc_dir = Some(cache_webc_dir);
-        self
-    }
-
     /// Overwrite the default WASI `stdout`, if you want to hold on to the
     /// original `stdout` use [`WasiFs::swap_file`] after building.
     pub fn stdout(&mut self, new_file: Box<dyn VirtualFile + Send + Sync + 'static>) -> &mut Self {
@@ -642,66 +633,12 @@ impl WasiStateBuilder {
             self.compiled_modules.clone(),
             process,
             thread,
-            #[cfg(feature = "os")] 
-            self.cache_webc_dir.clone(),
             runtime
         );
-        
-        // Load all the containers that we inherit from
-        #[cfg(feature = "os")]
-        for uses in self.uses.iter().rev().map(|a| a.as_str()) {
-            if let Some(package) = env.bin_factory.builtins.cmd_wasmer.get(uses.to_string())
-            {
-                // We first need to copy any files in the package over to the temporary file system
-                if let Some(fs) = package.webc_fs {
-                    env.state.fs.root_fs.union(&fs);
-                }
 
-                // Add all the commands as binaries in the bin folder
-                let commands = package.commands.read().unwrap();
-                if commands.is_empty() == false {
-                    let root_fs = &env.state.fs.root_fs;
-                    let _ = root_fs.create_dir(Path::new("/bin"));
-                    for command in commands.iter() {
-                        let path = format!("/bin/{}", command.name);
-                        let path = Path::new(path.as_str());
-                        if let Err(err) = root_fs
-                            .new_open_options_ext()
-                            .insert_ro_file(path, command.atom.clone())
-                        {
-                            tracing::debug!("failed to add package [{}] command [{}] - {}", uses, command.name, err);
-                            continue;
-                        }
-                    }
-                }
-            } else {
-                return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", uses)));
-            }
-        }
-
-        // Load all the mapped atoms
+        env.uses(self.uses.clone())?;
         #[cfg(feature = "sys")]
-        for (command, target) in self.map_commands.iter() {
-            // Read the file
-            let file = std::fs::read(target)
-                .map_err(|err| {
-                    WasiStateCreationError::WasiInheritError(format!("failed to read local binary [{}] - {}", target.as_os_str().to_string_lossy(), err))
-                })?;
-            let file: std::borrow::Cow<'static, [u8]> = file.into();
-            
-            let root_fs = &env.state.fs.root_fs;
-            let _ = root_fs.create_dir(Path::new("/bin"));
-            
-            let path = format!("/bin/{}", command);
-            let path = Path::new(path.as_str());
-            if let Err(err) = root_fs
-                .new_open_options_ext()
-                .insert_ro_file(path, file)
-            {
-                tracing::debug!("failed to add atom command [{}] - {}", command, err);
-                continue;
-            }
-        }
+        env.map_commands(self.map_commands.clone())?;
 
         Ok(WasiFunctionEnv::new(store, env))
     }

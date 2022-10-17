@@ -23,6 +23,9 @@ mod ws;
 #[cfg(feature = "os")]
 pub use ws::*;
 
+mod stdio;
+pub use stdio::*;
+
 #[cfg(feature = "termios")]
 pub mod term;
 #[cfg(feature = "termios")]
@@ -68,6 +71,23 @@ pub struct WasiTtyState {
     pub stderr_tty: bool,
     pub echo: bool,
     pub line_buffered: bool,
+}
+
+impl Default
+for WasiTtyState {
+    fn default() -> Self {
+        Self {
+            rows: 80,
+            cols: 25,
+            width: 800,
+            height: 600,
+            stdin_tty: true,
+            stdout_tty: true,
+            stderr_tty: true,
+            echo: false,
+            line_buffered: false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -139,17 +159,7 @@ where Self: fmt::Debug + Sync,
                 line_buffered: false,
             }
         } else {
-            WasiTtyState {
-                rows: 80,
-                cols: 25,
-                width: 800,
-                height: 600,
-                stdin_tty: true,
-                stdout_tty: true,
-                stderr_tty: true,
-                echo: false,
-                line_buffered: false,
-            }
+            Default::default()
         }
     }
 
@@ -240,7 +250,7 @@ where Self: fmt::Debug + Sync,
     #[cfg(not(feature = "sys-thread"))]
     fn task_wasm(
         &self,
-        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
+        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) + Send + 'static>,
         store: Store,
         module: Module,
         spawn_type: SpawnType,
@@ -287,7 +297,7 @@ where Self: fmt::Debug + Sync,
     #[cfg(feature = "sys-thread")]
     fn task_wasm(
         &self,
-        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
+        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) + Send + 'static>,
         store: Store,
         module: Module,
         spawn_type: SpawnType,
@@ -311,8 +321,7 @@ where Self: fmt::Debug + Sync,
         
         STATIC_RUNTIME.spawn_blocking(move || {
             // Invoke the callback
-            let fut = task(store, module, memory);
-            STATIC_RUNTIME.block_on(fut)
+            task(store, module, memory);
         });
         Ok(())
     }
@@ -380,58 +389,83 @@ where Self: fmt::Debug + Sync,
     ) -> Result<ReqwestResponse, u32> {
         use std::convert::TryFrom;
 
-        let method = reqwest::Method::try_from(method).map_err(|err| {
-            debug!("failed to convert method ({}) - {}", method, err);
-            __WASI_EIO as u32
-        })?;
-
-        let client = reqwest::blocking::ClientBuilder::default().build().map_err(|err| {
-            debug!("failed to build reqwest client - {}", err);
-            __WASI_EIO as u32
-        })?;
-
-        let mut builder = client.request(method, url);
-        for (header, val) in headers {
-            if let Ok(header) =
-                reqwest::header::HeaderName::from_bytes(header.as_bytes())
-            {
-                builder = builder.header(header, val);
-            } else {
-                debug!("failed to parse header - {}", header);
+        let work = {
+            let url = url.to_string();
+            let method = method.to_string();
+            async move {
+                let method = reqwest::Method::try_from(method.as_str()).map_err(|err| {
+                    debug!("failed to convert method ({}) - {}", method, err);
+                    __WASI_EIO as u32
+                })?;
+        
+                let client = reqwest::ClientBuilder::default().build().map_err(|err| {
+                    debug!("failed to build reqwest client - {}", err);
+                    __WASI_EIO as u32
+                })?;
+        
+                let mut builder = client.request(method, url.as_str());
+                for (header, val) in headers {
+                    if let Ok(header) =
+                        reqwest::header::HeaderName::from_bytes(header.as_bytes())
+                    {
+                        builder = builder.header(header, val);
+                    } else {
+                        debug!("failed to parse header - {}", header);
+                    }
+                }
+        
+                if let Some(data) = data {
+                    builder = builder.body(reqwest::Body::from(data));
+                }
+        
+                let request = builder.build().map_err(|err| {
+                    debug!("failed to convert request (url={}) - {}", url.as_str(), err);
+                    __WASI_EIO as u32
+                })?;
+        
+                let response = client.execute(request)
+                    .await
+                    .map_err(|err|
+                {
+                    debug!("failed to execute reqest - {}", err);
+                    __WASI_EIO as u32
+                })?;
+        
+                let status = response.status().as_u16();
+                let status_text = response.status().as_str().to_string();
+                let data = response.bytes().await.map_err(|err| {
+                    debug!("failed to read response bytes - {}", err);
+                    __WASI_EIO as u32
+                })?;
+                let data = data.to_vec();
+        
+                Ok(ReqwestResponse {
+                    pos: 0usize,
+                    ok: true,
+                    status,
+                    status_text,
+                    redirected: false,
+                    data: Some(data),
+                    headers: Vec::new(),
+                })
             }
-        }
+        };
 
-        if let Some(data) = data {
-            builder = builder.body(reqwest::blocking::Body::from(data));
-        }
-
-        let request = builder.build().map_err(|err| {
-            debug!("failed to convert request (url={}) - {}", url, err);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        self.task_shared(Box::new(move || Box::pin(async move {
+            let result = work.await;
+            let _ = tx.send(result).await;
+        })))
+        .map_err(|err| {
+            debug!("failed to process reqwest request - {}", err);
             __WASI_EIO as u32
         })?;
-
-        let response = client.execute(request).map_err(|err| {
-            debug!("failed to execute reqest - {}", err);
-            __WASI_EIO as u32
-        })?;
-
-        let status = response.status().as_u16();
-        let status_text = response.status().as_str().to_string();
-        let data = response.bytes().map_err(|err| {
-            debug!("failed to read response bytes - {}", err);
-            __WASI_EIO as u32
-        })?;
-        let data = data.to_vec();
-
-        Ok(ReqwestResponse {
-            pos: 0usize,
-            ok: true,
-            status,
-            status_text,
-            redirected: false,
-            data: Some(data),
-            headers: Vec::new(),
-        })
+        
+        rx.blocking_recv()
+            .ok_or_else(|| {
+                debug!("failed to process reqwest request - none");
+                __WASI_EIO as u32
+            })?
     }
 
     /// Make a web socket connection to a particular URL

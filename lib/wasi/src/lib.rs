@@ -44,7 +44,7 @@ pub mod builtins;
 
 pub use crate::state::{
     Fd, Pipe, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
-    WasiThreadId, WasiThreadHandle, WasiProcessId, WasiControlPlane, WasiThread, WasiProcess,
+    WasiThreadId, WasiThreadHandle, WasiProcessId, WasiControlPlane, WasiThread, WasiProcess, WasiPipe,
     WasiStateCreationError, ALL_RIGHTS, VIRTUAL_ROOT_FD,
 };
 pub use crate::syscalls::types;
@@ -344,15 +344,14 @@ impl WasiEnv {
     pub fn new(state: WasiState, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle) -> Self {
         let state = Arc::new(state);
         let runtime = Arc::new(PluggableRuntimeImplementation::default());
-        Self::new_ext(state, #[cfg(feature = "os")] compiled_modules, process, thread, #[cfg(feature = "os")] None, runtime)
+        Self::new_ext(state, #[cfg(feature = "os")] compiled_modules, process, thread, runtime)
     }
 
-    pub fn new_ext(state: Arc<WasiState>, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle, #[cfg(feature = "os")] cache_webc_dir: Option<String>, runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync>) -> Self {
+    pub fn new_ext(state: Arc<WasiState>, #[cfg(feature = "os")] compiled_modules: Arc<bin_factory::CachedCompiledModules>, process: WasiProcess, thread: WasiThreadHandle, runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync>) -> Self {
         #[cfg(feature = "os")]
         let bin_factory = BinFactory::new(
             state.clone(),
             compiled_modules,
-            cache_webc_dir,
             runtime.clone()
         );
         let mut ret = Self {
@@ -402,7 +401,7 @@ impl WasiEnv {
                 let mut any = false;
                 let inner = self.process.inner.read().unwrap();
                 if inner.signal_intervals.is_empty() == false {
-                    now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;    
+                    now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
                     for signal in inner.signal_intervals.values() {
                         let elapsed = now - signal.last_signal;
                         if elapsed >= signal.interval.as_nanos() {
@@ -555,6 +554,82 @@ impl WasiEnv {
         let state = self.state.deref();
         let inodes = state.inodes.write().unwrap();
         (memory, state, inodes)
+    }
+
+    #[cfg(feature = "os")]
+    pub fn uses<'a>(&self, uses: Vec<String>) -> Result<(), WasiStateCreationError>
+    {
+        // Load all the containers that we inherit from
+        #[allow(unused_imports)]
+        use std::path::Path;
+        #[allow(unused_imports)]
+        use wasmer_vfs::FileSystem;
+
+        for uses in uses.iter().rev().map(|a| a.as_str()) {
+            if let Some(package) = self.bin_factory.builtins.cmd_wasmer.get(uses.to_string())
+            {
+                // We first need to copy any files in the package over to the temporary file system
+                if let Some(fs) = package.webc_fs {
+                    self.state.fs.root_fs.union(&fs);
+                }
+
+                // Add all the commands as binaries in the bin folder
+                let commands = package.commands.read().unwrap();
+                if commands.is_empty() == false {
+                    let root_fs = &self.state.fs.root_fs;
+                    let _ = root_fs.create_dir(Path::new("/bin"));
+                    for command in commands.iter() {
+                        let path = format!("/bin/{}", command.name);
+                        let path = Path::new(path.as_str());
+                        if let Err(err) = root_fs
+                            .new_open_options_ext()
+                            .insert_ro_file(path, command.atom.clone())
+                        {
+                            tracing::debug!("failed to add package [{}] command [{}] - {}", uses, command.name, err);
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", uses)));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "os")]
+    #[cfg(feature = "sys")]
+    pub fn map_commands(&self, map_commands: std::collections::HashMap<String, std::path::PathBuf>) -> Result<(), WasiStateCreationError>
+    {
+        // Load all the mapped atoms
+        #[allow(unused_imports)]
+        use std::path::Path;
+        #[allow(unused_imports)]
+        use wasmer_vfs::FileSystem;
+
+        #[cfg(feature = "sys")]
+        for (command, target) in map_commands.iter() {
+            // Read the file
+            let file = std::fs::read(target)
+                .map_err(|err| {
+                    WasiStateCreationError::WasiInheritError(format!("failed to read local binary [{}] - {}", target.as_os_str().to_string_lossy(), err))
+                })?;
+            let file: std::borrow::Cow<'static, [u8]> = file.into();
+            
+            let root_fs = &self.state.fs.root_fs;
+            let _ = root_fs.create_dir(Path::new("/bin"));
+            
+            let path = format!("/bin/{}", command);
+            let path = Path::new(path.as_str());
+            if let Err(err) = root_fs
+                .new_open_options_ext()
+                .insert_ro_file(path, file)
+            {
+                tracing::debug!("failed to add atom command [{}] - {}", command, err);
+                continue;
+            }
+        }
+        Ok(())
     }
 }
 

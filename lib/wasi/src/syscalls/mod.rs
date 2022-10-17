@@ -311,11 +311,8 @@ fn write_buffer_array<M: MemorySize>(
 }
 
 fn get_current_time_in_nanos() -> Result<__wasi_timestamp_t, __wasi_errno_t> {
-    let now = std::time::SystemTime::now();
-    let duration = now
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map_err(|_| __WASI_EIO)?;
-    Ok(duration.as_nanos() as __wasi_timestamp_t)
+    let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
+    Ok(now as __wasi_timestamp_t)
 }
 
 /// ### `args_get()`
@@ -4673,7 +4670,6 @@ pub fn thread_spawn<M: MemorySize>(
                         let mut thread_memory = thread_memory;
                         let mut store = Some(store);
                         execute_module(&mut store, module, &mut thread_memory);
-                        Box::pin(async move { })
                     }),
                     store,
                     thread_module,
@@ -5385,7 +5381,6 @@ pub fn proc_fork<M: MemorySize>(
                     let mut thread_memory = thread_memory;
                     let mut store = Some(store);
                     execute_module(&mut store, module, &mut thread_memory);
-                    Box::pin(async move { })
                 }),
                 store,
                 thread_module,

@@ -20,11 +20,15 @@ use crate::{WasiEnv, WasiFunctionEnv, runtime::SpawnedMemory, import_object_for_
 use super::{BinFactory, BinaryPackage, CachedCompiledModules};
 use crate::runtime::SpawnType;
 
-pub(crate) fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: &CachedCompiledModules) -> wasmer_vbus::Result<BusSpawnedProcess> {
+pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: &CachedCompiledModules) -> wasmer_vbus::Result<BusSpawnedProcess> {
+    #[cfg(feature = "sys")]
+    let compiler = store.engine().name();
+    #[cfg(not(feature = "sys"))]
+    let compiler = "generic";
     let module = compiled_modules.get_compiled_module(
         &store,
         binary.hash().as_str(),
-        store.engine().name()
+        compiler
     );
     let module = match module {
         Some(a) => a,
@@ -36,7 +40,7 @@ pub(crate) fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config
                 })?;
             compiled_modules.set_compiled_module(
                 binary.hash().as_str(),
-                store.engine().name(),
+                compiler,
                 &module
             );
             module
@@ -74,8 +78,8 @@ pub(crate) fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config
         // Create a thread that will run this process
         let runtime = runtime.clone();
         let runtime_outer = runtime.clone();
-        runtime_outer.task_wasm(Box::new(move |mut store, module, memory| Box::pin(
-            async move {
+        runtime_outer.task_wasm(Box::new(move |mut store, module, memory| 
+            {
                 // Create the WasiFunctionEnv
                 let mut wasi_env = config.env().clone();
                 wasi_env.runtime = runtime.clone();
@@ -114,7 +118,7 @@ pub(crate) fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config
                                 9999u32
                             },
                         };
-                        let _ = exit_code_tx.send(code).await;
+                        let _ = exit_code_tx.blocking_send(code);
                         return;
                     }
                 }
@@ -151,10 +155,10 @@ pub(crate) fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config
                 debug!("main() has exited on {} with {}", module_name, ret);
 
                 // Send the result
-                let _ = exit_code_tx.send(ret).await;
+                let _ = exit_code_tx.blocking_send(ret);
                 drop(exit_code_tx);
             }
-        )), store, module, memory_spawn)
+        ), store, module, memory_spawn)
         .map_err(|err| {
             error!("failed to launch module [{}] - {}", name, err);
             VirtualBusError::UnknownError
@@ -194,9 +198,9 @@ for BinFactory
         }
 
         // Find the binary (or die trying) and make the spawn type
-        let binary = self.get(name)
+        let binary = self.get_binary(name)
             .ok_or(VirtualBusError::NotFound)?;
-        spawn_exec(binary, name, store, config, &self.runtime, &self.compiled_modules)
+        spawn_exec(binary, name, store, config, &self.runtime, &self.cache)
     }
 }
 

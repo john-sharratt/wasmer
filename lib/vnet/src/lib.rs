@@ -36,11 +36,14 @@ pub struct IpRoute {
 }
 
 /// An implementation of virtual networking
+#[allow(unused_variables)]
 pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
     /// Establishes a web socket connection
     /// (note: this does not use the virtual sockets and is standalone
     ///        functionality that works without the network being connected)
-    fn ws_connect(&self, url: &str) -> Result<Box<dyn VirtualWebSocket + Sync>>;
+    fn ws_connect(&self, url: &str) -> Result<Box<dyn VirtualWebSocket + Sync>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Makes a HTTP request to a remote web resource
     /// The headers are separated by line breaks
@@ -52,35 +55,55 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
         method: &str,
         headers: &str,
         gzip: bool,
-    ) -> Result<SocketHttpRequest>;
+    ) -> Result<SocketHttpRequest> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Bridges this local network with a remote network, which is required in
     /// order to make lower level networking calls (such as UDP/TCP)
-    fn bridge(&self, network: &str, access_token: &str, security: StreamSecurity) -> Result<()>;
+    fn bridge(&self, network: &str, access_token: &str, security: StreamSecurity) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Disconnects from the remote network essentially unbridging it
-    fn unbridge(&self) -> Result<()>;
+    fn unbridge(&self) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Acquires an IP address on the network and configures the routing tables
-    fn dhcp_acquire(&self) -> Result<Vec<IpAddr>>;
+    fn dhcp_acquire(&self) -> Result<Vec<IpAddr>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Adds a static IP address to the interface with a netmask prefix
-    fn ip_add(&self, ip: IpAddr, prefix: u8) -> Result<()>;
+    fn ip_add(&self, ip: IpAddr, prefix: u8) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Removes a static (or dynamic) IP address from the interface
-    fn ip_remove(&self, ip: IpAddr) -> Result<()>;
+    fn ip_remove(&self, ip: IpAddr) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Clears all the assigned IP addresses for this interface
-    fn ip_clear(&self) -> Result<()>;
+    fn ip_clear(&self) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Lists all the IP addresses currently assigned to this interface
-    fn ip_list(&self) -> Result<Vec<IpCidr>>;
+    fn ip_list(&self) -> Result<Vec<IpCidr>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Returns the hardware MAC address for this interface
-    fn mac(&self) -> Result<[u8; 6]>;
+    fn mac(&self) -> Result<[u8; 6]> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Adds a default gateway to the routing table
-    fn gateway_set(&self, ip: IpAddr) -> Result<()>;
+    fn gateway_set(&self, ip: IpAddr) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Adds a specific route to the routing table
     fn route_add(
@@ -89,20 +112,30 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
         via_router: IpAddr,
         preferred_until: Option<Duration>,
         expires_at: Option<Duration>,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Removes a routing rule from the routing table
-    fn route_remove(&self, cidr: IpAddr) -> Result<()>;
+    fn route_remove(&self, cidr: IpAddr) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Clears the routing table for this interface
-    fn route_clear(&self) -> Result<()>;
+    fn route_clear(&self) -> Result<()> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Lists all the routes defined in the routing table for this interface
-    fn route_list(&self) -> Result<Vec<IpRoute>>;
+    fn route_list(&self) -> Result<Vec<IpRoute>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Creates a low level socket that can read and write Ethernet packets
     /// directly to the interface
-    fn bind_raw(&self) -> Result<Box<dyn VirtualRawSocket + Sync>>;
+    fn bind_raw(&self) -> Result<Box<dyn VirtualRawSocket + Sync>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Lists for TCP connections on a specific IP and Port combination
     /// Multiple servers (processes or threads) can bind to the same port if they each set
@@ -113,7 +146,9 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
         only_v6: bool,
         reuse_port: bool,
         reuse_addr: bool,
-    ) -> Result<Box<dyn VirtualTcpListener + Sync>>;
+    ) -> Result<Box<dyn VirtualTcpListener + Sync>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Opens a UDP socket that listens on a specific IP and Port combination
     /// Multiple servers (processes or threads) can bind to the same port if they each set
@@ -123,11 +158,15 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
         addr: SocketAddr,
         reuse_port: bool,
         reuse_addr: bool,
-    ) -> Result<Box<dyn VirtualUdpSocket + Sync>>;
+    ) -> Result<Box<dyn VirtualUdpSocket + Sync>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Creates a socket that can be used to send and receive ICMP packets
     /// from a paritcular IP address
-    fn bind_icmp(&self, addr: IpAddr) -> Result<Box<dyn VirtualIcmpSocket + Sync>>;
+    fn bind_icmp(&self, addr: IpAddr) -> Result<Box<dyn VirtualIcmpSocket + Sync>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Opens a TCP connection to a particular destination IP address and port
     fn connect_tcp(
@@ -135,7 +174,9 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
         addr: SocketAddr,
         peer: SocketAddr,
         timeout: Option<Duration>,
-    ) -> Result<Box<dyn VirtualTcpSocket + Sync>>;
+    ) -> Result<Box<dyn VirtualTcpSocket + Sync>> {
+        Err(NetworkError::Unsupported)
+    }
 
     /// Performs DNS resolution for a specific hostname
     fn resolve(
@@ -143,7 +184,9 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
         host: &str,
         port: Option<u16>,
         dns_server: Option<IpAddr>,
-    ) -> Result<Vec<IpAddr>>;
+    ) -> Result<Vec<IpAddr>> {
+        Err(NetworkError::Unsupported)
+    }
 }
 
 /// Holds the interface used to work with a pending HTTP request

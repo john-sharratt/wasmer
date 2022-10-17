@@ -1,14 +1,10 @@
 use std::{
     sync::{
-        Arc,
-        RwLock
+        Arc, RwLock,
     },
     ops::{
         Deref
-    },
-    collections::{
-        HashMap
-    }, path::PathBuf,
+    }, collections::HashMap,
 };
 use derivative::Derivative;
 
@@ -18,76 +14,57 @@ mod exec;
 
 pub use binary_package::*;
 pub use cached_modules::*;
-pub(crate) use exec::spawn_exec;
+pub use exec::spawn_exec;
 
 use sha2::*;
 
 use crate::{
     WasiState,
-    WasiRuntimeImplementation, builtins::BuiltIns
+    WasiRuntimeImplementation,
+    builtins::BuiltIns
 };
-
-pub const DEFAULT_WEBC_PATH: &'static str = "~/.wasmer/webc";
 
 #[derive(Derivative, Clone)]
 pub struct BinFactory {
     pub(crate) state: Arc<WasiState>,
     pub(crate) builtins: BuiltIns,
-    cache: Arc<RwLock<HashMap<String, Option<BinaryPackage>>>>,
-    cache_webc_dir: String,
     runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
-    pub(crate) compiled_modules: Arc<CachedCompiledModules>,
+    pub(crate) cache: Arc<CachedCompiledModules>,
+    pub(crate) local: Arc<RwLock<HashMap<String, Option<BinaryPackage>>>>,
 }
 
 impl BinFactory {
     pub fn new(
         state: Arc<WasiState>,
         compiled_modules: Arc<CachedCompiledModules>,
-        cache_webc_dir: Option<String>,
         runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
     ) -> BinFactory {
-        let cache = Arc::new(RwLock::new(HashMap::new()));
-        let cache_webc_dir = shellexpand::tilde(cache_webc_dir
-            .as_ref()
-            .map(|a| a.as_str())
-            .unwrap_or_else(|| DEFAULT_WEBC_PATH))
-            .to_string();
-        let _ = std::fs::create_dir_all(PathBuf::from(cache_webc_dir.clone()));
         BinFactory {
             state,
-            builtins: BuiltIns::new(cache.clone(), cache_webc_dir.clone(), runtime.clone(), compiled_modules.clone()),
-            cache,
-            cache_webc_dir,
+            builtins: BuiltIns::new(runtime.clone(), compiled_modules.clone()),
             runtime,
-            compiled_modules
+            cache: compiled_modules,
+            local: Arc::new(RwLock::new(HashMap::new()))
         }
-    }
-
-    pub fn cache_webc_dir(&self) -> String {
-        self.cache_webc_dir.clone()
     }
 
     pub fn runtime(&self) -> &dyn WasiRuntimeImplementation {
         self.runtime.deref()
     }
 
-    pub fn clear(&self) {
-        self.cache.write().unwrap().clear();
-    }
-
-    pub fn get(&self, name: &str) -> Option<BinaryPackage> {
+    pub fn get_binary(&self, name: &str) -> Option<BinaryPackage> {
         let name = name.to_string();
 
         // Fast path
         {
-            let cache = self.cache.read().unwrap();
+            let cache = self.local.read().unwrap();
             if let Some(data) = cache.get(&name) {
                 return data.clone();
             }
         }
 
         // Slow path
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.local.write().unwrap();
 
         // Check the cache
         if let Some(data) = cache.get(&name) {
