@@ -15,6 +15,8 @@ mod exec;
 pub use binary_package::*;
 pub use cached_modules::*;
 pub use exec::spawn_exec;
+pub use exec::spawn_exec_module;
+pub(crate) use exec::SpawnedProcess;
 
 use sha2::*;
 
@@ -52,6 +54,11 @@ impl BinFactory {
         self.runtime.deref()
     }
 
+    pub fn set_binary(&self, name: &str, binary: BinaryPackage) {
+        let mut cache = self.local.write().unwrap();
+        cache.insert(name.to_string(), Some(binary));
+    }
+
     pub fn get_binary(&self, name: &str) -> Option<BinaryPackage> {
         let name = name.to_string();
 
@@ -82,7 +89,8 @@ impl BinFactory {
                 let mut data = Vec::with_capacity(file.size() as usize);
                 if let Ok(_) = file.read_to_end(&mut data)
                 {
-                    let data = BinaryPackage::new(data.into());
+                    let package_name = name.split("/").last().unwrap_or_else(|| name.as_str());
+                    let data = BinaryPackage::new(package_name, data.into());
                     cache.insert(name, Some(data.clone()));
                     return Some(data);
                 }

@@ -71,6 +71,7 @@ pub struct WasiTtyState {
     pub stderr_tty: bool,
     pub echo: bool,
     pub line_buffered: bool,
+    pub line_feeds: bool,
 }
 
 impl Default
@@ -86,6 +87,7 @@ for WasiTtyState {
             stderr_tty: true,
             echo: false,
             line_buffered: false,
+            line_feeds: true,
         }
     }
 }
@@ -157,6 +159,7 @@ where Self: fmt::Debug + Sync,
                 stderr_tty: true,
                 echo: false,
                 line_buffered: false,
+                line_feeds: true,
             }
         } else {
             Default::default()
@@ -172,10 +175,12 @@ where Self: fmt::Debug + Sync,
     fn tty_get(&self) -> WasiTtyState {
         let mut echo = false;
         let mut line_buffered = false;
+        let mut line_feeds = false;
 
         if let Ok(termios) = termios::Termios::from_fd(0) {
             echo = (termios.c_lflag & termios::ECHO) != 0;
             line_buffered = (termios.c_lflag & termios::ICANON) != 0;
+            line_feeds = (termios.c_lflag & termios::ONLCR) != 0;            
         }
 
         if let Some((w, h)) = term_size::dimensions() {
@@ -189,6 +194,7 @@ where Self: fmt::Debug + Sync,
                 stderr_tty: true,
                 echo,
                 line_buffered,
+                line_feeds,
             }
         } else {
             WasiTtyState {
@@ -201,6 +207,7 @@ where Self: fmt::Debug + Sync,
                 stderr_tty: true,
                 echo,
                 line_buffered,
+                line_feeds,
             }
         }
     }
@@ -217,6 +224,11 @@ where Self: fmt::Debug + Sync,
             set_mode_line_buffered();
         } else {
             set_mode_no_line_buffered();
+        }
+        if tty_state.line_feeds {
+            set_mode_line_feeds();
+        } else {
+            set_mode_no_line_feeds();
         }
     }
 

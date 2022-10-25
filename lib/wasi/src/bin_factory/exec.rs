@@ -20,7 +20,9 @@ use crate::{WasiEnv, WasiFunctionEnv, runtime::SpawnedMemory, import_object_for_
 use super::{BinFactory, BinaryPackage, CachedCompiledModules};
 use crate::runtime::SpawnType;
 
-pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: &CachedCompiledModules) -> wasmer_vbus::Result<BusSpawnedProcess> {
+pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: &CachedCompiledModules) -> wasmer_vbus::Result<BusSpawnedProcess>
+{
+    // Load the module
     #[cfg(feature = "sys")]
     let compiler = store.engine().name();
     #[cfg(not(feature = "sys"))]
@@ -47,11 +49,22 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
         }
     };
 
+    // If the file system has not already been union'ed then do so
+    config.env().state.fs.conditional_union(&binary);
+
+    // Now run the module
+    spawn_exec_module(module, store, config, runtime)
+}
+
+pub fn spawn_exec_module(module: Module, store: Store, config: SpawnOptionsConfig<WasiEnv>, runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>) -> wasmer_vbus::Result<BusSpawnedProcess>
+{
+    // Create the signaler
+    let pid = config.env().pid();
+    let signaler = Box::new(config.env().process.clone());
+
+    // Now run the binary
     let (exit_code_tx, exit_code_rx) = mpsc::channel(1);
     {
-        // We pass in a bunch of variables
-        let module_name = name.to_string();
-
         // Determine if shared memory needs to be created and imported
         let shared_memory = module
             .imports()
@@ -93,14 +106,14 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
                 let instance = match Instance::new(&mut store, &module, &import_object) {
                     Ok(a) => a,
                     Err(err) => {
-                        error!("wasm instantiate error ({})", err);
+                        error!("wasi[{}]::wasm instantiate error ({})", pid, err);
                         return;
                     }
                 };
 
                 // Initialize the WASI environment
                 if let Err(err) = wasi_env.initialize(&mut store, &instance) {
-                    error!("wasi initialize error ({})", err);
+                    error!("wasi[{}]::wasi initialize error ({})", pid, err);
                     return;
                 }
                 
@@ -110,11 +123,11 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
                         let code = match e.downcast::<WasiError>() {
                             Ok(WasiError::Exit(code)) => code,
                             Ok(WasiError::UnknownWasiVersion) => {
-                                debug!("exec-failed: unknown wasi version");
+                                debug!("wasi[{}]::exec-failed: unknown wasi version", pid);
                                 __WASI_ENOEXEC as u32
                             }
                             Err(err) => {
-                                debug!("exec-failed: runtime error - {}", err);
+                                debug!("wasi[{}]::exec-failed: runtime error - {}", pid, err);
                                 9999u32
                             },
                         };
@@ -130,7 +143,7 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
                     .ok();
 
                 // If there is a start function
-                debug!("called main() on {}", module_name);
+                debug!("wasi[{}]::called main()", pid);
                 let ret = if let Some(start) = start {
                     match start.call(&mut store, &[]) {
                         Ok(_) => 0,
@@ -138,21 +151,21 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
                             match e.downcast::<WasiError>() {
                                 Ok(WasiError::Exit(code)) => code,
                                 Ok(WasiError::UnknownWasiVersion) => {
-                                    debug!("exec-failed: unknown wasi version");
+                                    debug!("wasi[{}]::exec-failed: unknown wasi version", pid);
                                 __WASI_ENOEXEC as u32
                                 }
                                 Err(err) => {
-                                    debug!("exec-failed: runtime error - {}", err);
+                                    debug!("wasi[{}]::exec-failed: runtime error - {}", pid, err);
                                     9999u32
                                 },
                             }
                         },
                     }
                 } else {
-                    debug!("exec-failed: missing _start function");
+                    debug!("wasi[{}]::exec-failed: missing _start function", pid);
                     __WASI_ENOEXEC as u32
                 };
-                debug!("main() has exited on {} with {}", module_name, ret);
+                debug!("wasi[{}]::main() has exited with {}", pid, ret);
 
                 // Send the result
                 let _ = exit_code_tx.blocking_send(ret);
@@ -160,7 +173,7 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
             }
         ), store, module, memory_spawn)
         .map_err(|err| {
-            error!("failed to launch module [{}] - {}", name, err);
+            error!("wasi[{}]::failed to launch module - {}", pid, err);
             VirtualBusError::UnknownError
         })?
     };
@@ -173,11 +186,11 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
     );
     Ok(
         BusSpawnedProcess {
-            name: name.to_string(),
             inst,
             stdin: None,
             stdout: None,
-            stderr: None
+            stderr: None,
+            signaler: Some(signaler),
         }
     )
 }
@@ -195,19 +208,24 @@ for BinFactory
             if self.builtins.exists(name) {
                 return self.builtins.exec(parent_ctx, name, store, config);
             }
+        } else {
+            if self.builtins.exists(name) {
+                tracing::warn!("builtin command without a parent ctx - {}", name);
+            }
         }
 
         // Find the binary (or die trying) and make the spawn type
-        let binary = self.get_binary(name)
+        let binary = self
+            .get_binary(name)
             .ok_or(VirtualBusError::NotFound)?;
         spawn_exec(binary, name, store, config, &self.runtime, &self.cache)
     }
 }
 
 #[derive(Debug)]
-struct SpawnedProcess {
-    exit_code: Mutex<Option<u32>>,
-    exit_code_rx: Mutex<mpsc::Receiver<u32>>,
+pub(crate) struct SpawnedProcess {
+    pub exit_code: Mutex<Option<u32>>,
+    pub exit_code_rx: Mutex<mpsc::Receiver<u32>>,
 }
 
 impl VirtualBusProcess

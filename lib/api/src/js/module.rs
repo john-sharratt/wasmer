@@ -13,7 +13,6 @@ use js_sys::{Reflect, Uint8Array, WebAssembly};
 use std::fmt;
 use std::io;
 use std::path::Path;
-#[cfg(feature = "js-serializable-module")]
 use bytes::Bytes;
 #[cfg(feature = "std")]
 use thiserror::Error;
@@ -159,6 +158,7 @@ impl Module {
     /// ```
     #[allow(unreachable_code)]
     pub fn new(_store: &impl AsStoreRef, bytes: impl IntoBytes) -> Result<Self, CompileError> {
+        #[allow(unused_mut)]
         let mut bytes = bytes.into_bytes();
         #[cfg(feature = "wat")]
         if bytes.starts_with(b"\0asm") == false {

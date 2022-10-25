@@ -1,10 +1,12 @@
 use serde::*;
 
 pub const WAPM_WEBC_URL: &'static str = "https://registry.wapm.dev/graphql?query=";
-pub const WAPM_WEBC_QUERY: &'static str = r#"
+#[allow(dead_code)]
+pub const WAPM_WEBC_QUERY_ALL: &'static str = r#"
 {
     getPackage(name: "<NAME>") {
-        lastVersion {
+        versions {
+            version,
             distribution {
                 downloadUrl,
                 piritaDownloadUrl
@@ -12,7 +14,30 @@ pub const WAPM_WEBC_QUERY: &'static str = r#"
         }
     }
 }"#;
+pub const WAPM_WEBC_QUERY_LAST: &'static str = r#"
+{
+    getPackage(name: "<NAME>") {
+        lastVersion {
+            version,
+            distribution {
+                downloadUrl,
+                piritaDownloadUrl
+            }
+        }
+    }
+}"#;
+pub const WAPM_WEBC_QUERY_SPECIFIC: &'static str = r#"
+{
+    getPackageVersion(name: "<NAME>", version: "<VERSION>") {
+        version,
+        distribution {
+            downloadUrl,
+            piritaDownloadUrl
+        }
+    }
+}"#;
 pub const WAPM_WEBC_QUERY_TAG: &'static str = "<NAME>";
+pub const WAPM_WEBC_VERSION_TAG: &'static str = "<VERSION>";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WapmWebQueryGetPackageLastVersionDistribution {
@@ -23,7 +48,9 @@ pub struct WapmWebQueryGetPackageLastVersionDistribution {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct WapmWebQueryGetPackageLastVersion {
+pub struct WapmWebQueryGetPackageVersion {
+    #[serde(rename = "version")]
+    pub version: String,
     #[serde(rename = "distribution")]
     pub distribution: WapmWebQueryGetPackageLastVersionDistribution
 }
@@ -31,13 +58,15 @@ pub struct WapmWebQueryGetPackageLastVersion {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WapmWebQueryGetPackage {
     #[serde(rename = "lastVersion")]
-    pub last_version: WapmWebQueryGetPackageLastVersion
+    pub last_version: WapmWebQueryGetPackageVersion
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WapmWebQueryData {
     #[serde(rename = "getPackage")]
-    pub get_package: Option<WapmWebQueryGetPackage>
+    pub get_package: Option<WapmWebQueryGetPackage>,
+    #[serde(rename = "getPackageVersion")]
+    pub get_package_version: Option<WapmWebQueryGetPackageVersion>
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

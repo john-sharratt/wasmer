@@ -1595,6 +1595,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
 
 [[package]]
+name = "linked_hash_set"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47186c6da4d81ca383c7c47c1bfc80f4b95f4720514d860a5407aaf4233f9588"
+dependencies = [
+ "linked-hash-map",
+]
+
+[[package]]
 name = "llvm-sys"
 version = "120.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3605,6 +3614,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cfg-if 1.0.0",
+ "derivative",
  "hashbrown 0.11.2",
  "indexmap",
  "js-sys",
@@ -3930,6 +3940,7 @@ dependencies = [
  "cc",
  "cfg-if 1.0.0",
  "corosensei",
+ "derivative",
  "enum-iterator",
  "indexmap",
  "lazy_static",
@@ -3975,6 +3986,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "libc",
+ "linked_hash_set",
  "rand",
  "reqwest",
  "serde",
@@ -3996,6 +4008,10 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "wasmer",
+ "wasmer-compiler",
+ "wasmer-compiler-cranelift",
+ "wasmer-compiler-llvm",
+ "wasmer-compiler-singlepass",
  "wasmer-types",
  "wasmer-vbus",
  "wasmer-vfs",

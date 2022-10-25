@@ -5,7 +5,7 @@ use js_sys::Function;
 use js_sys::WebAssembly::{Memory, Table};
 use std::fmt;
 use wasm_bindgen::{JsCast, JsValue};
-use wasmer_types::{ExternType, FunctionType, GlobalType, MemoryType, TableType, Pages, WASM_PAGE_SIZE};
+use wasmer_types::{ExternType, FunctionType, GlobalType, MemoryType, TableType, Pages, WASM_PAGE_SIZE, StoreSnapshot};
 use crate::MemoryView;
 #[cfg(feature="tracing")]
 use tracing::trace;
@@ -91,6 +91,31 @@ pub struct VMGlobal {
 impl VMGlobal {
     pub(crate) fn new(global: Global, ty: GlobalType) -> Self {
         Self { global, ty }
+    }
+
+    /// Saves the global value into the snapshot
+    pub fn save_snapshot(&self, index: usize, snapshot: &mut StoreSnapshot) {
+        if let Some(val) = self.global.as_f64() {
+            let entry = snapshot.globals
+                .entry(index as u32)
+                .or_default();
+            *entry = val as u128;
+        }
+    }
+
+    /// Restores the global value from the snapshot
+    pub fn restore_snapshot(&mut self, index: usize, snapshot: &StoreSnapshot) {
+        let index = index as u32;
+        if let Some(entry) = snapshot.globals.get(&index) {
+            if let Some(existing) = self.global.as_f64() {
+                let existing = existing as u128;
+                if existing == *entry {
+                    return;
+                }
+            }
+            let value = JsValue::from_f64(*entry as _);
+            self.global.set_value(&value);
+        }
     }
 }
 

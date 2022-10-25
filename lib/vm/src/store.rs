@@ -7,6 +7,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use wasmer_types::StoreSnapshot;
+
 use crate::VMExternObj;
 
 use crate::{InstanceHandle, VMFunction, VMFunctionEnvironment, VMGlobal, VMMemory, VMTable};
@@ -60,7 +62,7 @@ impl_context_object! {
 }
 
 /// Set of objects managed by a context.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct StoreObjects {
     id: StoreId,
     memories: Vec<VMMemory>,
@@ -99,6 +101,22 @@ impl StoreObjects {
         } else {
             let (low, high) = list.split_at_mut(a.index());
             (&mut high[0], &mut low[a.index()])
+        }
+    }
+
+    /// Serializes the mutable things into a snapshot
+    pub fn save_snapshot(&self) -> StoreSnapshot {
+        let mut ret = StoreSnapshot::default();
+        for (index, global) in self.globals.iter().enumerate() {
+            global.save_snapshot(index, &mut ret);
+        }
+        ret
+    }
+
+    /// Serializes the mutable things into a snapshot
+    pub fn restore_snapshot(&mut self, snapshot: &StoreSnapshot) {
+        for (index, global) in self.globals.iter_mut().enumerate() {
+            global.restore_snapshot(index, snapshot);
         }
     }
 }

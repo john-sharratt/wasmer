@@ -535,7 +535,7 @@ impl WasiStateBuilder {
                 fs_backing,
             )
             .map_err(WasiStateCreationError::WasiFsCreationError)?;
-
+            
             // set up the file system, overriding base files and calling the setup function
             wasi_fs
                 .swap_file(inodes.deref(), __WASI_STDIN_FILENO, stdin)

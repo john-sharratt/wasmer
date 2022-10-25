@@ -3,7 +3,7 @@ use std::{
     ops::Deref,
     path::PathBuf,
 };
-use webc::{FsEntryType, WebC, Annotation};
+use webc::{FsEntryType, WebC, Annotation, UrlOrManifest};
 use webc_vfs::VirtualFileSystem;
 use tracing::*;
 
@@ -23,16 +23,23 @@ mod manifest;
 
 use pirita::*;
 
-pub(crate) fn fetch_webc(cache_dir: &str, name: &str, runtime: &dyn WasiRuntimeImplementation) -> Option<BinaryPackage> {
-    let name = name.split_once(":").map(|a| a.0).unwrap_or_else(|| name);
+pub(crate) fn fetch_webc(cache_dir: &str, webc: &str, runtime: &dyn WasiRuntimeImplementation) -> Option<BinaryPackage> {
+    let name = webc.split_once(":").map(|a| a.0).unwrap_or_else(|| webc);
+    let (name, version) = match name.split_once("@") {
+        Some((name, version)) => (name, Some(version)),
+        None => (name, None)
+    };
+    let url_query = match version {
+        Some(version) => WAPM_WEBC_QUERY_SPECIFIC
+                .replace(WAPM_WEBC_QUERY_TAG, name.replace("\"", "'").as_str())
+                .replace(WAPM_WEBC_VERSION_TAG, version.replace("\"", "'").as_str()),
+        None => WAPM_WEBC_QUERY_LAST
+                .replace(WAPM_WEBC_QUERY_TAG,name.replace("\"", "'").as_str())
+    };
     let url = format!(
         "{}{}",
         WAPM_WEBC_URL,
-        urlencoding::encode(
-            WAPM_WEBC_QUERY.replace(WAPM_WEBC_QUERY_TAG,
-                name.replace("\"", "'").as_str())
-            .as_str()
-        )
+        urlencoding::encode(url_query.as_str())
     );
     let options = ReqwestOptions::default();
     let headers = Default::default();
@@ -43,14 +50,24 @@ pub(crate) fn fetch_webc(cache_dir: &str, name: &str, runtime: &dyn WasiRuntimeI
                 if let Some(data) = wapm.data {
                     match serde_json::from_slice::<'_, WapmWebQuery>(data.as_ref()) {
                         Ok(query) => {
-                            if let Some(package) = query.data.get_package {
-                                if let Some(pirita_download_url) = package.last_version.distribution.pirita_download_url {
-                                    return download_webc(cache_dir, name, pirita_download_url, runtime);
+                            if let Some(package) = query.data.get_package_version {
+                                if let Some(pirita_download_url) = package.distribution.pirita_download_url {
+                                    let mut ret = download_webc(cache_dir, name, pirita_download_url, runtime)?;
+                                    ret.version = package.version.into();
+                                    return Some(ret);
                                 } else {
-                                    warn!("package has no pirita or tar build: {}", String::from_utf8_lossy(data.as_ref()));
+                                    warn!("package ({}) has no pirita download URL: {}", webc, String::from_utf8_lossy(data.as_ref()));
+                                }
+                            } else if let Some(package) = query.data.get_package {
+                                if let Some(pirita_download_url) = package.last_version.distribution.pirita_download_url {
+                                    let mut ret = download_webc(cache_dir, name, pirita_download_url, runtime)?;
+                                    ret.version = package.last_version.version.into();
+                                    return Some(ret);
+                                } else {
+                                    warn!("package ({}) has no pirita download URL: {}", webc, String::from_utf8_lossy(data.as_ref()));
                                 }
                             } else {
-                                warn!("failed to parse WAPM package: {}", String::from_utf8_lossy(data.as_ref()));    
+                                warn!("failed to parse WAPM package ({}): {}", name, String::from_utf8_lossy(data.as_ref()));    
                             }
                         },
                         Err(err) => {
@@ -71,9 +88,18 @@ pub(crate) fn fetch_webc(cache_dir: &str, name: &str, runtime: &dyn WasiRuntimeI
 
 fn download_webc(cache_dir: &str, name: &str, pirita_download_url: String, runtime: &dyn WasiRuntimeImplementation) -> Option<BinaryPackage>
 {
+    let mut name_comps = pirita_download_url.split("/").collect::<Vec<_>>().into_iter().rev();
+    let mut name = name_comps.next().unwrap_or_else(|| name);
+    let mut name_store;
+    for _ in 0..2 {
+        if let Some(prefix) = name_comps.next() {
+            name_store = format!("{}_{}", prefix, name);
+            name = name_store.as_str();
+        }
+    }
     let compute_path = |cache_dir: &str, name: &str| {
         let name = name.replace("/", "._.");
-        std::path::Path::new(cache_dir).join(format!("{}.webc", name.as_str()).as_str())
+        std::path::Path::new(cache_dir).join(format!("{}", name.as_str()).as_str())
     };
 
     // build the parse options
@@ -183,6 +209,7 @@ where T: std::fmt::Debug + Send + Sync + 'static,
       T: Deref<Target=WebC<'static>>
 {
     let package_name = webc.get_package_name();
+
     let mut pck = webc.manifest.entrypoint
         .iter()
         .filter_map(|entry| {
@@ -216,11 +243,38 @@ where T: std::fmt::Debug + Send + Sync + 'static,
             }
         })
         .map(|atom| {
-            BinaryPackage::new_with_ownership(atom.into(), ownership.clone())
+            BinaryPackage::new_with_ownership(package_name.as_str(), atom.into(), ownership.clone())
         })
         .next();
 
     if let Some(pck) = pck.as_mut() {
+        
+        // Add all the dependencies
+        for uses in webc.manifest.use_map.values() {
+            let uses = match uses {
+                UrlOrManifest::Url(url) => Some(url.path().to_string()),
+                UrlOrManifest::Manifest(manifest) => {
+                    manifest.origin.as_ref().map(|a| a.clone())
+                },
+                UrlOrManifest::RegistryDependentUrl(url) => {
+                    Some(url.clone())
+                },
+            };
+            if let Some(uses) = uses {
+                pck.uses.push(uses);
+            }
+        }
+
+        // Set the version of this package
+        if let Some(Annotation::Map(wapm)) = webc.manifest.package.get("wapm") {
+            if let Some(Annotation::Text(version)) = wapm.get(&Annotation::Text("version".to_string())) {
+                pck.version = version.clone().into();
+            }
+        } else if let Some(Annotation::Text(version)) = webc.manifest.package.get("version") {
+            pck.version = version.clone().into();
+        }
+
+        // Add all the file system files
         let top_level_dirs = webc
             .get_volumes_for_package(&package_name)
             .into_iter()

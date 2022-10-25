@@ -73,11 +73,11 @@ impl CmdWasmer{
                 spawn_exec(binary, name, store, config, &self.runtime, &self.cache)
             } else {
                 let _ = stderr_write(parent_ctx, format!("package not found - {}\r\n", what).as_bytes());
-                Ok(BusSpawnedProcess::exited_process(name, __WASI_ENOENT as u32))   
+                Ok(BusSpawnedProcess::exited_process(__WASI_ENOENT as u32))   
             }
         } else {
             let _ = stderr_write(parent_ctx, HELP_RUN.as_bytes());
-            Ok(BusSpawnedProcess::exited_process(name, 0))
+            Ok(BusSpawnedProcess::exited_process(0))
         }
     }
 
@@ -109,7 +109,7 @@ for CmdWasmer {
             Some("--help") |
             None => {
                 let _ = stderr_write(parent_ctx, HELP.as_bytes());
-                Ok(BusSpawnedProcess::exited_process(name, 0))
+                Ok(BusSpawnedProcess::exited_process(0))
             },            
             Some(what) => {
                 let what = Some(what.to_string());

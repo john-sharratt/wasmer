@@ -34,6 +34,7 @@ pub use self::parking::*;
 use crate::WasiCallingId;
 use crate::WasiFunctionEnv;
 use crate::WasiRuntimeImplementation;
+use crate::bin_factory::BinaryPackage;
 use crate::syscalls::types::*;
 use crate::utils::map_io_err;
 use cooked_waker::ViaRawPointer;
@@ -51,6 +52,7 @@ use wasmer_vfs::FileOpener;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Condvar;
 use std::sync::MutexGuard;
@@ -357,6 +359,7 @@ pub struct WasiFs {
     pub is_wasix: AtomicBool,
     #[cfg_attr(feature = "enable-serde", serde(skip, default))]
     pub root_fs: crate::fs::TmpFileSystem,
+    pub has_unioned: Arc<Mutex<HashSet<String>>>,
 }
 
 impl WasiFs
@@ -377,6 +380,7 @@ impl WasiFs
             current_dir: Mutex::new(self.current_dir.lock().unwrap().clone()),
             is_wasix: AtomicBool::new(self.is_wasix.load(Ordering::Acquire)),
             root_fs: self.root_fs.clone(),
+            has_unioned: Arc::new(Mutex::new(HashSet::new()))
         }
     }
 
@@ -389,6 +393,20 @@ impl WasiFs
 
         for fd in fds {
             _ = self.close_fd_ext(inodes, &mut guard, fd);
+        }
+    }
+
+    /// Will conditionally union the binary file system with this one
+    /// if it has not already been unioned
+    pub fn conditional_union(&self, binary: &BinaryPackage) {
+        let package_name = binary.package_name.to_string();
+        let mut guard = self.has_unioned.lock().unwrap();
+        if guard.contains(&package_name) == false {
+            guard.insert(package_name);
+
+            if let Some(fs) = binary.webc_fs.clone() {
+                self.root_fs.union(&fs);
+            }            
         }
     }
 }
@@ -660,6 +678,7 @@ impl WasiFs {
             current_dir: Mutex::new("/".to_string()),
             is_wasix: AtomicBool::new(false),
             root_fs,
+            has_unioned: Arc::new(Mutex::new(HashSet::new()))
         };
         wasi_fs.create_stdin(inodes);
         wasi_fs.create_stdout(inodes);

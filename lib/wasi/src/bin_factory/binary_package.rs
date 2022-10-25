@@ -55,6 +55,7 @@ impl BinaryPackageCommand {
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
 pub struct BinaryPackage {
+    pub package_name: Cow<'static, str>, 
     pub when_cached: u128,
     pub ownership: Option<Arc<dyn Any + Send + Sync + 'static>>,
     #[derivative(Debug = "ignore")]
@@ -68,12 +69,19 @@ pub struct BinaryPackage {
     pub mappings: Vec<String>,
     pub envs: HashMap<String, String>,
     pub commands: Arc<RwLock<Vec<BinaryPackageCommand>>>,
+    pub uses: Vec<String>,
+    pub version: Cow<'static, str>,
 }
 
 impl BinaryPackage {
-    pub fn new(entry: Cow<'static, [u8]>) -> Self {
+    pub fn new(package_name: &str, entry: Cow<'static, [u8]>) -> Self {
         let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
+        let (package_name, version) = match package_name.split_once("@") {
+            Some((a, b)) => (a.to_string(), b.to_string()),
+            None => (package_name.to_string(), "1.0.0".to_string())
+        };
         Self {
+            package_name: package_name.into(),
             when_cached: now,
             ownership: None,
             entry,
@@ -86,14 +94,16 @@ impl BinaryPackage {
             mappings: Vec::new(),
             envs: HashMap::default(),
             commands: Arc::new(RwLock::new(Vec::new())),
+            uses: Vec::new(),
+            version: version.into(),
         }
     }
 
-    pub unsafe fn new_with_ownership<'a, T>(entry: Cow<'a, [u8]>, ownership: Arc<T>) -> Self
+    pub unsafe fn new_with_ownership<'a, T>(package_name: &str, entry: Cow<'a, [u8]>, ownership: Arc<T>) -> Self
     where T: 'static
     {
         let ownership: Arc<dyn Any> = ownership;
-        let mut ret = Self::new(std::mem::transmute(entry));
+        let mut ret = Self::new(package_name, std::mem::transmute(entry));
         ret.ownership = Some(std::mem::transmute(ownership));
         ret
     }

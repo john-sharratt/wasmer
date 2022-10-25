@@ -119,6 +119,7 @@ singlepass = [
 cranelift = [
     "wasmer-compiler-cranelift",
     "compiler",
+    "wasmer-wasi/compiler-cranelift"
 ]
 llvm = [
     "wasmer-compiler-llvm",

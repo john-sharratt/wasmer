@@ -110,6 +110,11 @@ impl<'a> StoreRef<'a> {
     pub fn same(a: &Self, b: &Self) -> bool {
         a.inner.objects.id() == b.inner.objects.id()
     }
+
+    /// Serializes the mutable things into a snapshot
+    pub fn save_snapshot(&self) -> wasmer_types::StoreSnapshot {
+        self.inner.objects.save_snapshot()
+    }
 }
 
 /// A temporary handle to a [`Context`].
@@ -123,6 +128,16 @@ impl<'a> StoreMut<'a> {
     /// tunables are excluded from the logic.
     pub fn same(a: &Self, b: &Self) -> bool {
         a.inner.objects.id() == b.inner.objects.id()
+    }
+
+    /// Serializes the mutable things into a snapshot
+    pub fn save_snapshot(&self) -> wasmer_types::StoreSnapshot {
+        self.inner.objects.save_snapshot()
+    }
+
+    /// Restores a snapshot back into the store
+    pub fn restore_snapshot(&mut self, snapshot: &wasmer_types::StoreSnapshot) {
+        self.inner.objects.restore_snapshot(snapshot);
     }
 
     pub(crate) fn as_raw(&self) -> *mut StoreInner {
@@ -302,6 +317,22 @@ mod objects {
             } else {
                 let (low, high) = list.split_at_mut(a.index());
                 (&mut high[0], &mut low[a.index()])
+            }
+        }
+
+        /// Serializes the mutable things into a snapshot
+        pub fn save_snapshot(&self) -> wasmer_types::StoreSnapshot {
+            let mut ret = wasmer_types::StoreSnapshot::default();
+            for (index, global) in self.globals.iter().enumerate() {
+                global.save_snapshot(index, &mut ret);
+            }
+            ret
+        }
+    
+        /// Serializes the mutable things into a snapshot
+        pub fn restore_snapshot(&mut self, snapshot: &wasmer_types::StoreSnapshot) {
+            for (index, global) in self.globals.iter_mut().enumerate() {
+                global.restore_snapshot(index, snapshot);
             }
         }
     }

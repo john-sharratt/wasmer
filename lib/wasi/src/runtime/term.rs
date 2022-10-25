@@ -59,7 +59,7 @@ pub fn set_mode_echo() -> std::fs::File {
 }
 
 #[cfg(unix)]
-pub fn set_mode_no_line_buffered() -> std::fs::File {
+pub fn set_mode_no_line_feeds() -> std::fs::File {
     let tty = std::fs::File::open("/dev/tty").unwrap();
     let fd = tty.as_raw_fd();
 
@@ -74,7 +74,7 @@ pub fn set_mode_no_line_buffered() -> std::fs::File {
 }
 
 #[cfg(unix)]
-pub fn set_mode_line_buffered() -> std::fs::File {
+pub fn set_mode_line_feeds() -> std::fs::File {
     let tty = std::fs::File::open("/dev/tty").unwrap();
     let fd = tty.as_raw_fd();
 
@@ -83,6 +83,36 @@ pub fn set_mode_line_buffered() -> std::fs::File {
     let mut termios = unsafe { termios.assume_init() };
 
     termios.c_lflag |= ICANON;
+    
+    unsafe { tcsetattr(fd, TCSANOW, &termios) };
+    tty
+}
+
+#[cfg(unix)]
+pub fn set_mode_no_line_feeds() -> std::fs::File {
+    let tty = std::fs::File::open("/dev/tty").unwrap();
+    let fd = tty.as_raw_fd();
+
+    let mut termios = mem::MaybeUninit::<termios>::uninit();
+    io_result(unsafe { ::libc::tcgetattr(fd, termios.as_mut_ptr()) }).unwrap();
+    let mut termios = unsafe { termios.assume_init() };
+
+    termios.c_lflag &= !ONLCR;
+    
+    unsafe { tcsetattr(fd, TCSANOW, &termios) };
+    tty
+}
+
+#[cfg(unix)]
+pub fn set_mode_line_feeds() -> std::fs::File {
+    let tty = std::fs::File::open("/dev/tty").unwrap();
+    let fd = tty.as_raw_fd();
+
+    let mut termios = mem::MaybeUninit::<termios>::uninit();
+    io_result(unsafe { ::libc::tcgetattr(fd, termios.as_mut_ptr()) }).unwrap();
+    let mut termios = unsafe { termios.assume_init() };
+
+    termios.c_lflag |= ONLCR;
     
     unsafe { tcsetattr(fd, TCSANOW, &termios) };
     tty

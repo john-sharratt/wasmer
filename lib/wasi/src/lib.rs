@@ -15,6 +15,10 @@
 #[cfg(all(not(feature = "sys"), not(feature = "js")))]
 compile_error!("At least the `sys` or the `js` feature must be enabled. Please, pick one.");
 
+#[cfg(feature="compiler")]
+#[cfg(not(any(feature = "compiler-cranelift", feature = "compiler-llvm", feature = "compiler-singlepass")))]
+compile_error!("Either feature \"compiler_cranelift\", \"compiler_singlepass\" or \"compiler_llvm\" must be enabled when using \"compiler\".");
+
 #[cfg(all(feature = "sys", feature = "js"))]
 compile_error!(
     "Cannot have both `sys` and `js` features enabled at the same time. Please, pick one."
@@ -41,6 +45,17 @@ pub mod wapm;
 pub mod bin_factory;
 #[cfg(feature = "os")]
 pub mod builtins;
+#[cfg(feature = "os")]
+pub mod os;
+
+#[cfg(feature = "compiler")]
+pub use wasmer_compiler;
+#[cfg(feature = "compiler-cranelift")]
+pub use wasmer_compiler_cranelift;
+#[cfg(feature = "compiler-llvm")]
+pub use wasmer_compiler_llvm;
+#[cfg(feature = "compiler-singlepass")]
+pub use wasmer_compiler_singlepass;
 
 pub use crate::state::{
     Fd, Pipe, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
@@ -53,22 +68,30 @@ pub use crate::utils::{
 };
 #[cfg(feature = "os")]
 use bin_factory::BinFactory;
-use bytes::BytesMut;
 #[allow(unused_imports)]
-#[cfg(feature = "js")]
-use bytes::Bytes;
+use bytes::{BytesMut, Bytes};
 use derivative::Derivative;
 use syscalls::platform_clock_time_get;
 use tracing::{trace, warn, error};
 use wasmer_vbus::SpawnEnvironmentIntrinsics;
-pub use wasmer_vbus::{DefaultVirtualBus, VirtualBus};
+pub use wasmer_vbus::{DefaultVirtualBus, VirtualBus, BusSpawnedProcessJoin};
 #[deprecated(since = "2.1.0", note = "Please use `wasmer_vfs::FsError`")]
 pub use wasmer_vfs::FsError as WasiFsError;
 #[deprecated(since = "2.1.0", note = "Please use `wasmer_vfs::VirtualFile`")]
 pub use wasmer_vfs::VirtualFile as WasiFile;
 pub use wasmer_vfs::{FsError, VirtualFile};
 pub use wasmer_vnet::{UnsupportedVirtualNetworking, VirtualNetworking};
-use wasmer_wasi_types::__WASI_CLOCK_MONOTONIC;
+use wasmer_wasi_types::{__WASI_CLOCK_MONOTONIC, __WASI_SIGKILL, __WASI_SIGQUIT, __WASI_SIGINT, __WASI_EINTR};
+
+// re-exports needed for OS
+#[cfg(feature = "os")]
+pub use wasmer_vfs;
+#[cfg(feature = "os")]
+pub use wasmer_vnet;
+#[cfg(feature = "os")]
+pub use wasmer_vbus;
+#[cfg(feature = "os")]
+pub use wasmer;
 
 use std::cell::RefCell;
 use std::ops::Deref;
@@ -156,6 +179,10 @@ pub struct WasiEnvInner
     /// Signals are triggered asynchronously at idle times of the process
     #[derivative(Debug = "ignore")]
     signal: Option<TypedFunction<i32, ()>>,
+    /// Flag that indicates if the signal callback has been set by the WASM
+    /// process - if it has not been set then the runtime behaves differently
+    /// when a CTRL-C is pressed.
+    signal_set: bool,
     /// Represents the callback for destroying a local thread variable (name = "_thread_local_destroy")
     /// [this takes a pointer to the destructor and the data to be destroyed]
     #[derivative(Debug = "ignore")]
@@ -208,6 +235,7 @@ impl WasiEnvInner
             thread_spawn: instance.exports.get_typed_function(store, "_start_thread").ok(),
             react: instance.exports.get_typed_function(store, "_react").ok(),
             signal: instance.exports.get_typed_function(store, "__wasm_signal").ok(),
+            signal_set: false,
             asyncify_start_unwind: instance.exports.get_typed_function(store, "asyncify_start_unwind").ok(),
             asyncify_stop_unwind: instance.exports.get_typed_function(store, "asyncify_stop_unwind").ok(),
             asyncify_start_rewind: instance.exports.get_typed_function(store, "asyncify_start_rewind").ok(),
@@ -234,6 +262,8 @@ pub struct WasiVFork {
     pub rewind_stack: BytesMut,
     /// The memory stack before the vfork occured
     pub memory_stack: BytesMut,
+    /// The mutable parts of the store
+    pub store_data: Bytes,
     /// The environment before the vfork occured
     pub env: Box<WasiEnv>,
     /// Handle of the thread we have forked (dropping this handle
@@ -389,13 +419,31 @@ impl WasiEnv {
         self.process.active_threads()
     }
 
-    // Yields execution
-    pub fn yield_now_with_signals(&self, store: &mut impl AsStoreMut) -> Result<(), WasiError> {
+    /// Porcesses any signals that are batched up
+    pub fn process_signals(&self, store: &mut impl AsStoreMut) -> Result<(), WasiError>
+    {
+        // If a signal handler has never been set then we need to handle signals
+        // differently
+        if self.inner().signal_set == false {
+            let signals = self.thread.pop_signals();
+            for sig in signals {
+                if sig == __WASI_SIGINT ||
+                   sig == __WASI_SIGQUIT ||
+                   sig == __WASI_SIGKILL
+                {
+                    return Err(WasiError::Exit(__WASI_EINTR as u32));
+                } else {
+                    trace!("wasi[{}]::signal-ignored: {}", self.pid(), sig);
+                }
+            }
+        }
+
         // Check for any signals that we need to trigger
         // (but only if a signal handler is registered)
         if let Some(handler) = self.inner().signal.clone() {
             let mut signals = self.thread.pop_signals();
 
+            // We might also have signals that trigger on timers
             let mut now = 0;
             let has_signal_interval = {
                 let mut any = false;
@@ -424,20 +472,27 @@ impl WasiEnv {
             }
 
             for signal in signals {
-                trace!("processing-signal: {}", signal);
+                tracing::trace!("wasi[{}]::processing-signal: {}", self.pid(), signal);
                 if let Err(err) = handler.call(store, signal as i32) {
                     match err.downcast::<WasiError>() {
                         Ok(err) => {
                             return Err(err);
                         }
                         Err(err) => {
-                            warn!("signal handler runtime error - {}", err);
+                            warn!("wasi[{}]::signal handler runtime error - {}", self.pid(), err);
                             return Err(WasiError::Exit(1));
                         }
                     }
                 }
             }
         }
+        self.yield_now()
+    }
+
+    // Yields execution
+    pub fn yield_now_with_signals(&self, store: &mut impl AsStoreMut) -> Result<(), WasiError>
+    {
+        self.process_signals(store)?;
         self.yield_now()
     }
 
@@ -452,7 +507,7 @@ impl WasiEnv {
         self.runtime.sleep_now(current_caller_id(), 0)?;
         Ok(())
     }
-
+    
     // Sleeps for a period of time
     pub fn sleep(&self, store: &mut impl AsStoreMut, duration: Duration) -> Result<(), WasiError> {
         let duration = duration.as_nanos();
@@ -557,20 +612,40 @@ impl WasiEnv {
     }
 
     #[cfg(feature = "os")]
-    pub fn uses<'a>(&self, uses: Vec<String>) -> Result<(), WasiStateCreationError>
+    pub fn uses<'a, I>(&self, uses: I) -> Result<(), WasiStateCreationError>
+    where I: IntoIterator<Item = String>
     {
+        use std::{collections::{VecDeque, HashMap}, borrow::Cow};
         // Load all the containers that we inherit from
         #[allow(unused_imports)]
         use std::path::Path;
         #[allow(unused_imports)]
         use wasmer_vfs::FileSystem;
 
-        for uses in uses.iter().rev().map(|a| a.as_str()) {
-            if let Some(package) = self.bin_factory.builtins.cmd_wasmer.get(uses.to_string())
+        let mut already: HashMap<String, Cow<'static, str>> = HashMap::new();
+
+        let mut use_packages = uses.into_iter().collect::<VecDeque<_>>();
+        while let Some(use_package) = use_packages.pop_back() {
+            if let Some(package) = self.bin_factory.builtins.cmd_wasmer.get(use_package.clone())
             {
+                // If its already been added make sure the version is correct
+                let package_name = package.package_name.to_string();
+                if let Some(version) = already.get(&package_name) {
+                    if version.as_ref() != package.version.as_ref() {
+                        return Err(WasiStateCreationError::WasiInheritError(format!("webc package version conflict for {} - {} vs {}", use_package, version, package.version)));
+                    }
+                    continue;
+                }
+                already.insert(package_name, package.version.clone());
+                
+                // Add the additional dependencies
+                for dependency in package.uses.clone() {
+                    use_packages.push_back(dependency);
+                }
+
                 // We first need to copy any files in the package over to the temporary file system
-                if let Some(fs) = package.webc_fs {
-                    self.state.fs.root_fs.union(&fs);
+                if let Some(fs) = package.webc_fs.as_ref() {
+                    self.state.fs.root_fs.union(fs);
                 }
 
                 // Add all the commands as binaries in the bin folder
@@ -585,13 +660,18 @@ impl WasiEnv {
                             .new_open_options_ext()
                             .insert_ro_file(path, command.atom.clone())
                         {
-                            tracing::debug!("failed to add package [{}] command [{}] - {}", uses, command.name, err);
+                            tracing::debug!("failed to add package [{}] command [{}] - {}", use_package, command.name, err);
                             continue;
                         }
+
+                        // Add the binary package to the bin factory (zero copy the atom)
+                        let mut package = package.clone();
+                        package.entry = command.atom.clone();
+                        self.bin_factory.set_binary(path.as_os_str().to_string_lossy().as_ref(), package);
                     }
                 }
             } else {
-                return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", uses)));
+                return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", use_package)));
             }
         }
         Ok(())
@@ -735,6 +815,7 @@ impl WasiFunctionEnv {
             thread_spawn: instance.exports.get_typed_function(store, "_start_thread").ok(),
             react: instance.exports.get_typed_function(store, "_react").ok(),
             signal: instance.exports.get_typed_function(&store, "__wasm_signal").ok(),
+            signal_set: false,
             asyncify_start_unwind: instance.exports.get_typed_function(store, "asyncify_start_unwind").ok(),
             asyncify_stop_unwind: instance.exports.get_typed_function(store, "asyncify_stop_unwind").ok(),
             asyncify_start_rewind: instance.exports.get_typed_function(store, "asyncify_start_rewind").ok(),

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use thiserror::Error;
@@ -126,6 +127,10 @@ where T: SpawnEnvironmentIntrinsics
         }
     }
 
+    pub fn conf(self) -> SpawnOptionsConfig<T> {
+        self.conf
+    }
+
     pub fn options(mut self, options: SpawnOptionsConfig<T>) -> Self {
         self.conf = options;
         self
@@ -137,10 +142,42 @@ where T: SpawnEnvironmentIntrinsics
     }
 }
 
+pub struct BusSpawnedProcessJoin {
+    inst: Box<dyn VirtualBusProcess + Sync + Unpin>,
+}
+
+impl BusSpawnedProcessJoin
+{
+    pub fn new(process: BusSpawnedProcess) -> Self {
+        Self {
+            inst: process.inst
+        }
+    }
+}
+
+impl Future
+for BusSpawnedProcessJoin {
+    type Output = Option<u32>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inst = Pin::new(self.inst.as_mut());
+        match inst.poll_ready(cx) {
+            Poll::Ready(_) => Poll::Ready(self.inst.exit_code()),
+            Poll::Pending => Poll::Pending
+        }
+    }
+}
+
+/// Signal handles...well...they process signals
+pub trait SignalHandlerAbi
+where Self: std::fmt::Debug
+{
+    /// Processes a signal
+    fn signal(&self, sig: u8);
+}
+
 #[derive(Debug)]
 pub struct BusSpawnedProcess {
-    /// Name of the spawned process
-    pub name: String,
     /// Reference to the spawned instance
     pub inst: Box<dyn VirtualBusProcess + Sync + Unpin>,
     /// Virtual file used for stdin
@@ -149,13 +186,14 @@ pub struct BusSpawnedProcess {
     pub stdout: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
     /// Virtual file used for stderr
     pub stderr: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
+    /// The signal handler for this process (if any)
+    pub signaler: Option<Box<dyn SignalHandlerAbi + Send + Sync + 'static>>,
 }
 
 impl BusSpawnedProcess
 {
-    pub fn exited_process(name: &str, exit_code: u32) -> Self {
+    pub fn exited_process(exit_code: u32) -> Self {
         Self {
-            name: name.to_string(),
             inst: Box::new(
                 ExitedProcess {
                     exit_code
@@ -163,7 +201,8 @@ impl BusSpawnedProcess
             ),
             stdin: None,
             stdout: None,
-            stderr: None
+            stderr: None,
+            signaler: None,
         }
     }
 }

@@ -9,7 +9,7 @@ use std::{
 
 use bytes::{BytesMut, Bytes};
 use tracing::log::trace;
-use wasmer_vbus::BusSpawnedProcess;
+use wasmer_vbus::{BusSpawnedProcess, SignalHandlerAbi};
 use wasmer_wasi_types::{__wasi_signal_t, __wasi_exitcode_t, __WASI_CLOCK_MONOTONIC, __wasi_errno_t, __WASI_ECHILD};
 
 use crate::syscalls::platform_clock_time_get;
@@ -53,6 +53,7 @@ for WasiThreadId {
 struct ThreadSnapshot
 {
     call_stack: Bytes,
+    store_data: Bytes,
 }
 
 /// Represents a linked list of stack snapshots
@@ -60,6 +61,7 @@ struct ThreadSnapshot
 struct ThreadStack
 {
     memory_stack: Vec<u8>,
+    memory_stack_corrected: Vec<u8>,
     snapshots: HashMap<u128, ThreadSnapshot>,
     next: Option<Box<ThreadStack>>,
 }
@@ -70,6 +72,7 @@ struct ThreadStack
 pub struct WasiThread
 {
     pub(crate) is_main: bool,
+    pub(crate) pid: WasiProcessId,
     pub(crate) id: WasiThreadId,
     finished: Arc<(Mutex<Option<u32>>, Condvar)>,
     pub(crate) signals: Arc<Mutex<Vec<__wasi_signal_t>>>,
@@ -78,6 +81,11 @@ pub struct WasiThread
 
 impl WasiThread
 {
+    /// Returns the process ID
+    pub fn pid(&self) -> WasiProcessId {
+        self.pid
+    }
+
     /// Returns the thread ID
     pub fn tid(&self) -> WasiThreadId {
         self.id
@@ -137,20 +145,38 @@ impl WasiThread
     }
 
     /// Adds a stack snapshot and removes dead ones
-    pub fn add_snapshot(&self, mut memory_stack: &[u8], hash: u128, rewind_stack: &[u8]) {
+    pub fn add_snapshot(&self, mut memory_stack: &[u8], memory_stack_corrected: &[u8], hash: u128, rewind_stack: &[u8], store_data: &[u8]) {
         // Lock the stack
         let mut stack = self.stack.lock().unwrap();
         let mut pstack = stack.deref_mut();
         loop {
             // First we validate if the stack is no longer valid
-            if pstack.memory_stack.len() > memory_stack.len() ||
-                pstack.memory_stack.iter().zip(memory_stack.iter()).any(|(a, b)| *a != *b)
+            let memory_stack_before = pstack.memory_stack.len();
+            let memory_stack_after= memory_stack.len();
+            if memory_stack_before > memory_stack_after ||
+                (
+                    pstack.memory_stack.iter().zip(memory_stack.iter()).any(|(a, b)| *a == *b) == false &&
+                    pstack.memory_stack_corrected.iter().zip(memory_stack.iter()).any(|(a, b)| *a == *b) == false
+                )
             {
                 // The stacks have changed so need to start again at this segment
                 let mut new_stack = ThreadStack::default();
                 new_stack.memory_stack = memory_stack.to_vec();
+                new_stack.memory_stack_corrected = memory_stack_corrected.to_vec();
                 std::mem::swap(pstack, &mut new_stack);
                 memory_stack = &memory_stack[memory_stack.len()..];
+
+                // Output debug info for the dead stack
+                let mut disown = Some(Box::new(new_stack));
+                if disown.is_some() {
+                    tracing::trace!("wasi[{}]::stacks forgotten (memory_stack_before={}, memory_stack_after={})", self.pid, memory_stack_before, memory_stack_after);
+                }
+                while let Some(disowned) = disown {
+                    for hash in disowned.snapshots.keys() {
+                        tracing::trace!("wasi[{}]::stack has been forgotten (hash={})", self.pid, hash);
+                    }
+                    disown = disowned.next;
+                }
             } else {
                 memory_stack = &memory_stack[pstack.memory_stack.len()..];
             }
@@ -171,20 +197,21 @@ impl WasiThread
 
         // Add the call stack
         pstack.snapshots.insert(hash, ThreadSnapshot {
-            call_stack: BytesMut::from(rewind_stack).freeze()
+            call_stack: BytesMut::from(rewind_stack).freeze(),
+            store_data: BytesMut::from(store_data).freeze(),
         });
     }
 
     /// Gets a snapshot that was previously addedf
-    pub fn get_snapshot(&self, hash: u128) -> Option<(BytesMut, Bytes)> {
+    pub fn get_snapshot(&self, hash: u128) -> Option<(BytesMut, Bytes, Bytes)> {
         let mut memory_stack = BytesMut::new();
 
         let stack = self.stack.lock().unwrap();
         let mut pstack = stack.deref();
         loop {
-            memory_stack.extend(pstack.memory_stack.iter());
+            memory_stack.extend(pstack.memory_stack_corrected.iter());
             if let Some(snapshot) = pstack.snapshots.get(&hash) {
-                return Some((memory_stack, snapshot.call_stack.clone()));
+                return Some((memory_stack, snapshot.call_stack.clone(), snapshot.store_data.clone()));
             }
             if let Some(next) = pstack.next.as_ref() {
                 pstack = next.deref();
@@ -343,7 +370,29 @@ pub struct WasiProcess
     /// Reference to the exit code for the main thread
     pub(crate) finished: Arc<(Mutex<Option<u32>>, Condvar)>,
     /// List of all the children spawned from this thread
-    pub(crate) children: Vec<WasiProcessId>,
+    pub(crate) children: Arc<RwLock<Vec<WasiProcessId>>>,
+    /// Number of threads waiting for children to exit
+    pub(crate) waiting: Arc<AtomicU32>,
+}
+
+pub(crate) struct WasiProcessWait {
+    waiting: Arc<AtomicU32>,
+}
+
+impl WasiProcessWait {
+    pub fn new(process: &WasiProcess) -> Self {
+        process.waiting.fetch_add(1, Ordering::AcqRel);
+        Self {
+            waiting: process.waiting.clone()
+        }
+    }
+}
+
+impl Drop
+for WasiProcessWait {
+    fn drop(&mut self) {
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl WasiProcess
@@ -382,6 +431,7 @@ impl WasiProcess
         };
 
         let ctrl = WasiThread {
+            pid: self.pid(),
             id,
             is_main,
             finished,
@@ -410,12 +460,21 @@ impl WasiProcess
         if let Some(thread) = inner.threads.get(tid) {
             thread.signal(signal);
         } else {
-            trace!("lost-signal(tid={}, sig={})", tid.0, signal);
+            trace!("wasi[{}]::lost-signal(tid={}, sig={})", self.pid(), tid.0, signal);
         }
     }
 
     /// Signals all the threads in this process
-    pub fn signal_all_threads(&self, signal: __wasi_signal_t) {
+    pub fn signal_process(&self, signal: __wasi_signal_t) {
+        if self.waiting.load(Ordering::Acquire) > 0 {
+            let children = self.children.read().unwrap();
+            for pid in children.iter() {
+                if let Some(process) = self.compute.get_process(*pid) {
+                    process.signal_process(signal);
+                }
+            }
+            return;
+        }
         let inner = self.inner.read().unwrap();
         for thread in inner.threads.values() {
             thread.signal(signal);
@@ -453,6 +512,7 @@ impl WasiProcess
 
     /// Waits until the process is finished or the timeout is reached
     pub fn join(&self, timeout: Duration) -> Option<__wasi_exitcode_t> {
+        let _guard = WasiProcessWait::new(self);
         let mut finished = self.finished.0.lock().unwrap();
         if finished.is_some() {
             return finished.clone();
@@ -471,14 +531,21 @@ impl WasiProcess
 
     /// Waits for all the children to be finished
     pub fn join_children(&mut self, timeout: Duration) -> Option<__wasi_exitcode_t> {
+        let _guard = WasiProcessWait::new(self);
         let mut exit_code = 0;
-        let children: Vec<_> = self.children.drain(..).collect();
+        let children: Vec<_> = {
+            let children = self.children.read().unwrap();
+            children.clone()
+        };
         for pid in children {
             if let Some(process) = self.compute.get_process(pid) {
                 match process.join(timeout) {
-                    Some(a) => { exit_code = a; },
+                    Some(a) => {
+                        let mut children = self.children.write().unwrap();
+                        children.retain(|a| *a != pid);
+                        exit_code = a;
+                    },
                     None => {
-                        self.children.insert(0, pid);
                         return None;
                     }
                 }
@@ -489,14 +556,20 @@ impl WasiProcess
 
     /// Waits for all the children to be finished
     pub fn join_any_child(&mut self, timeout: Duration) -> Result<Option<(WasiProcessId, __wasi_exitcode_t)>, __wasi_errno_t> {
-        if self.children.is_empty() {
+        let _guard = WasiProcessWait::new(self);
+        let children: Vec<_> = {
+            let children = self.children.read().unwrap();
+            children.clone()
+        };
+        if children.is_empty() {
             return Err(__WASI_ECHILD);
         }
-        for pid in self.children.iter() {
-            if let Some(process) = self.compute.get_process(pid.clone()) {
+        for pid in children {
+            if let Some(process) = self.compute.get_process(pid) {
                 if let Some(exit_code) = process.join(timeout) {
                     let pid = process.pid();
-                    self.children.retain(|a| *a != pid);
+                    let mut children = self.children.write().unwrap();
+                    children.retain(|a| *a != pid);
                     return Ok(Some((pid, exit_code)))
                 }
             }
@@ -521,6 +594,13 @@ impl WasiProcess
     /// Gains access to the compute control plane
     pub fn control_plane(&self) -> &WasiControlPlane {
         &self.compute
+    }
+}
+
+impl SignalHandlerAbi
+for WasiProcess {
+    fn signal(&self, sig: __wasi_signal_t) {
+        self.signal_process(sig)
     }
 }
 
@@ -596,8 +676,9 @@ impl WasiControlPlane
                 bus_processes: Default::default(),
                 bus_process_reuse: Default::default() 
             })),
-            children: Default::default(),
-            finished: Arc::new((Mutex::new(None), Condvar::default()))
+            children: Arc::new(RwLock::new(Default::default())),
+            finished: Arc::new((Mutex::new(None), Condvar::default())),
+            waiting: Arc::new(AtomicU32::new(0))
         };
         {
             let mut guard = self.processes.write().unwrap();

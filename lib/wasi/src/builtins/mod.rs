@@ -52,7 +52,7 @@ impl BuiltIns
             cmd.exec(parent_ctx, name.as_str(), store, config)
         } else {
             let _ = stderr_write(parent_ctx, format!("wasm command unknown - {}\r\n", name).as_bytes());
-            Ok(BusSpawnedProcess::exited_process(name.as_str(), __WASI_ENOENT as u32))
+            Ok(BusSpawnedProcess::exited_process(__WASI_ENOENT as u32))
         }
     }
 }
