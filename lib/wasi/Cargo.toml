@@ -52,7 +52,7 @@ hex = { version = "^0.4", optional = true }
 term_size = { version = "0.3", optional = true }
 linked_hash_set = { version = "0.1", optional = true }
 # used by feature='host-reqwest'
-reqwest = { version = "0.11", features = ["blocking", "json"], optional = true }
+reqwest = { version = "0.11", features = ["json"], optional = true }
 # used by feature='host-termios'
 termios = { version = "0.3", optional = true }
 # the various compilers
@@ -85,7 +85,7 @@ sys-default = ["wasmer/wat", "wasmer/compiler", "sys", "logging", "host-fs", "sy
 sys-poll = []
 sys-thread = ["tokio/rt", "tokio/rt-multi-thread"]
 
-compiler = [ "wasmer-compiler"]
+compiler = [ "wasmer/compiler", "wasmer-compiler"]
 compiler-cranelift = [ "wasmer-compiler-cranelift" ]
 compiler-llvm = [ "wasmer-compiler-llvm" ]
 compiler-singlepass = [ "wasmer-compiler-singlepass" ]
