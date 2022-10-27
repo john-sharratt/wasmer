@@ -34,6 +34,7 @@ pub use self::parking::*;
 use crate::WasiCallingId;
 use crate::WasiFunctionEnv;
 use crate::WasiRuntimeImplementation;
+#[cfg(feature = "os")]
 use crate::bin_factory::BinaryPackage;
 use crate::syscalls::types::*;
 use crate::utils::map_io_err;
@@ -398,6 +399,7 @@ impl WasiFs
 
     /// Will conditionally union the binary file system with this one
     /// if it has not already been unioned
+    #[cfg(feature = "os")]
     pub fn conditional_union(&self, binary: &BinaryPackage) {
         let package_name = binary.package_name.to_string();
         let mut guard = self.has_unioned.lock().unwrap();

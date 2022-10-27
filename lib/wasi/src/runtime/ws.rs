@@ -1,9 +1,10 @@
+#[cfg(feature = "async_ws")]
 use async_trait::async_trait;
 
 use crate::WasiRuntimeImplementation;
 
 // This ABI implements a general purpose web socket
-#[async_trait]
+#[cfg_attr(feature = "async_ws", async_trait)]
 pub trait WebSocketAbi {
     fn set_onopen(&mut self, callback: Box<dyn FnMut()>);
 

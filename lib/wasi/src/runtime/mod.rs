@@ -18,9 +18,7 @@ use crate::{WasiCallingId, WasiEnv};
 use super::types::*;
 use super::WasiError;
 
-#[cfg(feature = "os")]
 mod ws;
-#[cfg(feature = "os")]
 pub use ws::*;
 
 mod stdio;
@@ -148,22 +146,7 @@ where Self: fmt::Debug + Sync,
     /// Gets the TTY state
     #[cfg(not(feature = "host-termios"))]
     fn tty_get(&self) -> WasiTtyState {
-        if let Some((w, h)) = term_size::dimensions() {
-            WasiTtyState {
-                cols: w as u32,
-                rows: h as u32,
-                width: 800,
-                height: 600,
-                stdin_tty: true,
-                stdout_tty: true,
-                stderr_tty: true,
-                echo: false,
-                line_buffered: false,
-                line_feeds: true,
-            }
-        } else {
-            Default::default()
-        }
+        Default::default()
     }
 
     /// Sets the TTY state

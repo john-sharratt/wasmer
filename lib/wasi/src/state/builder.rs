@@ -3,8 +3,11 @@
 #[cfg(feature = "os")]
 use crate::bin_factory::CachedCompiledModules;
 #[cfg(feature = "os")]
-use crate::fs::RootFileSystemBuilder;
-use crate::fs::{TtyFile, ArcFile};
+use crate::fs::{
+    RootFileSystemBuilder,
+    TtyFile
+};
+use crate::fs::ArcFile;
 use crate::state::{default_fs_backing, WasiFs, WasiState};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane, PluggableRuntimeImplementation};
@@ -636,7 +639,9 @@ impl WasiStateBuilder {
             runtime
         );
 
+        #[cfg(feature = "os")]
         env.uses(self.uses.clone())?;
+        #[cfg(feature = "os")]
         #[cfg(feature = "sys")]
         env.map_commands(self.map_commands.clone())?;
 

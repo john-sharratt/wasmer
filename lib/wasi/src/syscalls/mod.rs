@@ -19,11 +19,22 @@ pub mod windows;
 pub mod legacy;
 
 use self::types::*;
+#[cfg(feature = "os")]
 use crate::bin_factory::spawn_exec_module;
 use crate::runtime::SpawnType;
 use crate::state::WasiProcessWait;
-#[cfg(feature = "os")]
-use crate::state::{bus_error_into_wasi_err, wasi_error_into_bus_err, InodeHttpSocketType, WasiFutex, bus_write_rights, bus_read_rights, WasiBusCall, WasiThreadContext, WasiParkingLot, WasiDummyWaker, WasiThreadId, WasiProcessId};
+use crate::state::{
+    bus_error_into_wasi_err,
+    wasi_error_into_bus_err,
+    InodeHttpSocketType,
+    WasiThreadContext,
+    WasiThreadId,
+    WasiProcessId,
+    WasiFutex,
+    WasiBusCall,
+    WasiParkingLot,
+    WasiDummyWaker
+};
 use crate::utils::map_io_err;
 use crate::{WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE, WasiVFork};
 use crate::{
@@ -3549,6 +3560,7 @@ pub fn proc_exit<M: MemorySize>(
 /// Inputs:
 /// - `__wasi_signal_t`
 ///   Signal to be raised for this process
+#[cfg(feature = "os")]
 pub fn thread_signal(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     tid: __wasi_tid_t,
@@ -3564,6 +3576,16 @@ pub fn thread_signal(
     env.clone().yield_now_with_signals(&mut ctx)?;
 
     Ok(__WASI_ESUCCESS)
+}
+
+#[cfg(not(feature = "os"))]
+pub fn thread_signal(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    tid: __wasi_tid_t,
+    sig: __wasi_signal_t
+) -> Result<__wasi_errno_t, WasiError> {
+    warn!("wasi[{}]::thread_signal(tid={}, sig={}) are not supported without the 'os' feature", ctx.data().pid(), tid, sig);
+    Ok(__WASI_ENOTSUP)
 }
 
 /// ### `proc_raise()`
@@ -4171,6 +4193,7 @@ pub fn stack_restore<M: MemorySize>(
 ///
 /// * `pid` - Handle of the child process to wait on
 /// * `sig` - Signal to send the child process
+#[cfg(feature = "os")]
 pub fn proc_signal<M: MemorySize>(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     pid: __wasi_pid_t,
@@ -4190,6 +4213,16 @@ pub fn proc_signal<M: MemorySize>(
     env.clone().yield_now_with_signals(&mut ctx)?;
 
     Ok(__WASI_ESUCCESS)
+}
+
+#[cfg(not(feature = "os"))]
+pub fn proc_signal<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    pid: __wasi_pid_t,
+    sig: __wasi_signal_t,
+) -> Result<__wasi_errno_t, WasiError> {
+    warn!("wasi[{}]::proc_signal(pid={}, sig={}) is not supported without 'os' feature", ctx.data().pid(), pid, sig);
+    Ok(__WASI_ENOTSUP)
 }
 
 /// ### `random_get()`
@@ -5182,6 +5215,7 @@ fn conv_bus_err_to_exit_code(err: VirtualBusError) -> u32 {
 /// Forks the current process into a new subprocess. If the function
 /// returns a zero then its the new subprocess. If it returns a positive
 /// number then its the current process and the $pid represents the child.
+#[cfg(feature = "os")]
 pub fn proc_fork<M: MemorySize>(
     mut ctx: FunctionEnvMut<'_, WasiEnv>,
     mut copy_memory: __wasi_bool_t,
@@ -5611,6 +5645,16 @@ pub fn proc_fork<M: MemorySize>(
             }
         }
     })
+}
+
+#[cfg(not(feature = "os"))]
+pub fn proc_fork<M: MemorySize>(
+    mut ctx: FunctionEnvMut<'_, WasiEnv>,
+    mut copy_memory: __wasi_bool_t,
+    pid_ptr: WasmPtr<__wasi_pid_t, M>,
+) -> Result<__wasi_errno_t, WasiError> {
+    warn!("wasi[{}]::proc_fork - not supported without 'os' feature", ctx.data().pid());
+    Ok(__WASI_ENOTSUP)
 }
 
 /// Replaces the current process with a new process
@@ -6534,6 +6578,7 @@ fn conv_bus_format_from(format: __wasi_busdataformat_t) -> Result<BusDataFormat,
 /// ## Return
 ///
 /// Returns the number of events that have occured
+#[cfg(feature = "os")]
 pub fn bus_poll<M: MemorySize>(
     ctx: FunctionEnvMut<'_, WasiEnv>,
     timeout: __wasi_timestamp_t,
@@ -6874,6 +6919,18 @@ pub fn bus_poll<M: MemorySize>(
 
     wasi_try_mem_bus_ok!(ret_nevents.write(&memory, nevents));
     Ok(__BUS_ESUCCESS)
+}
+
+#[cfg(not(feature = "os"))]
+pub fn bus_poll<M: MemorySize>(
+    ctx: FunctionEnvMut<'_, WasiEnv>,
+    timeout: __wasi_timestamp_t,
+    events: WasmPtr<__wasi_busevent_t, M>,
+    maxevents: M::Offset,
+    ret_nevents: WasmPtr<M::Offset, M>,
+) -> Result<__bus_errno_t, WasiError> {
+    trace!("wasi[{}]::bus_poll (timeout={}) is not supported without 'os' feature", ctx.data().pid(), timeout);
+    Ok(__BUS_EUNSUPPORTED)
 }
 
 /// Replies to a call that was made to this process

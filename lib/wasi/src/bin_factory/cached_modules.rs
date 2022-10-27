@@ -82,6 +82,8 @@ impl CachedCompiledModules
                 .set_features(Some(features))
                 .engine();
         }
+        #[cfg(all(not(feature = "compiler-cranelift"), not(feature = "compiler-singlepass"), not(feature = "compiler-llvm")))]
+        panic!("wasmer not built with a compiler")
     }
 
     pub fn new(cache_compile_dir: Option<String>, cache_webc_dir: Option<String>) -> CachedCompiledModules {

@@ -81,7 +81,7 @@ tracing-subscriber = { version = "^0.2" }
 default = ["sys-default"]
 
 sys = ["wasmer/sys", "webc/mmap"]
-sys-default = ["wasmer/wat", "wasmer/compiler", "sys", "logging", "host-fs", "sys-poll", "sys-thread", "host-vnet", "host-threads", "host-reqwest", "os" ]
+sys-default = ["wasmer/wat", "wasmer/compiler", "sys", "os", "logging", "host-fs", "sys-poll", "sys-thread", "host-vnet", "host-threads", "host-reqwest" ]
 sys-poll = []
 sys-thread = ["tokio/rt", "tokio/rt-multi-thread"]
 
@@ -94,13 +94,13 @@ js = ["wasmer/js", "mem-fs", "wasmer-vfs/no-time", "getrandom/js", "chrono"]
 js-default = ["js", "wasmer/js-default"]
 test-js = ["js", "wasmer/js-default", "wasmer/wat"]
 
-os = [ "wasmer/wat", "wasmer/js-serializable-module", "tokio", "async-trait", "urlencoding", "webc-vfs", "serde", "serde_derive", "serde_json", "serde_yaml", "shellexpand", "weezl", "hex", "term_size", "linked_hash_set" ]
+os = [ "wasmer/wat", "wasmer/js-serializable-module", "tokio", "async-trait", "urlencoding", "webc-vfs", "serde", "serde_derive", "serde_json", "serde_yaml", "shellexpand", "weezl", "hex", "linked_hash_set" ]
 
 host-vnet = [ "wasmer-wasi-local-networking" ]
 host-threads = []
 host-reqwest = ["reqwest"]
 host-fs = ["wasmer-vfs/host-fs"]
-host-termios = ["termios"]
+host-termios = ["termios", "term_size"]
 mem-fs = []
 
 logging = ["tracing/log"]
