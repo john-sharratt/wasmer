@@ -159,6 +159,7 @@ pub fn wasi_error_into_bus_err(bus_error: __bus_errno_t) -> VirtualBusError {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn bus_read_rights() -> __wasi_rights_t {
     __WASI_RIGHT_FD_FDSTAT_SET_FLAGS
         | __WASI_RIGHT_FD_FILESTAT_GET
@@ -166,6 +167,7 @@ pub(crate) fn bus_read_rights() -> __wasi_rights_t {
         | __WASI_RIGHT_POLL_FD_READWRITE
 }
 
+#[allow(dead_code)]
 pub(crate) fn bus_write_rights() -> __wasi_rights_t {
     __WASI_RIGHT_FD_FDSTAT_SET_FLAGS
         | __WASI_RIGHT_FD_FILESTAT_GET
