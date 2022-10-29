@@ -167,9 +167,6 @@ impl Console {
                 state.stdin(Box::new(stdin));
             }
 
-            // WASIX modules run in a full sandbox with an emulated file system
-            state.full_sandbox();
-
             // Open the root
             state
                 .args(args.iter())

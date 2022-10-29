@@ -34,7 +34,7 @@ enum Node {
         fs: Arc<dyn crate::FileSystem + Send + Sync>,
         path: PathBuf,
         metadata: Metadata,
-    },    
+    },
     CustomFile {
         inode: Inode,
         name: OsString,
@@ -47,6 +47,13 @@ enum Node {
         children: Vec<Inode>,
         metadata: Metadata,
     },
+    ArcDirectory {
+        inode: Inode,
+        name: OsString,
+        fs: Arc<dyn crate::FileSystem + Send + Sync>,
+        path: PathBuf,
+        metadata: Metadata,
+    },
 }
 
 impl Node {
@@ -57,6 +64,7 @@ impl Node {
             Self::ArcFile { inode, .. } => inode,
             Self::CustomFile { inode, .. } => inode,
             Self::Directory { inode, .. } => inode,
+            Self::ArcDirectory { inode, .. } => inode,
         }
     }
 
@@ -67,6 +75,7 @@ impl Node {
             Self::ArcFile { name, .. } => name.as_os_str(),
             Self::CustomFile { name, .. } => name.as_os_str(),
             Self::Directory { name, .. } => name.as_os_str(),
+            Self::ArcDirectory { name, .. } => name.as_os_str(),
         }
     }
 
@@ -77,6 +86,7 @@ impl Node {
             Self::ArcFile { metadata, .. } => metadata,
             Self::CustomFile { metadata, .. } => metadata,
             Self::Directory { metadata, .. } => metadata,
+            Self::ArcDirectory { metadata, .. } => metadata,
         }
     }
 
@@ -87,6 +97,7 @@ impl Node {
             Self::ArcFile { metadata, .. } => metadata,
             Self::CustomFile { metadata, .. } => metadata,
             Self::Directory { metadata, .. } => metadata,
+            Self::ArcDirectory { metadata, .. } => metadata,
         }
     }
 
@@ -97,6 +108,7 @@ impl Node {
             Self::ArcFile { name, .. } => *name = new_name,
             Self::CustomFile { name, .. } => *name = new_name,
             Self::Directory { name, .. } => *name = new_name,
+            Self::ArcDirectory { name, .. } => *name = new_name,
         }
     }
 }

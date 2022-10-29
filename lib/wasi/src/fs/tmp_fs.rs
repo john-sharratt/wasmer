@@ -36,6 +36,10 @@ impl TmpFileSystem {
     pub fn union(&self, other: &Arc<dyn FileSystem + Send + Sync>) {
         self.fs.union(other)
     }
+
+    pub fn mount(&self, src_path: PathBuf, other: &Arc<dyn FileSystem + Send + Sync>, dst_path: PathBuf) -> Result<()> {
+        self.fs.mount(src_path, other, dst_path)
+    }
 }
 
 impl FileSystem for TmpFileSystem {

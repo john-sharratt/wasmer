@@ -60,7 +60,7 @@ pub use wasmer_compiler_singlepass;
 pub use crate::state::{
     Fd, Pipe, WasiFs, WasiInodes, WasiState, WasiStateBuilder,
     WasiThreadId, WasiThreadHandle, WasiProcessId, WasiControlPlane, WasiThread, WasiProcess, WasiPipe,
-    WasiStateCreationError, ALL_RIGHTS, VIRTUAL_ROOT_FD,
+    WasiStateCreationError, ALL_RIGHTS, VIRTUAL_ROOT_FD, default_fs_backing
 };
 pub use crate::syscalls::types;
 pub use crate::utils::{
@@ -622,6 +622,8 @@ impl WasiEnv {
         #[allow(unused_imports)]
         use wasmer_vfs::FileSystem;
 
+        use crate::state::WasiFsRoot;
+
         let mut already: HashMap<String, Cow<'static, str>> = HashMap::new();
 
         let mut use_packages = uses.into_iter().collect::<VecDeque<_>>();
@@ -643,32 +645,35 @@ impl WasiEnv {
                     use_packages.push_back(dependency);
                 }
 
-                // We first need to copy any files in the package over to the temporary file system
-                if let Some(fs) = package.webc_fs.as_ref() {
-                    self.state.fs.root_fs.union(fs);
-                }
-
-                // Add all the commands as binaries in the bin folder
-                let commands = package.commands.read().unwrap();
-                if commands.is_empty() == false {
-                    let root_fs = &self.state.fs.root_fs;
-                    let _ = root_fs.create_dir(Path::new("/bin"));
-                    for command in commands.iter() {
-                        let path = format!("/bin/{}", command.name);
-                        let path = Path::new(path.as_str());
-                        if let Err(err) = root_fs
-                            .new_open_options_ext()
-                            .insert_ro_file(path, command.atom.clone())
-                        {
-                            tracing::debug!("failed to add package [{}] command [{}] - {}", use_package, command.name, err);
-                            continue;
-                        }
-
-                        // Add the binary package to the bin factory (zero copy the atom)
-                        let mut package = package.clone();
-                        package.entry = command.atom.clone();
-                        self.bin_factory.set_binary(path.as_os_str().to_string_lossy().as_ref(), package);
+                if let WasiFsRoot::Sandbox(root_fs) = &self.state.fs.root_fs {
+                    // We first need to copy any files in the package over to the temporary file system
+                    if let Some(fs) = package.webc_fs.as_ref() {
+                        root_fs.union(fs);
                     }
+
+                    // Add all the commands as binaries in the bin folder
+                    let commands = package.commands.read().unwrap();
+                    if commands.is_empty() == false {
+                        let _ = root_fs.create_dir(Path::new("/bin"));
+                        for command in commands.iter() {
+                            let path = format!("/bin/{}", command.name);
+                            let path = Path::new(path.as_str());
+                            if let Err(err) = root_fs
+                                .new_open_options_ext()
+                                .insert_ro_file(path, command.atom.clone())
+                            {
+                                tracing::debug!("failed to add package [{}] command [{}] - {}", use_package, command.name, err);
+                                continue;
+                            }
+
+                            // Add the binary package to the bin factory (zero copy the atom)
+                            let mut package = package.clone();
+                            package.entry = command.atom.clone();
+                            self.bin_factory.set_binary(path.as_os_str().to_string_lossy().as_ref(), package);
+                        }
+                    }
+                } else {
+                    return Err(WasiStateCreationError::WasiInheritError(format!("failed to add package as the file system is not sandboxed")));
                 }
             } else {
                 return Err(WasiStateCreationError::WasiInheritError(format!("failed to fetch webc package for {}", use_package)));
@@ -687,6 +692,8 @@ impl WasiEnv {
         #[allow(unused_imports)]
         use wasmer_vfs::FileSystem;
 
+        use crate::state::WasiFsRoot;
+
         #[cfg(feature = "sys")]
         for (command, target) in map_commands.iter() {
             // Read the file
@@ -696,16 +703,20 @@ impl WasiEnv {
                 })?;
             let file: std::borrow::Cow<'static, [u8]> = file.into();
             
-            let root_fs = &self.state.fs.root_fs;
-            let _ = root_fs.create_dir(Path::new("/bin"));
-            
-            let path = format!("/bin/{}", command);
-            let path = Path::new(path.as_str());
-            if let Err(err) = root_fs
-                .new_open_options_ext()
-                .insert_ro_file(path, file)
-            {
-                tracing::debug!("failed to add atom command [{}] - {}", command, err);
+            if let WasiFsRoot::Sandbox(root_fs) = &self.state.fs.root_fs {
+                let _ = root_fs.create_dir(Path::new("/bin"));
+                
+                let path = format!("/bin/{}", command);
+                let path = Path::new(path.as_str());
+                if let Err(err) = root_fs
+                    .new_open_options_ext()
+                    .insert_ro_file(path, file)
+                {
+                    tracing::debug!("failed to add atom command [{}] - {}", command, err);
+                    continue;
+                }
+            } else {
+                tracing::debug!("failed to add atom command [{}] to the root file system as it is not sandboxed", command);
                 continue;
             }
         }

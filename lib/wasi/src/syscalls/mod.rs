@@ -270,6 +270,7 @@ where
 
     let fd_entry = state.fs.get_fd(sock)?;
     if rights != 0 && !has_rights(fd_entry.rights, rights) {
+        tracing::warn!("wasi[{}]::sock_upgrade(fd={}, rights={}) - failed - no access rights to upgrade", ctx.data().pid(), sock, rights);
         return Err(__WASI_EACCES);
     }
 
@@ -286,6 +287,7 @@ where
             }
         }
         _ => {
+            tracing::warn!("wasi[{}]::sock_upgrade(fd={}, rights={}) - failed - not a socket", ctx.data().pid(), sock, rights);
             return Err(__WASI_ENOTSOCK);
         }
     }
@@ -711,13 +713,14 @@ pub fn fd_fdstat_set_flags(
     fd: __wasi_fd_t,
     flags: __wasi_fdflags_t,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}]::fd_fdstat_set_flags", ctx.data().pid());
+    debug!("wasi[{}]::fd_fdstat_set_flags (fd={}, flags={})", ctx.data().pid(), fd, flags);
     let env = ctx.data();
     let (_, mut state) = env.get_memory_and_wasi_state(&ctx, 0);
     let mut fd_map = state.fs.fd_map.write().unwrap();
     let fd_entry = wasi_try!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
 
     if !has_rights(fd_entry.rights, __WASI_RIGHT_FD_FDSTAT_SET_FLAGS) {
+        debug!("wasi[{}]::fd_fdstat_set_flags (fd={}, flags={}) - access denied", ctx.data().pid(), fd, flags);
         return __WASI_EACCES;
     }
 
@@ -1634,9 +1637,10 @@ pub fn fd_event<M: MemorySize>(
         false,
         "event".into(),
     );
-    let rights = __WASI_RIGHT_FD_READ | __WASI_RIGHT_FD_WRITE | __WASI_RIGHT_POLL_FD_READWRITE;
+    let rights = __WASI_RIGHT_FD_READ | __WASI_RIGHT_FD_WRITE | __WASI_RIGHT_POLL_FD_READWRITE | __WASI_RIGHT_FD_FDSTAT_SET_FLAGS;
     let fd = wasi_try!(state.fs.create_fd(rights, rights, 0, 0, inode));
 
+    debug!("wasi[{}]::fd_event - event notifications created (fd={})", ctx.data().pid(), fd);
     wasi_try_mem!(ret_fd.write(&memory, fd));
 
     __WASI_ESUCCESS

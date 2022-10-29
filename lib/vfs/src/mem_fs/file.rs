@@ -228,7 +228,7 @@ impl VirtualFile for FileHandle {
                                 None
                             }
                         })
-                    }
+                    },
 
                     _ => None,
                 })

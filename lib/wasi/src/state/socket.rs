@@ -227,12 +227,16 @@ impl InodeSocket {
             } => Ok(match *ty {
                 __WASI_SOCK_TYPE_STREAM => {
                     if addr.is_none() {
+                        tracing::warn!("wasi[?]::sock_listen - failed - address not set");
                         return Err(__WASI_EINVAL);
                     }
                     let addr = *addr.as_ref().unwrap();
                     let mut socket = net
                         .listen_tcp(addr, *only_v6, *reuse_port, *reuse_addr)
-                        .map_err(net_error_into_wasi_err)?;
+                        .map_err(|err| {
+                            tracing::warn!("wasi[?]::sock_listen - failed - {}", err);
+                            net_error_into_wasi_err(err)
+                        })?;
                     if let Some(accept_timeout) = accept_timeout {
                         socket
                             .set_timeout(Some(*accept_timeout))
@@ -240,10 +244,19 @@ impl InodeSocket {
                     }
                     Some(InodeSocket::new(InodeSocketKind::TcpListener(socket)))
                 }
-                _ => return Err(__WASI_ENOTSUP),
+                _ => {
+                    tracing::warn!("wasi[?]::sock_listen - failed - not supported(1)");
+                    return Err(__WASI_ENOTSUP)
+                },
             }),
-            InodeSocketKind::Closed => Err(__WASI_EIO),
-            _ => Err(__WASI_ENOTSUP),
+            InodeSocketKind::Closed => {
+                tracing::warn!("wasi[?]::sock_listen - failed - socket closed");
+                Err(__WASI_EIO)
+            },
+            _ => {
+                tracing::warn!("wasi[?]::sock_listen - failed - not supported(2)");
+                Err(__WASI_ENOTSUP)
+            },
         }
     }
 

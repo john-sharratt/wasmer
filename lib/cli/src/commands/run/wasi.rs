@@ -1,12 +1,16 @@
 use crate::utils::{parse_envvar, parse_mapdir};
 use anyhow::Result;
+use wasmer_vfs::FileSystem;
+use wasmer_wasi::fs::{PassthruFileSystem, RootFileSystemBuilder, TtyFile, SpecialFile};
+use wasmer_wasi::types::__WASI_STDIN_FILENO;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::{collections::BTreeSet, path::Path};
 use std::path::PathBuf;
 use wasmer::{AsStoreMut, FunctionEnv, Instance, Module, RuntimeError, Value};
 use wasmer_wasi::{
     get_wasi_versions, import_object_for_all_wasi_versions, WasiEnv, WasiError,
-    WasiState, WasiVersion, is_wasix_module,
+    WasiState, WasiVersion, is_wasix_module, default_fs_backing, PluggableRuntimeImplementation,
 };
 
 use clap::Parser;
@@ -91,27 +95,45 @@ impl Wasi {
             .map(|(a, b)| (a.to_string(), b.to_string()))
             .collect::<HashMap<_, _>>();
 
+        let runtime = Arc::new(PluggableRuntimeImplementation::default());
+
         let mut wasi_state_builder = WasiState::new(program_name);
         wasi_state_builder
             .args(args)
             .envs(self.env_vars.clone())
             .uses(self.uses.clone())
-            .map_commands(map_commands.clone())
-            .preopen_dirs(self.pre_opened_directories.clone())?
-            .map_dirs(self.mapped_dirs.clone())?;
+            .runtime(&runtime)
+            .map_commands(map_commands.clone());
 
-        if is_wasix_module(module) {
-            // WASIX modules run in a full sandbox with an emulated
-            // file system
-            wasi_state_builder.full_sandbox();
-
-            // If no pre-opened directories exist we open the root
-            if self.pre_opened_directories.is_empty() {
-                wasi_state_builder
-                    .preopen_dir(Path::new("/"))
-                    .unwrap()
-                    .map_dir(".", "/")?;
+        if is_wasix_module(module)
+        {
+            // If we preopen anything from the host then shallow copy it over
+            let root_fs = RootFileSystemBuilder::new()
+                .with_tty(Box::new(TtyFile::new(runtime.clone(), Box::new(SpecialFile::new(__WASI_STDIN_FILENO)))))
+                .build();
+            if self.mapped_dirs.len() > 0 {
+                let fs_backing: Arc<dyn FileSystem + Send + Sync> =
+                    Arc::new(PassthruFileSystem::new(default_fs_backing()));
+                for (src, dst) in self.mapped_dirs.clone() {
+                    let src = match src.starts_with("/") {
+                        true => src,
+                        false => format!("/{}", src)
+                    };
+                    root_fs.mount(PathBuf::from(src), &fs_backing, dst)?;
+                }
             }
+
+            // Open the root of the new filesystem
+            wasi_state_builder
+                .set_sandbox_fs(root_fs)
+                .preopen_dir(Path::new("/"))
+                .unwrap()
+                .map_dir(".", "/")?;
+        } else {
+            wasi_state_builder
+                .set_fs(default_fs_backing())
+                .preopen_dirs(self.pre_opened_directories.clone())?
+                .map_dirs(self.mapped_dirs.clone())?;
         }
 
         #[cfg(feature = "experimental-io-devices")]

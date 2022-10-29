@@ -2,13 +2,8 @@
 
 #[cfg(feature = "os")]
 use crate::bin_factory::CachedCompiledModules;
-#[cfg(feature = "os")]
-use crate::fs::{
-    RootFileSystemBuilder,
-    TtyFile
-};
-use crate::fs::ArcFile;
-use crate::state::{default_fs_backing, WasiFs, WasiState};
+use crate::fs::{ArcFile, TmpFileSystem};
+use crate::state::{WasiFs, WasiState, WasiFsRoot};
 use crate::syscalls::types::{__WASI_STDERR_FILENO, __WASI_STDIN_FILENO, __WASI_STDOUT_FILENO};
 use crate::{WasiEnv, WasiFunctionEnv, WasiInodes, WasiControlPlane, PluggableRuntimeImplementation};
 use generational_arena::Arena;
@@ -20,7 +15,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use thiserror::Error;
 use wasmer::AsStoreMut;
-use wasmer_vfs::{FsError, VirtualFile, FileSystem};
+use wasmer_vfs::{FsError, VirtualFile};
 
 /// Creates an empty [`WasiStateBuilder`].
 ///
@@ -57,7 +52,6 @@ pub struct WasiStateBuilder {
     #[cfg(feature = "sys")]
     map_commands: HashMap<String, PathBuf>,
     vfs_preopens: Vec<String>,
-    full_sandbox: bool,
     #[cfg(feature = "os")]
     compiled_modules: Arc<CachedCompiledModules>,
     #[allow(clippy::type_complexity)]
@@ -65,7 +59,7 @@ pub struct WasiStateBuilder {
     stdout_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
     stderr_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
     stdin_override: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
-    fs_override: Option<Box<dyn wasmer_vfs::FileSystem + Send + Sync>>,
+    fs_override: Option<WasiFsRoot>,
     runtime_override: Option<Arc<dyn crate::WasiRuntimeImplementation + Send + Sync + 'static>>,
 }
 
@@ -350,12 +344,6 @@ impl WasiStateBuilder {
         Ok(self)
     }
 
-    /// Sets if this state will use a full sandbox
-    pub fn full_sandbox(&mut self) -> &mut Self {
-        self.full_sandbox = true;
-        self
-    }
-
     /// Overwrite the default WASI `stdout`, if you want to hold on to the
     /// original `stdout` use [`WasiFs::swap_file`] after building.
     pub fn stdout(&mut self, new_file: Box<dyn VirtualFile + Send + Sync + 'static>) -> &mut Self {
@@ -384,8 +372,15 @@ impl WasiStateBuilder {
     ///
     /// This is usually used in case a custom `wasmer_vfs::FileSystem` is needed.
     pub fn set_fs(&mut self, fs: Box<dyn wasmer_vfs::FileSystem + Send + Sync>) -> &mut Self {
-        self.fs_override = Some(fs);
+        self.fs_override = Some(WasiFsRoot::Backing(Arc::new(fs)));
+        self
+    }
 
+    /// Sets a new sandbox FileSystem to be used with this WASI instance.
+    ///
+    /// This is usually used in case a custom `wasmer_vfs::FileSystem` is needed.
+    pub fn set_sandbox_fs(&mut self, fs: TmpFileSystem) -> &mut Self {
+        self.fs_override = Some(WasiFsRoot::Sandbox(Arc::new(fs)));
         self
     }
 
@@ -399,11 +394,11 @@ impl WasiStateBuilder {
 
     /// Sets the WASI runtime implementation and overrides the default
     /// implementation
-    pub fn runtime<R>(&mut self, runtime: R) -> &mut Self
+    pub fn runtime<R>(&mut self, runtime: &Arc<R>) -> &mut Self
     where
         R: crate::WasiRuntimeImplementation + Send + Sync + 'static,
     {
-        self.runtime_override = Some(Arc::new(runtime));
+        self.runtime_override = Some(runtime.clone());
         self
     }
 
@@ -509,19 +504,8 @@ impl WasiStateBuilder {
         // otherwise we drop through to a default file system
         let fs_backing = self.fs_override
             .take()
-            .unwrap_or_else(|| -> Box<dyn FileSystem + Send + Sync> {
-                #[cfg(feature = "os")]
-                if self.full_sandbox {
-                    RootFileSystemBuilder::new()
-                        .with_tty(Box::new(TtyFile::new(runtime.clone(), stdin.clone())))
-                        .build()
-                } else {
-                    default_fs_backing()
-                }
-                #[cfg(not(feature = "os"))]
-                default_fs_backing()
-            });
-
+            .unwrap_or_else(|| WasiFsRoot::Sandbox(Arc::new(TmpFileSystem::new())));
+        
         // self.preopens are checked in [`PreopenDirBuilder::build`]
         let inodes = RwLock::new(crate::state::WasiInodes {
             arena: Arena::new(),
@@ -535,7 +519,7 @@ impl WasiStateBuilder {
                 inodes.deref_mut(),
                 &self.preopens,
                 &self.vfs_preopens,
-                fs_backing,
+                fs_backing
             )
             .map_err(WasiStateCreationError::WasiFsCreationError)?;
             

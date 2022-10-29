@@ -59,7 +59,7 @@ impl RootFileSystemBuilder
         self
     }
 
-    pub fn build(self) -> Box<dyn wasmer_vfs::FileSystem + Send + Sync> {
+    pub fn build(self) -> TmpFileSystem {
         let tmp = TmpFileSystem::new();
         if self.default_root_dirs {
             for root_dir in vec![
@@ -93,6 +93,6 @@ impl RootFileSystemBuilder
             let _ = tmp.new_open_options_ext()
                 .insert_custom_file(PathBuf::from("/dev/tty"), self.tty.unwrap_or_else(|| Box::new(NullFile::default())));
         }
-        Box::new(tmp)
+        tmp
     }
 }

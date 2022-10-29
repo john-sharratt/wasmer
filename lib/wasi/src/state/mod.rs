@@ -345,6 +345,65 @@ impl WasiInodes {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum WasiFsRoot {
+    Sandbox(Arc<crate::fs::TmpFileSystem>),
+    Backing(Arc<Box<dyn FileSystem>>)
+}
+
+impl FileSystem
+for WasiFsRoot
+{
+    fn read_dir(&self, path: &Path) -> wasmer_vfs::Result<wasmer_vfs::ReadDir> {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.read_dir(path),
+            WasiFsRoot::Backing(fs) => fs.read_dir(path)
+        }
+    }
+    fn create_dir(&self, path: &Path) -> wasmer_vfs::Result<()> {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.create_dir(path),
+            WasiFsRoot::Backing(fs) => fs.create_dir(path)
+        }
+    }
+    fn remove_dir(&self, path: &Path) -> wasmer_vfs::Result<()> {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.remove_dir(path),
+            WasiFsRoot::Backing(fs) => fs.remove_dir(path)
+        }
+    }
+    fn rename(&self, from: &Path, to: &Path) -> wasmer_vfs::Result<()> {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.rename(from, to),
+            WasiFsRoot::Backing(fs) => fs.rename(from, to)
+        }
+    }
+    fn metadata(&self, path: &Path) -> wasmer_vfs::Result<wasmer_vfs::Metadata> {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.metadata(path),
+            WasiFsRoot::Backing(fs) => fs.metadata(path)
+        }
+    }
+    fn symlink_metadata(&self, path: &Path) -> wasmer_vfs::Result<wasmer_vfs::Metadata> {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.symlink_metadata(path),
+            WasiFsRoot::Backing(fs) => fs.symlink_metadata(path)
+        }
+    }
+    fn remove_file(&self, path: &Path) -> wasmer_vfs::Result<()> {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.remove_file(path),
+            WasiFsRoot::Backing(fs) => fs.remove_file(path)
+        }
+    }
+    fn new_open_options(&self) -> OpenOptions {
+        match self {
+            WasiFsRoot::Sandbox(fs) => fs.new_open_options(),
+            WasiFsRoot::Backing(fs) => fs.new_open_options()
+        }
+    }
+}
+
 /// Warning, modifying these fields directly may cause invariants to break and
 /// should be considered unsafe.  These fields may be made private in a future release
 #[derive(Debug)]
@@ -359,7 +418,7 @@ pub struct WasiFs {
     pub current_dir: Mutex<String>,
     pub is_wasix: AtomicBool,
     #[cfg_attr(feature = "enable-serde", serde(skip, default))]
-    pub root_fs: crate::fs::TmpFileSystem,
+    pub root_fs: WasiFsRoot,
     pub has_unioned: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -400,21 +459,29 @@ impl WasiFs
     /// Will conditionally union the binary file system with this one
     /// if it has not already been unioned
     #[cfg(feature = "os")]
-    pub fn conditional_union(&self, binary: &BinaryPackage) {
+    pub fn conditional_union(&self, binary: &BinaryPackage) -> bool {
+        let sandbox_fs = match &self.root_fs {
+            WasiFsRoot::Sandbox(fs) => fs,
+            WasiFsRoot::Backing(_) => {
+                tracing::error!("can not perform a union on a backing file system");
+                return false;
+            }
+        };
         let package_name = binary.package_name.to_string();
         let mut guard = self.has_unioned.lock().unwrap();
         if guard.contains(&package_name) == false {
             guard.insert(package_name);
 
             if let Some(fs) = binary.webc_fs.clone() {
-                self.root_fs.union(&fs);
+                sandbox_fs.union(&fs);
             }            
         }
+        true
     }
 }
 
 /// Returns the default filesystem backing
-pub(crate) fn default_fs_backing() -> Box<dyn wasmer_vfs::FileSystem + Send + Sync> {
+pub fn default_fs_backing() -> Box<dyn wasmer_vfs::FileSystem + Send + Sync> {
     cfg_if::cfg_if! {
         if #[cfg(feature = "host-fs")] {
             Box::new(wasmer_vfs::host_fs::FileSystem::default())
@@ -468,9 +535,12 @@ impl WasiFs {
         inodes: &mut WasiInodes,
         preopens: &[PreopenedDir],
         vfs_preopens: &[String],
-        fs_backing: Box<dyn FileSystem + Send + Sync>,
+        fs_backing: WasiFsRoot
     ) -> Result<Self, String> {
-        let (wasi_fs, root_inode) = Self::new_init(fs_backing, inodes)?;
+        let (wasi_fs, root_inode) = Self::new_init(
+            fs_backing,
+            inodes
+        )?;
 
         for preopen_name in vfs_preopens {
             let kind = Kind::Dir {
@@ -657,19 +727,10 @@ impl WasiFs {
     /// Private helper function to init the filesystem, called in `new` and
     /// `new_with_preopen`
     fn new_init(
-        fs_backing: Box<dyn FileSystem + Send + Sync>,
+        fs_backing: WasiFsRoot,
         inodes: &mut WasiInodes,
     ) -> Result<(Self, Inode), String> {
         debug!("Initializing WASI filesystem");
-
-        let root_fs = {
-            let fs_backing: Arc<dyn FileSystem + Send + Sync> =
-                Arc::new(crate::fs::PassthruFileSystem::new(fs_backing));
-
-            let root_fs = crate::fs::TmpFileSystem::new();
-            root_fs.union(&fs_backing);
-            root_fs
-        };
 
         let wasi_fs = Self {
             preopen_fds: RwLock::new(vec![]),
@@ -679,7 +740,7 @@ impl WasiFs {
             inode_counter: AtomicU64::new(1024),
             current_dir: Mutex::new("/".to_string()),
             is_wasix: AtomicBool::new(false),
-            root_fs,
+            root_fs: fs_backing,
             has_unioned: Arc::new(Mutex::new(HashSet::new()))
         };
         wasi_fs.create_stdin(inodes);
@@ -1932,7 +1993,7 @@ impl WasiState {
 
 struct WasiStateOpener
 {
-    root_fs: crate::fs::TmpFileSystem
+    root_fs: WasiFsRoot
 }
 
 impl FileOpener
