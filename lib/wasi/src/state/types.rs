@@ -333,53 +333,71 @@ pub(crate) fn poll(
 
 #[cfg(any(not(unix), not(feature = "sys-poll"), feature="os"))]
 pub(crate) fn poll(
-    files: &[&(dyn VirtualFile + Send + Sync + 'static)],
+    files: &[super::InodeValFilePollGuard],
     events: &[PollEventSet],
     seen_events: &mut [PollEventSet],
     timeout: Duration,
 ) -> Result<u32, FsError> {
+
     if !(files.len() == events.len() && events.len() == seen_events.len()) {
         tracing::debug!("the slice length of 'files', 'events' and 'seen_events' must be the same (files={}, events={}, seen_events={})", files.len(), events.len(), seen_events.len());
         return Err(FsError::InvalidInput);
     }
 
     let mut ret = 0;
-    for n in 0..files.len() {
+    for (n, file) in files.iter().enumerate() {
         let mut builder = PollEventBuilder::new();
 
-        let file = files[n];
-        let can_read = file.bytes_available_read()?.map(|_| true).unwrap_or(false);
-        let can_write = file
-            .bytes_available_write()?
-            .map(|s| s > 0)
-            .unwrap_or(false);
-        let is_closed = file.is_open() == false;
+        let mut can_read = None;
+        let mut can_write = None;
+        let mut is_closed = None;
 
+        /*
         tracing::debug!(
             "poll_evt can_read={} can_write={} is_closed={}",
             can_read,
             can_write,
             is_closed
         );
+        */
 
         for event in iterate_poll_events(events[n]) {
             match event {
-                PollEvent::PollIn if can_read => {
-                    builder = builder.add(PollEvent::PollIn);
+                PollEvent::PollIn => {
+                    if can_read.is_none() {
+                        can_read = Some(
+                            file.bytes_available_read()?
+                                .map(|s| s > 0)
+                                .unwrap_or(false));
+                    }
+                    if can_read.unwrap_or_default() {
+                        tracing::debug!("poll_evt can_read=true file={:?}", file);
+                        builder = builder.add(PollEvent::PollIn);
+                    }
                 }
-                PollEvent::PollOut if can_write => {
-                    builder = builder.add(PollEvent::PollOut);
+                PollEvent::PollOut => {
+                    if can_write.is_none() {
+                        can_write = Some(file
+                            .bytes_available_write()?
+                            .map(|s| s > 0)
+                            .unwrap_or(false));
+                    }
+                    if can_write.unwrap_or_default() {
+                        tracing::debug!("poll_evt can_write=true file={:?}", file);
+                        builder = builder.add(PollEvent::PollOut);
+                    }
                 }
-                PollEvent::PollHangUp if is_closed => {
-                    builder = builder.add(PollEvent::PollHangUp);
+                PollEvent::PollHangUp |
+                PollEvent::PollInvalid |
+                PollEvent::PollError => {
+                    if is_closed.is_none() {
+                        is_closed = Some(file.is_open() == false);
+                    }
+                    if is_closed.unwrap_or_default() {
+                        tracing::debug!("poll_evt is_closed=true file={:?}", file);
+                        builder = builder.add(event);
+                    }
                 }
-                PollEvent::PollInvalid if is_closed => {
-                    builder = builder.add(PollEvent::PollInvalid);
-                }
-                PollEvent::PollError if is_closed => {
-                    builder = builder.add(PollEvent::PollError);
-                }
-                _ => {}
             }
         }
         let revents = builder.build();

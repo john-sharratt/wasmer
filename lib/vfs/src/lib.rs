@@ -3,6 +3,8 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::task::Waker;
 use thiserror::Error;
 
 #[cfg(all(not(feature = "host-fs"), not(feature = "mem-fs")))]
@@ -172,7 +174,9 @@ impl OpenOptions {
 
 /// This trait relies on your file closing when it goes out of scope via `Drop`
 //#[cfg_attr(feature = "enable-serde", typetag::serde)]
-pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable {
+#[async_trait::async_trait]
+pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable
+{
     /// the last time the file was accessed in nanoseconds as a UNIX timestamp
     fn last_accessed(&self) -> u64;
 
@@ -217,6 +221,55 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable {
         Ok(None)
     }
 
+    /// Polls for when read data is available again
+    /// Defaults to `None` which means no asynchronous IO support - caller
+    /// must poll `bytes_available_read` instead
+    fn poll_read_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>> {
+        match self.bytes_available_read() {
+            Ok(Some(0)) => {
+                let waker = cx.waker().clone();
+                let mut guard = PERIODIC_WAKERS.lock().unwrap();
+                guard.push(waker);
+                std::task::Poll::Pending
+            },
+            Ok(Some(a)) => std::task::Poll::Ready(Ok(a)),
+            Ok(None) => std::task::Poll::Ready(Err(FsError::WouldBlock)),
+            Err(err) => std::task::Poll::Ready(Err(err)),
+        }
+    }
+
+    /// Polls for when the file can be written to again
+    /// Defaults to `None` which means no asynchronous IO support - caller
+    /// must poll `bytes_available_write` instead
+    fn poll_write_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>> {
+        match self.bytes_available_write() {
+            Ok(Some(0)) => {
+                let waker = cx.waker().clone();
+                let mut guard = PERIODIC_WAKERS.lock().unwrap();
+                guard.push(waker);
+                std::task::Poll::Pending
+            },
+            Ok(Some(a)) => std::task::Poll::Ready(Ok(a)),
+            Ok(None) => std::task::Poll::Ready(Err(FsError::WouldBlock)),
+            Err(err) => std::task::Poll::Ready(Err(err)),
+        }
+    }
+
+    /// Polls for when the file can be written to again
+    /// Defaults to `None` which means no asynchronous IO support - caller
+    /// must poll `bytes_available_write` instead
+    fn poll_close_ready(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        match self.is_open() {
+            true => {
+                let waker = cx.waker().clone();
+                let mut guard = PERIODIC_WAKERS.lock().unwrap();
+                guard.push(waker);
+                std::task::Poll::Pending
+            },
+            false => std::task::Poll::Ready(())
+        }
+    }
+
     /// Indicates if the file is opened or closed. This function must not block
     /// Defaults to a status of being constantly open
     fn is_open(&self) -> bool {
@@ -233,6 +286,19 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable {
     /// Returns the underlying host fd
     fn get_fd(&self) -> Option<FileDescriptor> {
         None
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref PERIODIC_WAKERS: Mutex<Vec<Waker>> = {
+        Mutex::new(Vec::new())
+    };
+}
+
+pub fn wake_all_default_polls() {
+    let mut guard  = PERIODIC_WAKERS.lock().unwrap();
+    for waker in guard.drain(..) {
+        waker.wake();
     }
 }
 

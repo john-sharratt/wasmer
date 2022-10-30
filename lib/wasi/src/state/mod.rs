@@ -57,7 +57,6 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Condvar;
 use std::sync::MutexGuard;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
@@ -180,12 +179,13 @@ pub enum Kind {
     },
     EventNotifications {
         /// Used for event notifications by the user application or operating system
+        /// (positive number means there are events waiting to be processed)
         counter: Arc<AtomicU64>,
         /// Flag that indicates if this is operating
         is_semaphore: bool,
         /// Receiver that wakes sleeping threads
         #[cfg_attr(feature = "enable-serde", serde(skip))]
-        wakers: Arc<Mutex<VecDeque<mpsc::Sender<()>>>>,
+        wakers: Arc<Mutex<VecDeque<tokio::sync::mpsc::Sender<()>>>>,
     },
 }
 

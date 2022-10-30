@@ -1,12 +1,260 @@
+use tokio::sync::mpsc;
+use wasmer_vnet::net_error_into_io_err;
+
 use super::*;
 use std::{
     io::{Read, Seek},
-    sync::{RwLockReadGuard, RwLockWriteGuard},
+    sync::{RwLockReadGuard, RwLockWriteGuard}, future::Future, pin::Pin, task::Poll,
 };
+
+pub(crate) struct InodeValFilePollGuard<'a> {
+    pub(crate) guard: RwLockReadGuard<'a, Kind>,
+}
+
+impl<'a> std::fmt::Debug
+for InodeValFilePollGuard<'a>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.guard.deref() {
+            Kind::File { .. } => write!(f, "guard-file"),
+            Kind::EventNotifications { .. } => write!(f, "guard-notifications"),
+            Kind::Socket { socket } => {
+                let socket = socket.inner.read().unwrap();
+                match socket.kind {
+                    InodeSocketKind::TcpListener(..) => write!(f, "guard-tcp-listener"),
+                    InodeSocketKind::TcpStream(..) => write!(f, "guard-tcp-stream"),
+                    InodeSocketKind::UdpSocket(..) => write!(f, "guard-udp-socket"),
+                    InodeSocketKind::Raw(..) => write!(f, "guard-raw-socket"),
+                    InodeSocketKind::HttpRequest(..) => write!(f, "guard-http-request"),
+                    InodeSocketKind::WebSocket(..) => write!(f, "guard-web-socket"),
+                    _ => write!(f, "guard-socket")
+                }                
+            },
+            _ => write!(f, "guard-unknown"),
+        }
+    }
+}
+
+impl<'a> InodeValFilePollGuard<'a> {
+    pub fn bytes_available_read(&self) -> wasmer_vfs::Result<Option<usize>> {
+        match self.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.bytes_available_read()
+                } else {
+                    Ok(None)
+                }
+            },
+            Kind::EventNotifications { counter, .. } => {
+                Ok(
+                    Some(counter.load(std::sync::atomic::Ordering::Acquire) as usize)
+                )
+            },
+            Kind::Socket { socket } => {
+                socket.peek()
+                    .map(|a| Some(a))
+                    .map_err(fs_error_from_wasi_err)
+            }
+            _ => Ok(None)
+        }
+    }
+
+    pub fn bytes_available_write(&self) -> wasmer_vfs::Result<Option<usize>> {
+        match self.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.bytes_available_write()
+                } else {
+                    Ok(None)
+                }
+            },
+            Kind::EventNotifications { wakers, .. } => {
+                let wakers = wakers.lock().unwrap();
+                Ok(
+                    Some(wakers.len())
+                )
+            }
+            Kind::Socket { socket } => {
+                if socket.can_write() {
+                    Ok(Some(4096))
+                } else {
+                    Ok(Some(0))
+                }
+            }
+            _ => Ok(None)
+        }
+    }
+
+    pub fn is_open(&self) -> bool{
+        match self.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.is_open()
+                } else {
+                    false
+                }
+            },
+            Kind::EventNotifications { .. } |
+            Kind::Socket { .. } => {
+                true
+            }
+            _ => false
+        }
+    }
+
+    pub async fn wait_read(&self) -> wasmer_vfs::Result<()> {
+        match self.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.wait_read().await
+                } else {
+                    None
+                }
+            },
+            Kind::EventNotifications { counter, wakers, .. } => {
+                let counter = counter.clone();
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                {
+                    let mut wakers = wakers.lock().unwrap();
+                    wakers.push_back(tx);
+                }
+                rx.recv().await;
+                Some(Box::pin(async move {
+                    let _ = rx.recv().await;
+                    
+                }))
+            },
+            Kind::Socket { socket } => {
+                socket.poll_read()
+            }
+            _ => None
+        }
+    }
+
+    pub async fn wait_write(&self) -> wasmer_vfs::Result<()> {
+        match self.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.poll_write()
+                } else {
+                    None
+                }
+            },
+            Kind::EventNotifications { counter, wakers, .. } => {
+                let counter = counter.clone();
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                let mut wakers = wakers.lock().unwrap();
+                wakers.push_back(tx);
+                Some(Box::pin(async move {
+                    let _ = rx.recv().await;
+                    counter.load(std::sync::atomic::Ordering::Acquire) as usize
+                }))
+            },
+            Kind::Socket { socket } => {
+                socket.poll_write()
+            }
+            _ => None
+        }
+    }
+}
+
+struct InodeValFilePollGuardReadJoin<'a> {
+    guard: &'a InodeValFilePollGuard<'a>,
+    notifications: Option<mpsc::Receiver<()>>,
+    socket: Option<Pin<Box<dyn Future<Output=wasmer_vnet::Result<()>> + 'static>>>
+}
+impl<'a> Future
+for InodeValFilePollGuardReadJoin<'a>
+{
+    type Output = wasmer_vfs::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        match self.guard.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.poll_read_ready(cx).map(|_| Ok(()))
+                } else {
+                    Poll::Ready(Err(FsError::WouldBlock))
+                }
+            },
+            Kind::EventNotifications { counter, wakers, .. } => {
+                if self.notifications.is_none() {
+                    let (tx, rx) = tokio::sync::mpsc::channel(1);
+                    let mut wakers = wakers.lock().unwrap();
+                    wakers.push_back(tx);
+                    self.notifications.replace(rx);
+                }
+                let notifications = Pin::new(self.notifications.as_mut().unwrap());
+                notifications.poll_recv(cx).map(|_| Ok(()))
+            },
+            Kind::Socket { socket } => {
+                if self.socket.is_none() {
+                    let socket = socket.clone();
+                    let work = socket.poll_read();
+                    self.socket.replace(Box::pin(work));
+                }
+                let socket = self.socket.as_mut().unwrap().as_mut();
+                socket.poll(cx).map_err(net_error_into_io_err).map_err(Into::<FsError>::into)
+            }
+            _ => Poll::Ready(Err(FsError::WouldBlock))
+        }
+    }
+}
+
+struct InodeValFilePollGuardWriteJoin<'a> {
+    guard: &'a InodeValFilePollGuard<'a>,
+    notifications: Option<mpsc::Receiver<()>>,
+    socket: Option<Pin<Box<dyn Future<Output=wasmer_vnet::Result<()>> + 'static>>>
+}
+impl<'a> Future
+for InodeValFilePollGuardWriteJoin<'a>
+{
+    type Output = wasmer_vfs::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        match self.guard.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.poll_write_ready(cx).map(|_| Ok(()))
+                } else {
+                    Poll::Ready(Err(FsError::WouldBlock))
+                }
+            },
+            Kind::EventNotifications { counter, wakers, .. } => {
+                if self.notifications.is_none() {
+                    let (tx, rx) = tokio::sync::mpsc::channel(1);
+                    let mut wakers = wakers.lock().unwrap();
+                    wakers.push_back(tx);
+                    self.notifications.replace(rx);
+                }
+                let notifications = Pin::new(self.notifications.as_mut().unwrap());
+                notifications.poll_recv(cx).map(|_| Ok(()))
+            },
+            Kind::Socket { socket } => {
+                if self.socket.is_none() {
+                    let socket = socket.clone();
+                    let work = socket.poll_write();
+                    self.socket.replace(Box::pin(work));
+                }
+                let socket = self.socket.as_mut().unwrap().as_mut();
+                socket.poll(cx).map_err(net_error_into_io_err).map_err(Into::<FsError>::into)
+            }
+            _ => Poll::Ready(Err(FsError::WouldBlock))
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct InodeValFileReadGuard<'a> {
     pub(crate) guard: RwLockReadGuard<'a, Kind>,
+}
+
+impl<'a> InodeValFileReadGuard<'a> {
+    pub fn into_poll_guard(self) -> InodeValFilePollGuard::<'a> {
+        InodeValFilePollGuard {
+            guard: self.guard
+        }
+    }
 }
 
 impl<'a> Deref for InodeValFileReadGuard<'a> {
