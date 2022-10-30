@@ -75,7 +75,7 @@ pub struct WasiThread
     pub(crate) pid: WasiProcessId,
     pub(crate) id: WasiThreadId,
     finished: Arc<(Mutex<Option<u32>>, Condvar)>,
-    pub(crate) signals: Arc<Mutex<Vec<__wasi_signal_t>>>,
+    pub(crate) signals: Arc<(Mutex<Vec<__wasi_signal_t>>, tokio::sync::broadcast::Sender<()>)>,
     stack: Arc<Mutex<ThreadStack>>,
 }
 
@@ -132,16 +132,21 @@ impl WasiThread
 
     /// Adds a signal for this thread to process
     pub fn signal(&self, signal: __wasi_signal_t) {
-        let mut guard = self.signals.lock().unwrap();
+        let mut guard = self.signals.0.lock().unwrap();
         if guard.contains(&signal) == false {
             guard.push(signal);
         }
+        let _ = self.signals.1.send(());
     }
 
     /// Returns all the signals that are waiting to be processed
     pub fn pop_signals(&self) -> Vec<__wasi_signal_t> {
-        let mut guard = self.signals.lock().unwrap();
+        let mut guard = self.signals.0.lock().unwrap();
         guard.drain(..).collect()
+    }
+
+    pub fn subscribe_signals(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.signals.1.subscribe()
     }
 
     /// Adds a stack snapshot and removes dead ones
@@ -430,12 +435,13 @@ impl WasiProcess
             Arc::new((Mutex::new(None), Condvar::default()))
         };
 
+        let (tx_signals, _) = tokio::sync::broadcast::channel(1);
         let ctrl = WasiThread {
             pid: self.pid(),
             id,
             is_main,
             finished,
-            signals: Arc::new(Mutex::new(Vec::new())),
+            signals: Arc::new((Mutex::new(Vec::new()), tx_signals)),
             stack: Arc::new(Mutex::new(ThreadStack::default()))
         };
         inner.threads.insert(id, ctrl.clone());

@@ -331,8 +331,8 @@ pub trait VirtualTcpListener: fmt::Debug + Send + Sync + 'static {
     /// Checks how many sockets are waiting to be accepted
     fn peek(&mut self) -> Result<usize>;
 
-    /// Polls the socket for when its ready to accept a new connection
-    async fn wait_accept(&mut self) -> Result<usize>;
+    /// Polls the socket for when there is data to be received
+    fn poll_accept_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>;
 
     /// Sets the accept timeout
     fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<()>;
@@ -377,10 +377,10 @@ pub trait VirtualSocket: fmt::Debug + Send + Sync + 'static {
     fn status(&self) -> Result<SocketStatus>;
 
     /// Polls the socket for when there is data to be received
-    async fn wait_read(&mut self) -> Result<usize>;
+    fn poll_read_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>;
 
     /// Polls the socket for when the backpressure allows for writing to the socket
-    async fn wait_write(&mut self) -> Result<usize>;
+    fn poll_write_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -421,10 +421,10 @@ pub trait VirtualWebSocket: fmt::Debug + Send + Sync + 'static {
     fn try_recv(&mut self) -> Result<Option<SocketReceive>>;
 
     /// Polls the socket for when there is data to be received
-    async fn wait_read(&self) -> Result<usize>;
+    fn poll_read_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>;
 
     /// Polls the socket for when the backpressure allows for writing to the socket
-    async fn wait_write(&self) -> Result<usize>;
+    fn poll_write_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>;
 }
 
 /// Connected sockets have a persistent connection to a remote peer

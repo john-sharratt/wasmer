@@ -52,7 +52,7 @@ use sha2::Sha256;
 use wasmer::vm::VMMemory;
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::collections::hash_map::Entry;
 use std::convert::{Infallible, TryInto};
 use std::io::{self, Read, Seek, Write};
@@ -1335,6 +1335,7 @@ pub fn fd_read<M: MemorySize>(
                     counter,
                     is_semaphore,
                     wakers,
+                    ..
                 } => {
                     let counter = Arc::clone(counter);
                     let is_semaphore: bool = *is_semaphore;
@@ -1646,6 +1647,7 @@ pub fn fd_event<M: MemorySize>(
         counter: Arc::new(AtomicU64::new(initial_val)),
         is_semaphore: flags & __WASI_EVENTFDFLAGS_SEMAPHORE != 0,
         wakers: Default::default(),
+        immediate: Arc::new(AtomicBool::new(false))
     };
 
     let inode = state.fs.create_inode_with_default_stat(
@@ -1906,7 +1908,7 @@ pub fn fd_write<M: MemorySize>(
                     return Ok(__WASI_EISDIR);
                 }
                 Kind::EventNotifications {
-                    counter, wakers, ..
+                    counter, wakers, immediate, ..
                 } => {
                     let mut val = 0u64.to_ne_bytes();
                     let written =
@@ -1919,6 +1921,9 @@ pub fn fd_write<M: MemorySize>(
                     counter.fetch_add(val, Ordering::AcqRel);
                     {
                         let mut guard = wakers.lock().unwrap();
+                        if guard.is_empty() {
+                            immediate.store(true, Ordering::Release);
+                        }
                         while let Some(wake) = guard.pop_back() {
                             // we just drop the sender which will terminate the receiver
                             // asynchronously without the need for a blocking operation
@@ -3249,18 +3254,20 @@ pub fn poll_oneoff<M: MemorySize>(
     nevents: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
 
+    let pid = ctx.data().pid();
+    let tid = ctx.data().tid();
     ctx.data_mut().poll_cnt += 1;
     let silent = match ctx.data().poll_cnt {
         1 => false,
         2 => {
-            trace!("wasi[{}:{}]::poll_oneoff silenced", ctx.data().pid(), ctx.data().tid());
+            trace!("wasi[{}:{}]::poll_oneoff silenced", pid, tid);
             true
         }
         _ => true
     };
 
     if silent == false {
-        trace!("wasi[{}:{}]::poll_oneoff (nsubscriptions={})", ctx.data().pid(), ctx.data().tid(), nsubscriptions);
+        trace!("wasi[{}:{}]::poll_oneoff (nsubscriptions={})", pid, tid, nsubscriptions);
     }
 
     // If the poll waker is not set then start it up
@@ -3282,19 +3289,20 @@ pub fn poll_oneoff<M: MemorySize>(
     // subscribed too
     let mut clock_subs = vec![];
     let mut time_to_sleep = None;
+    let mut signals = ctx.data().thread.subscribe_signals();
 
     // First we extract all the subscriptions into an array so that they
     // can be processed
     let env = ctx.data();
     let state = ctx.data().state.deref();
     let memory = env.memory_view(&ctx);
-    let mut subscriptions = Vec::new();
+    let mut subscriptions = HashMap::new();
     let subscription_array = wasi_try_mem_ok!(in_.slice(&memory, nsubscriptions));
     for sub in subscription_array.iter() {
         let s: WasiSubscription = wasi_try_ok!(wasi_try_mem_ok!(sub.read()).try_into());
 
         let mut peb = PollEventBuilder::new();
-        let mut in_events_staged = Vec::new();
+        let mut in_events = HashMap::new();
         let fd = match s.event_type {
             EventType::Read(__wasi_subscription_fs_readwrite_t { fd }) => {
                 match fd {
@@ -3306,8 +3314,8 @@ pub fn poll_oneoff<M: MemorySize>(
                         }
                     }
                 }
-                in_events_staged.push(peb.add(PollEvent::PollIn).build());
-                Some(fd)
+                in_events.insert(peb.add(PollEvent::PollIn).build(), s);
+                fd
             }
             EventType::Write(__wasi_subscription_fs_readwrite_t { fd }) => {
                 match fd {
@@ -3319,8 +3327,8 @@ pub fn poll_oneoff<M: MemorySize>(
                         }
                     }
                 }
-                in_events_staged.push(peb.add(PollEvent::PollOut).build());
-                Some(fd)
+                in_events.insert(peb.add(PollEvent::PollOut).build(), s);
+                fd
             }
             EventType::Clock(clock_info) => {
                 if clock_info.clock_id == __WASI_CLOCK_REALTIME
@@ -3330,19 +3338,18 @@ pub fn poll_oneoff<M: MemorySize>(
                     // TODO: do this properly
                     time_to_sleep = Some(Duration::from_nanos(clock_info.timeout));
                     clock_subs.push((clock_info, s.user_data));
-                    None
+                    continue;
                 } else {
                     unimplemented!("Polling not implemented for clocks yet");
                 }
             }
         };
 
-        subscriptions.push((s, in_events_staged, fd));
+        subscriptions.insert(fd, in_events);
     }
     drop(env);
     
-    let mut events_seen: u32 = 0;    
-    let mut in_events = vec![];    
+    let mut events_seen: u32 = 0;
 
     // Build the async function we will block on
     let state = ctx.data().state.clone();
@@ -3359,72 +3366,70 @@ pub fn poll_oneoff<M: MemorySize>(
 
             #[allow(clippy::significant_drop_in_scrutinee)]
             let fds = {            
-                for (s, in_events_staged, fd) in subscriptions {
-                    if let Some(fd) = fd {
-                        let wasi_file_ref = match fd {
-                            __WASI_STDERR_FILENO => {
-                                wasi_try_ok!(
-                                    inodes
-                                        .stderr(&state.fs.fd_map)
-                                        .map(|g| g.into_poll_guard(s))
-                                        .map_err(fs_error_into_wasi_err)
-                                )
+                for (fd, in_events) in subscriptions {
+                    let wasi_file_ref = match fd {
+                        __WASI_STDERR_FILENO => {
+                            wasi_try_ok!(
+                                inodes
+                                    .stderr(&state.fs.fd_map)
+                                    .map(|g| g.into_poll_guard(in_events))
+                                    .map_err(fs_error_into_wasi_err)
+                            )
+                        }
+                        __WASI_STDIN_FILENO => {
+                            wasi_try_ok!(
+                                inodes
+                                    .stdin(&state.fs.fd_map)
+                                    .map(|g| g.into_poll_guard(in_events))
+                                    .map_err(fs_error_into_wasi_err)
+                            )
+                        }
+                        __WASI_STDOUT_FILENO => {
+                            wasi_try_ok!(
+                                inodes
+                                    .stdout(&state.fs.fd_map)
+                                    .map(|g| g.into_poll_guard(in_events))
+                                    .map_err(fs_error_into_wasi_err)
+                            )
+                        }
+                        _ => {
+                            let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
+                            let inode = fd_entry.inode;
+                            if !has_rights(fd_entry.rights, __WASI_RIGHT_POLL_FD_READWRITE) {
+                                return Ok(__WASI_EACCES);
                             }
-                            __WASI_STDIN_FILENO => {
-                                wasi_try_ok!(
-                                    inodes
-                                        .stdin(&state.fs.fd_map)
-                                        .map(|g| g.into_poll_guard(s))
-                                        .map_err(fs_error_into_wasi_err)
-                                )
-                            }
-                            __WASI_STDOUT_FILENO => {
-                                wasi_try_ok!(
-                                    inodes
-                                        .stdout(&state.fs.fd_map)
-                                        .map(|g| g.into_poll_guard(s))
-                                        .map_err(fs_error_into_wasi_err)
-                                )
-                            }
-                            _ => {
-                                let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
-                                let inode = fd_entry.inode;
-                                if !has_rights(fd_entry.rights, __WASI_RIGHT_POLL_FD_READWRITE) {
-                                    return Ok(__WASI_EACCES);
-                                }
 
-                                {
-                                    let guard = inodes.arena[inode].read();
-                                    match guard.deref() {
-                                        Kind::File { handle, .. } => {
-                                            if handle.is_some() {
-                                                crate::state::InodeValFilePollGuard { guard, subscription: s }
-                                            } else {
-                                                return Ok(__WASI_EBADF);
-                                            }
-                                        }
-                                        Kind::EventNotifications { .. } => {
-                                            crate::state::InodeValFilePollGuard { guard, subscription: s }
-                                        }
-                                        Kind::Socket { .. } => {
-                                            crate::state::InodeValFilePollGuard { guard, subscription: s }
-                                        }
-                                        Kind::Pipe { .. } => {
+                            {
+                                let guard = inodes.arena[inode].read();
+                                match guard.deref() {
+                                    Kind::File { handle, .. } => {
+                                        if handle.is_some() {
+                                            crate::state::InodeValFilePollGuard::new(guard, in_events)
+                                        } else {
                                             return Ok(__WASI_EBADF);
                                         }
-                                        Kind::Dir { .. }
-                                        | Kind::Root { .. }
-                                        | Kind::Buffer { .. }
-                                        | Kind::Symlink { .. } => {
-                                            unimplemented!("polling read on non-files not yet supported")
-                                        }
+                                    }
+                                    Kind::EventNotifications { .. } => {
+                                        crate::state::InodeValFilePollGuard::new(guard, in_events)
+                                    }
+                                    Kind::Socket { .. } => {
+                                        crate::state::InodeValFilePollGuard::new(guard, in_events)
+                                    }
+                                    Kind::Pipe { .. } => {
+                                        return Ok(__WASI_EBADF);
+                                    }
+                                    Kind::Dir { .. }
+                                    | Kind::Root { .. }
+                                    | Kind::Buffer { .. }
+                                    | Kind::Symlink { .. } => {
+                                        unimplemented!("polling read on non-files not yet supported")
                                     }
                                 }
                             }
-                        };
-                        fd_guards.push(wasi_file_ref);
-                        in_events.extend(in_events_staged.into_iter());
-                    }
+                        }
+                    };
+                    tracing::debug!("wasi[{}:{}]::poll_oneoff(fd={})", pid, tid, fd);
+                    fd_guards.push(wasi_file_ref);
                 }
             
                 fd_guards
@@ -3432,103 +3437,92 @@ pub fn poll_oneoff<M: MemorySize>(
             
             // Build all the async calls we need for all the files
             let mut polls = Vec::new();
-            for (guard, in_event) in fds.iter().zip(in_events.iter()) {
-                for in_event in iterate_poll_events(*in_event) {
-                    let triggered_events_tx = triggered_events_tx.clone();
-                    let poll = Box::pin(async move {
-                        let mut flags = 0;
-                        let mut bytes_available = 0;
-
-                        // Wait for it to trigger (or throw an error)
-                        let error = match in_event {
-                            PollEvent::PollIn => {
-                                guard.wait_read().await
-                                    .and_then(|a| {
-                                        bytes_available = a;
-                                        Ok(())
-                                    })
-                            },
-                            PollEvent::PollOut => {
-                                guard.wait_write().await
-                                    .and_then(|a| {
-                                        bytes_available = a;
-                                        Ok(())
-                                    })
-                            },
-                            PollEvent::PollError |
-                            PollEvent::PollHangUp |
-                            PollEvent::PollInvalid => guard.wait_close().await,
-                        }
-                        .map(|_| __WASI_ESUCCESS)
-                        .map_err(fs_error_into_wasi_err)
-                        .unwrap_or_else(|e| e);
-
-                        // If this is a hangup poll then set the flag for it
-                        if let PollEvent::PollHangUp = in_event {
-                            flags |= __WASI_EVENT_FD_READWRITE_HANGUP;
-                        }
-
-                        // The file has been triggered
-                        triggered_events_tx.send(
-                            __wasi_event_t {
-                                userdata: guard.subscription.user_data,
-                                error,
-                                type_: guard.subscription.event_type.raw_tag(),
-                                u: unsafe {
-                                    __wasi_event_u {
-                                        fd_readwrite: __wasi_event_fd_readwrite_t {
-                                            nbytes: bytes_available as u64,
-                                            flags,
-                                        },
-                                    }
-                                },
-                            }
-                        ).unwrap();
-                    });
-                    polls.push(poll);
+            for guard in fds
+            {
+                // Combine all the events together
+                let mut peb = PollEventBuilder::new();
+                for (in_events, _) in guard.subscriptions.iter() {
+                    for in_event in iterate_poll_events(*in_events) {
+                        peb = peb.add(in_event);
+                    }
                 }
+                let peb = peb.build();
+
+                let triggered_events_tx = triggered_events_tx.clone();
+                let poll = Box::pin(async move {
+                    let mut flags = 0;
+                    let mut bytes_available = 0;
+
+                    // Wait for it to trigger (or throw an error) then
+                    // once it has triggered an event will be returned
+                    // that we can give to the caller
+                    triggered_events_tx
+                        .send(guard.wait().await)
+                        .unwrap();
+                });
+                polls.push(poll);
             }
 
             // If there is a timeout we need to use the runtime to measure this
             // otherwise we just process all the events and wait on them indefinately
             let timeout = match time_to_sleep {
-                Some(time_to_sleep) => Some(
-                    wasi_try_ok!(
+                Some(time_to_sleep) => {
+                    tracing::debug!("wasi[{}:{}]::poll_oneoff (timeout={})", pid, tid, time_to_sleep.as_millis());
+                    let work = wasi_try_ok!(
                         runtime.sleep_now_async(current_caller_id(), time_to_sleep.as_millis())
                             .map_err(|err| {
                                 tracing::debug!("failed to sleep asynchronously - {}", err);
                                 __WASI_ENOTSUP
                             })
+                    );
+                    let triggered_events_tx = triggered_events_tx.clone();
+                    Some(
+                        async move {
+                            // Wait for the timeout
+                            work.await;
+                            // The timeout has triggerred so lets add that event
+                            for (clock_info, userdata) in clock_subs {
+                                triggered_events_tx.send(
+                                    __wasi_event_t {
+                                        userdata,
+                                        error: __WASI_ESUCCESS,
+                                        type_: __WASI_EVENTTYPE_CLOCK,
+                                        u: unsafe {
+                                            __wasi_event_u {
+                                                fd_readwrite: __wasi_event_fd_readwrite_t {
+                                                    nbytes: 0,
+                                                    flags: 0,
+                                                },
+                                            }
+                                        },
+                                    }
+                                ).unwrap();
+                            }
+                        }
                     )
-                ),
+                },
                 None => None
             };
-            if let Some(timeout) = timeout {
+            if polls.is_empty() == false {
+                if let Some(timeout) = timeout {
+                    tokio::select! {
+                        _ = timeout => { },
+                        s = signals.recv() => { return Ok(__WASI_ESTALE); }
+                        a = futures::future::select_all(polls.into_iter()) => {}
+                    }
+                } else {
+                    tokio::select! {
+                        s = signals.recv() => { return Ok(__WASI_ESTALE); }
+                        a = futures::future::select_all(polls.into_iter()) => {}
+                    }
+                }
+            } else if let Some(timeout) = timeout {                
                 tokio::select! {
-                    _ = timeout => {
-                        // The timeout has triggerred so lets add that event
-                        for (clock_info, userdata) in clock_subs {
-                            triggered_events_tx.send(
-                                __wasi_event_t {
-                                    userdata,
-                                    error: __WASI_ESUCCESS,
-                                    type_: __WASI_EVENTTYPE_CLOCK,
-                                    u: unsafe {
-                                        __wasi_event_u {
-                                            fd_readwrite: __wasi_event_fd_readwrite_t {
-                                                nbytes: 0,
-                                                flags: 0,
-                                            },
-                                        }
-                                    },
-                                }
-                            ).unwrap();
-                        }
-                    },
-                    a = futures::future::select_all(polls.into_iter()) => {}
+                    _ = timeout => { },
+                    s = signals.recv() => { return Ok(__WASI_ESTALE); }
                 }
             } else {
-                futures::future::select_all(polls.into_iter()).await.0;
+                return Ok(__WASI_EINVAL);
             }
             Ok(__WASI_ESUCCESS)
         }
@@ -3542,8 +3536,15 @@ pub fn poll_oneoff<M: MemorySize>(
             tx.send(ret);
         })
     });
-    let ret = rx.recv()
+    let mut ret = rx.recv()
         .unwrap_or(Ok(__WASI_ENOEXEC));
+
+    // If its a signal then process them
+    if let Ok(__WASI_ESTALE) = &ret {
+        let env = ctx.data().clone();
+        env.process_signals(&mut ctx);
+        ret = Ok(__WASI_ESUCCESS);
+    }
 
     // Process all the events that were triggered
     let mut env = ctx.data();

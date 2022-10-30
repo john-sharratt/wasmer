@@ -186,6 +186,8 @@ pub enum Kind {
         /// Receiver that wakes sleeping threads
         #[cfg_attr(feature = "enable-serde", serde(skip))]
         wakers: Arc<Mutex<VecDeque<tokio::sync::mpsc::Sender<()>>>>,
+        /// Immediate waker
+        immediate: Arc<AtomicBool>,
     },
 }
 

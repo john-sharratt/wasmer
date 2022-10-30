@@ -1280,62 +1280,60 @@ impl InodeSocket {
         }
     }
 
-    pub async fn poll_read(&self) -> wasmer_vnet::Result<usize> {
+    pub fn poll_read_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<wasmer_vnet::Result<usize>> {
         let mut inner = self.inner.write().unwrap();
         match &mut inner.kind {
             InodeSocketKind::TcpListener(socket) => {
-                socket.wait_accept().await.map(|_| 1)
+                socket.poll_accept_ready(cx)
             },
             InodeSocketKind::TcpStream(socket) => {
-                socket.wait_read().await
+                socket.poll_read_ready(cx)
             }
             InodeSocketKind::UdpSocket(socket) => {
-                socket.wait_read().await
+                socket.poll_read_ready(cx)
             }
             InodeSocketKind::Raw(socket) => {
-                socket.wait_read().await
+                socket.poll_read_ready(cx)
             }
             InodeSocketKind::WebSocket(socket) => {
-                socket.wait_read().await
+                socket.poll_read_ready(cx)
             },
             InodeSocketKind::Icmp(socket) => {
-                socket.wait_read().await
+                socket.poll_read_ready(cx)
             },
             InodeSocketKind::PreSocket{ .. } |
             InodeSocketKind::HttpRequest(..) |
             InodeSocketKind::Closed => {
-                IndefinitePoll::default().await;
-                Ok(0)
+                std::task::Poll::Pending
             },
         }
     }
 
-    pub async fn poll_write(&self) -> wasmer_vnet::Result<usize> {
+    pub fn poll_write_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<wasmer_vnet::Result<usize>> {
         let mut inner = self.inner.write().unwrap();
         match &mut inner.kind {
             InodeSocketKind::TcpListener(socket) => {
-                socket.wait_accept().await.map(|_| 1)
+                socket.poll_accept_ready(cx)
             },
             InodeSocketKind::TcpStream(socket) => {
-                socket.wait_write().await
+                socket.poll_write_ready(cx)
             }
             InodeSocketKind::UdpSocket(socket) => {
-                socket.wait_write().await
+                socket.poll_write_ready(cx)
             }
             InodeSocketKind::Raw(socket) => {
-                socket.wait_write().await
+                socket.poll_write_ready(cx)
             }
             InodeSocketKind::WebSocket(socket) => {
-                socket.wait_write().await
+                socket.poll_write_ready(cx)
             },
             InodeSocketKind::Icmp(socket) => {
-                socket.wait_write().await
+                socket.poll_write_ready(cx)
             },
             InodeSocketKind::PreSocket{ .. } |
             InodeSocketKind::HttpRequest(..) |
             InodeSocketKind::Closed => {
-                IndefinitePoll::default().await;
-                Ok(0)
+                std::task::Poll::Pending
             },
         }
     }
@@ -1450,10 +1448,9 @@ impl Read for InodeSocket {
     }
 }
 
-impl Drop for InodeSocket {
+impl Drop for InodeSocketInner {
     fn drop(&mut self) {
-        let inner = self.inner.read().unwrap();
-        if let InodeSocketKind::HttpRequest(http, ty) = &inner.kind {
+        if let InodeSocketKind::HttpRequest(http, ty) = &self.kind {
             let mut guard = http.lock().unwrap();
             match ty {
                 InodeHttpSocketType::Request => {

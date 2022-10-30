@@ -345,28 +345,29 @@ impl VirtualTcpListener for LocalTcpListener {
         Ok(backlog.len())
     }
 
-    async fn wait_accept(&mut self) -> Result<usize> {
-        let (sock, addr) = self.stream
+    fn poll_accept_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>> {
+        let stream = self.stream
             .as_async_mut()
-            .map_err(io_err_into_net_error)?
-            .accept()
-            .await
             .map_err(io_err_into_net_error)?;
-        
-        let mut backlog = self.backlog.lock().unwrap();
-        backlog.push((
-            Box::new(LocalTcpStream {
-                stream: LocalTcpStreamMode::Async(sock),
-                addr,
-                connect_timeout: None,
-                read_timeout: None,
-                write_timeout: None,
-                linger_timeout: None,
-                nonblocking: false,
-            }),
-            addr,
-        ));
-        Ok(backlog.len())
+        stream
+            .poll_accept(cx)
+            .map_err(io_err_into_net_error)
+            .map_ok(|(sock, addr)| {
+                let mut backlog = self.backlog.lock().unwrap();
+                backlog.push((
+                    Box::new(LocalTcpStream {
+                        stream: LocalTcpStreamMode::Async(sock),
+                        addr,
+                        connect_timeout: None,
+                        read_timeout: None,
+                        write_timeout: None,
+                        linger_timeout: None,
+                        nonblocking: false,
+                    }),
+                    addr,
+                ));
+                backlog.len()  
+            })
     }
 
     /// Sets the accept timeout
@@ -768,20 +769,26 @@ impl VirtualSocket for LocalTcpStream {
         Ok(SocketStatus::Opened)
     }
 
-    async fn wait_read(&mut self) -> Result<usize> {
+    fn poll_read_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>
+    {
         let stream = self.stream
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
-        let read = LocalTcpStreamReadReady { stream };
-        read.await
+        stream
+            .poll_read_ready(cx)
+            .map_ok(|a| 1usize)
+            .map_err(io_err_into_net_error)
     }
 
-    async fn wait_write(&mut self) -> Result<usize> {
+    fn poll_write_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>
+    {
         let stream = self.stream
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
-        let read = LocalTcpStreamWriteReady { stream };
-        read.await
+        stream
+            .poll_write_ready(cx)
+            .map_ok(|a| 1usize)
+            .map_err(io_err_into_net_error)
     }
 }
 
@@ -1248,20 +1255,27 @@ impl VirtualSocket for LocalUdpSocket {
         Ok(SocketStatus::Opened)
     }
 
-    async fn wait_read(&mut self) -> Result<usize> {
+    fn poll_read_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>
+    {
         let socket = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
-        let read = LocalUdpSocketReadReady { socket };
-        read.await
+        socket
+            .poll_recv_ready(cx)
+            .map_ok(|a| 1usize)
+            .map_err(io_err_into_net_error)
+        
     }
 
-    async fn wait_write(&mut self) -> Result<usize> {
+    fn poll_write_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>
+    {
         let socket = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
-        let read = LocalUdpSocketWriteReady { socket };
-        read.await
+        socket
+            .poll_send_ready(cx)
+            .map_ok(|a| 1usize)
+            .map_err(io_err_into_net_error)
     }
 }
 
