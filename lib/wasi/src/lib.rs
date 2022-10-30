@@ -290,8 +290,6 @@ where
     pub stack_base: u64,
     /// Start of the stack memory that is allocated for this thread
     pub stack_start: u64,
-    /// Number of times that the system has been polled without a trigger
-    pub poll_cnt: u64,
     /// Shared state of the WASI system. Manages all the data that the
     /// executing WASI program can see.
     pub state: Arc<WasiState>,
@@ -338,7 +336,6 @@ impl WasiEnv {
                 bin_factory,
                 state,
                 inner: None,
-                poll_cnt: 0,
                 owned_handles: Vec::new(),
                 runtime: self.runtime.clone()
             },
@@ -395,7 +392,6 @@ impl WasiEnv {
             stack_start: 0,
             state,
             inner: None,
-            poll_cnt: 0,
             owned_handles: Vec::new(),
             runtime,
             #[cfg(feature = "os")]

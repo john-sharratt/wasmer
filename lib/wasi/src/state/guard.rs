@@ -19,11 +19,12 @@ pub(crate) enum InodeValFilePollGuardMode<'a> {
 }
 
 pub(crate) struct InodeValFilePollGuard<'a> {
+    pub(crate) fd: u32,
     pub(crate) mode: InodeValFilePollGuardMode<'a>,
     pub(crate) subscriptions: HashMap<PollEventSet, WasiSubscription>,
 }
 impl<'a> InodeValFilePollGuard<'a> {
-    pub(crate) fn new(guard: RwLockReadGuard<'a, Kind>, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> Self {
+    pub(crate) fn new(fd: u32, guard: RwLockReadGuard<'a, Kind>, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> Self {
         let mode = match guard.deref() {
             Kind::EventNotifications { counter, wakers, immediate, .. } => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -43,6 +44,7 @@ impl<'a> InodeValFilePollGuard<'a> {
             _ => InodeValFilePollGuardMode::Guard(guard),
         };
         Self {
+            fd,
             mode,
             subscriptions
         }
@@ -342,8 +344,8 @@ pub(crate) struct InodeValFileReadGuard<'a> {
 }
 
 impl<'a> InodeValFileReadGuard<'a> {
-    pub fn into_poll_guard(self, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> InodeValFilePollGuard::<'a> {
-        InodeValFilePollGuard::new(self.guard, subscriptions)
+    pub fn into_poll_guard(self, fd: u32, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> InodeValFilePollGuard::<'a> {
+        InodeValFilePollGuard::new(fd, self.guard, subscriptions)
     }
 }
 

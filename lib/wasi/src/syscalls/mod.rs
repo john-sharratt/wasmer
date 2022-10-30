@@ -3256,19 +3256,7 @@ pub fn poll_oneoff<M: MemorySize>(
 
     let pid = ctx.data().pid();
     let tid = ctx.data().tid();
-    ctx.data_mut().poll_cnt += 1;
-    let silent = match ctx.data().poll_cnt {
-        1 => false,
-        2 => {
-            trace!("wasi[{}:{}]::poll_oneoff silenced", pid, tid);
-            true
-        }
-        _ => true
-    };
-
-    if silent == false {
-        trace!("wasi[{}:{}]::poll_oneoff (nsubscriptions={})", pid, tid, nsubscriptions);
-    }
+    trace!("wasi[{}:{}]::poll_oneoff (nsubscriptions={})", pid, tid, nsubscriptions);
 
     // If the poll waker is not set then start it up
     // What this does is for anyone who has not actually implemented
@@ -3372,7 +3360,7 @@ pub fn poll_oneoff<M: MemorySize>(
                             wasi_try_ok!(
                                 inodes
                                     .stderr(&state.fs.fd_map)
-                                    .map(|g| g.into_poll_guard(in_events))
+                                    .map(|g| g.into_poll_guard(fd, in_events))
                                     .map_err(fs_error_into_wasi_err)
                             )
                         }
@@ -3380,7 +3368,7 @@ pub fn poll_oneoff<M: MemorySize>(
                             wasi_try_ok!(
                                 inodes
                                     .stdin(&state.fs.fd_map)
-                                    .map(|g| g.into_poll_guard(in_events))
+                                    .map(|g| g.into_poll_guard(fd, in_events))
                                     .map_err(fs_error_into_wasi_err)
                             )
                         }
@@ -3388,7 +3376,7 @@ pub fn poll_oneoff<M: MemorySize>(
                             wasi_try_ok!(
                                 inodes
                                     .stdout(&state.fs.fd_map)
-                                    .map(|g| g.into_poll_guard(in_events))
+                                    .map(|g| g.into_poll_guard(fd, in_events))
                                     .map_err(fs_error_into_wasi_err)
                             )
                         }
@@ -3404,16 +3392,16 @@ pub fn poll_oneoff<M: MemorySize>(
                                 match guard.deref() {
                                     Kind::File { handle, .. } => {
                                         if handle.is_some() {
-                                            crate::state::InodeValFilePollGuard::new(guard, in_events)
+                                            crate::state::InodeValFilePollGuard::new(fd, guard, in_events)
                                         } else {
                                             return Ok(__WASI_EBADF);
                                         }
                                     }
                                     Kind::EventNotifications { .. } => {
-                                        crate::state::InodeValFilePollGuard::new(guard, in_events)
+                                        crate::state::InodeValFilePollGuard::new(fd, guard, in_events)
                                     }
                                     Kind::Socket { .. } => {
-                                        crate::state::InodeValFilePollGuard::new(guard, in_events)
+                                        crate::state::InodeValFilePollGuard::new(fd, guard, in_events)
                                     }
                                     Kind::Pipe { .. } => {
                                         return Ok(__WASI_EBADF);
@@ -3428,7 +3416,7 @@ pub fn poll_oneoff<M: MemorySize>(
                             }
                         }
                     };
-                    tracing::debug!("wasi[{}:{}]::poll_oneoff(fd={})", pid, tid, fd);
+                    tracing::debug!("wasi[{}:{}]::poll_oneoff wait_for_fd={} type={:?}", pid, tid, fd, wasi_file_ref);
                     fd_guards.push(wasi_file_ref);
                 }
             
@@ -3456,8 +3444,11 @@ pub fn poll_oneoff<M: MemorySize>(
                     // Wait for it to trigger (or throw an error) then
                     // once it has triggered an event will be returned
                     // that we can give to the caller
+                    let evt = guard.wait().await;
+                    tracing::debug!("wasi[{}:{}]::poll_oneoff fd_triggered={}", pid, tid, guard.fd);
+
                     triggered_events_tx
-                        .send(guard.wait().await)
+                        .send(evt)
                         .unwrap();
                 });
                 polls.push(poll);
@@ -3467,7 +3458,7 @@ pub fn poll_oneoff<M: MemorySize>(
             // otherwise we just process all the events and wait on them indefinately
             let timeout = match time_to_sleep {
                 Some(time_to_sleep) => {
-                    tracing::debug!("wasi[{}:{}]::poll_oneoff (timeout={})", pid, tid, time_to_sleep.as_millis());
+                    tracing::debug!("wasi[{}:{}]::poll_oneoff wait_for_timeout={}", pid, tid, time_to_sleep.as_millis());
                     let work = wasi_try_ok!(
                         runtime.sleep_now_async(current_caller_id(), time_to_sleep.as_millis())
                             .map_err(|err| {
@@ -3480,6 +3471,7 @@ pub fn poll_oneoff<M: MemorySize>(
                         async move {
                             // Wait for the timeout
                             work.await;
+                            tracing::debug!("wasi[{}:{}]::poll_oneoff triggered_timeout", pid, tid);
                             // The timeout has triggerred so lets add that event
                             for (clock_info, userdata) in clock_subs {
                                 triggered_events_tx.send(
@@ -8177,10 +8169,10 @@ pub fn sock_accept<M: MemorySize>(
     let (child, addr) = {
         let mut ret;
         let (_, state) = env.get_memory_and_wasi_state(&ctx, 0);
+        let nonblocking = wasi_try_ok!(__sock_actor(&ctx, sock, __WASI_RIGHT_SOCK_ACCEPT, |socket| socket.nonblocking()));
         loop {
             wasi_try_ok!(
                 match __sock_actor(&ctx, sock, __WASI_RIGHT_SOCK_ACCEPT, |socket| {
-                    let nonblocking = socket.nonblocking()?;
                     socket.set_nonblocking(true);
                     let ret = socket.accept(fd_flags);
                     socket.set_nonblocking(nonblocking);
@@ -8192,10 +8184,16 @@ pub fn sock_accept<M: MemorySize>(
                         break;
                     }
                     Err(__WASI_ETIMEDOUT) => {
+                        if nonblocking {
+                            return Ok(__WASI_EAGAIN);
+                        }
                         env.yield_now()?;
                         continue;
                     }
                     Err(__WASI_EAGAIN) => {
+                        if nonblocking {
+                            return Ok(__WASI_EAGAIN);
+                        }
                         env.clone().sleep(&mut ctx, Duration::from_millis(5))?;
                         env = ctx.data();
                         continue;
@@ -8221,6 +8219,8 @@ pub fn sock_accept<M: MemorySize>(
 
     let rights = super::state::all_socket_rights();
     let fd = wasi_try_ok!(state.fs.create_fd(rights, rights, 0, 0, inode));
+
+    debug!("wasi[{}:{}]::socket connected (listener={}, fd={})", ctx.data().pid(), ctx.data().tid(), sock, fd);
 
     wasi_try_mem_ok!(ro_fd.write(&memory, fd));
     wasi_try_ok!(super::state::write_ip_port(
