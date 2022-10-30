@@ -258,7 +258,7 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable
     /// Polls for when the file can be written to again
     /// Defaults to `None` which means no asynchronous IO support - caller
     /// must poll `bytes_available_write` instead
-    fn poll_close_ready(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+    fn poll_close_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
         match self.is_open() {
             true => {
                 let waker = cx.waker().clone();

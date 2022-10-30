@@ -281,8 +281,8 @@ impl InodeSocket {
         &self,
         _fd_flags: __wasi_fdflags_t,
     ) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr), __wasi_errno_t> {
-        let inner = self.inner.read().unwrap();
-        let (sock, addr) = match &inner.kind {
+        let mut inner = self.inner.write().unwrap();
+        let (sock, addr) = match &mut inner.kind {
             InodeSocketKind::TcpListener(sock) => {
                 let (mut child, addr) = sock.accept().map_err(net_error_into_wasi_err)?;
                 if sock.nonblocking().map_err(net_error_into_wasi_err)? {
@@ -290,29 +290,6 @@ impl InodeSocket {
                 }
                 Ok((child, addr))
             },
-            InodeSocketKind::PreSocket { .. } => Err(__WASI_ENOTCONN),
-            InodeSocketKind::Closed => Err(__WASI_EIO),
-            _ => Err(__WASI_ENOTSUP),
-        }?;
-        Ok((sock, addr))
-    }
-
-    pub fn accept_timeout(
-        &self,
-        _fd_flags: __wasi_fdflags_t,
-        timeout: Duration,
-    ) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr), __wasi_errno_t> {
-        let inner = self.inner.read().unwrap();
-        let (sock, addr) = match &inner.kind {
-            InodeSocketKind::TcpListener(sock) => {
-                let (mut child, addr) = sock
-                    .accept_timeout(timeout)
-                    .map_err(net_error_into_wasi_err)?;
-                if sock.nonblocking().map_err(net_error_into_wasi_err)? {
-                    child.set_nonblocking(true).map_err(net_error_into_wasi_err)?;
-                }
-                Ok((child, addr))
-            }
             InodeSocketKind::PreSocket { .. } => Err(__WASI_ENOTCONN),
             InodeSocketKind::Closed => Err(__WASI_EIO),
             _ => Err(__WASI_ENOTSUP),
@@ -639,6 +616,37 @@ impl InodeSocket {
             InodeSocketKind::Closed => Err(__WASI_EIO),
             _ => Err(__WASI_ENOTSUP),
         }
+    }
+
+    pub fn nonblocking(
+        &self,
+    ) -> Result<bool, __wasi_errno_t> {
+        let inner = self.inner.read().unwrap();
+        Ok(
+            match &inner.kind {
+                InodeSocketKind::TcpStream(sock) => {
+                    sock.nonblocking().map_err(net_error_into_wasi_err)?
+                }
+                InodeSocketKind::TcpListener(sock, ..) => {
+                    sock.nonblocking().map_err(net_error_into_wasi_err)?
+                }
+                InodeSocketKind::UdpSocket(sock, ..) => {
+                    sock.nonblocking().map_err(net_error_into_wasi_err)?
+                }
+                InodeSocketKind::Raw(sock, ..) => {
+                    sock.nonblocking().map_err(net_error_into_wasi_err)?
+                }
+                InodeSocketKind::Icmp(sock, ..) => {
+                    sock.nonblocking().map_err(net_error_into_wasi_err)?
+                }
+                InodeSocketKind::PreSocket { nonblocking, .. } => {
+                    *nonblocking
+                }
+                _ => {
+                    return Err(__WASI_ENOTSUP);
+                },
+            }
+        )
     }
 
     pub fn set_nonblocking(
@@ -1252,8 +1260,8 @@ impl InodeSocket {
     }
 
     pub fn can_write(&self) -> bool {
-        if let Ok(guard) = self.inner.try_write() {
-            match &guard.kind {
+        if let Ok(mut guard) = self.inner.try_write() {
+            match &mut guard.kind {
                 InodeSocketKind::TcpListener(socket) => {
                     socket.peek().ok().map(|a| a > 0).unwrap_or_default()
                 },
@@ -1272,11 +1280,11 @@ impl InodeSocket {
         }
     }
 
-    pub async fn poll_read(&self) -> wasmer_vnet::Result<()> {
+    pub async fn poll_read(&self) -> wasmer_vnet::Result<usize> {
         let mut inner = self.inner.write().unwrap();
         match &mut inner.kind {
             InodeSocketKind::TcpListener(socket) => {
-                socket.wait_accept().await.map(|_| ())
+                socket.wait_accept().await.map(|_| 1)
             },
             InodeSocketKind::TcpStream(socket) => {
                 socket.wait_read().await
@@ -1296,16 +1304,17 @@ impl InodeSocket {
             InodeSocketKind::PreSocket{ .. } |
             InodeSocketKind::HttpRequest(..) |
             InodeSocketKind::Closed => {
-                IndefinitePoll::default().await
+                IndefinitePoll::default().await;
+                Ok(0)
             },
         }
     }
 
-    pub async fn poll_write(&self) -> wasmer_vnet::Result<()> {
+    pub async fn poll_write(&self) -> wasmer_vnet::Result<usize> {
         let mut inner = self.inner.write().unwrap();
         match &mut inner.kind {
             InodeSocketKind::TcpListener(socket) => {
-                socket.wait_accept().await.map(|_| ())
+                socket.wait_accept().await.map(|_| 1)
             },
             InodeSocketKind::TcpStream(socket) => {
                 socket.wait_write().await
@@ -1325,7 +1334,8 @@ impl InodeSocket {
             InodeSocketKind::PreSocket{ .. } |
             InodeSocketKind::HttpRequest(..) |
             InodeSocketKind::Closed => {
-                IndefinitePoll::default().await
+                IndefinitePoll::default().await;
+                Ok(0)
             },
         }
     }
@@ -1336,8 +1346,8 @@ struct IndefinitePoll {
 }
 impl Future
 for IndefinitePoll {
-    type Output = wasmer_vnet::Result<()>;
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
         std::task::Poll::Pending
     }
 }

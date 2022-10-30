@@ -364,6 +364,9 @@ pub trait VirtualSocket: fmt::Debug + Send + Sync + 'static {
     /// Determines if the socket is blocking or not
     fn set_nonblocking(&mut self, nonblocking: bool) -> Result<()>;
 
+    // Returns true if the socket is nonblocking
+    fn nonblocking(&self) -> Result<bool>;
+
     /// Returns the maximum number of network hops before packets are dropped
     fn ttl(&self) -> Result<u32>;
 
@@ -374,10 +377,10 @@ pub trait VirtualSocket: fmt::Debug + Send + Sync + 'static {
     fn status(&self) -> Result<SocketStatus>;
 
     /// Polls the socket for when there is data to be received
-    async fn wait_read(&mut self) -> Result<()>;
+    async fn wait_read(&mut self) -> Result<usize>;
 
     /// Polls the socket for when the backpressure allows for writing to the socket
-    async fn wait_write(&mut self) -> Result<()>;
+    async fn wait_write(&mut self) -> Result<usize>;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -418,10 +421,10 @@ pub trait VirtualWebSocket: fmt::Debug + Send + Sync + 'static {
     fn try_recv(&mut self) -> Result<Option<SocketReceive>>;
 
     /// Polls the socket for when there is data to be received
-    async fn wait_read(&self) -> Result<()>;
+    async fn wait_read(&self) -> Result<usize>;
 
     /// Polls the socket for when the backpressure allows for writing to the socket
-    async fn wait_write(&self) -> Result<()>;
+    async fn wait_write(&self) -> Result<usize>;
 }
 
 /// Connected sockets have a persistent connection to a remote peer

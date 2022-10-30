@@ -752,6 +752,10 @@ impl VirtualSocket for LocalTcpStream {
         Ok(())
     }
 
+    fn nonblocking(&self) -> Result<bool> {
+        Ok(self.nonblocking)
+    }
+
     fn addr_local(&self) -> Result<SocketAddr> {
         match &self.stream {
             LocalTcpStreamMode::Blocking(a) => a.local_addr().map_err(io_err_into_net_error),
@@ -764,7 +768,7 @@ impl VirtualSocket for LocalTcpStream {
         Ok(SocketStatus::Opened)
     }
 
-    async fn wait_read(&mut self) -> Result<()> {
+    async fn wait_read(&mut self) -> Result<usize> {
         let stream = self.stream
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
@@ -772,7 +776,7 @@ impl VirtualSocket for LocalTcpStream {
         read.await
     }
 
-    async fn wait_write(&mut self) -> Result<()> {
+    async fn wait_write(&mut self) -> Result<usize> {
         let stream = self.stream
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
@@ -787,12 +791,13 @@ struct LocalTcpStreamReadReady<'a> {
 impl<'a> Future
 for LocalTcpStreamReadReady<'a>
 {
-    type Output = Result<()>;
+    type Output = Result<usize>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
         self.stream
             .poll_read_ready(cx)
             .map_err(io_err_into_net_error)
+            .map_ok(|_| 1usize)
     }
 }
 
@@ -802,12 +807,13 @@ struct LocalTcpStreamWriteReady<'a> {
 impl<'a> Future
 for LocalTcpStreamWriteReady<'a>
 {
-    type Output = Result<()>;
+    type Output = Result<usize>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
         self.stream
             .poll_write_ready(cx)
             .map_err(io_err_into_net_error)
+            .map_ok(|_| 1usize)
     }
 }
 
@@ -1218,6 +1224,10 @@ impl VirtualSocket for LocalUdpSocket {
         Ok(())
     }
 
+    fn nonblocking(&self) -> Result<bool> {
+        Ok(self.nonblocking)
+    }
+
     fn ttl(&self) -> Result<u32> {
         match &self.socket {
             LocalUdpSocketMode::Blocking(a) => a.ttl().map_err(io_err_into_net_error),
@@ -1238,7 +1248,7 @@ impl VirtualSocket for LocalUdpSocket {
         Ok(SocketStatus::Opened)
     }
 
-    async fn wait_read(&mut self) -> Result<()> {
+    async fn wait_read(&mut self) -> Result<usize> {
         let socket = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
@@ -1246,7 +1256,7 @@ impl VirtualSocket for LocalUdpSocket {
         read.await
     }
 
-    async fn wait_write(&mut self) -> Result<()> {
+    async fn wait_write(&mut self) -> Result<usize> {
         let socket = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?;
@@ -1261,12 +1271,13 @@ struct LocalUdpSocketReadReady<'a> {
 impl<'a> Future
 for LocalUdpSocketReadReady<'a>
 {
-    type Output = Result<()>;
+    type Output = Result<usize>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
         self.socket
             .poll_recv_ready(cx)
             .map_err(io_err_into_net_error)
+            .map_ok(|_| 1usize)
     }
 }
 
@@ -1276,11 +1287,12 @@ struct LocalUdpSocketWriteReady<'a> {
 impl<'a> Future
 for LocalUdpSocketWriteReady<'a>
 {
-    type Output = Result<()>;
+    type Output = Result<usize>;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
         self.socket
             .poll_send_ready(cx)
             .map_err(io_err_into_net_error)
+            .map_ok(|_| 1usize)
     }
 }

@@ -9,6 +9,7 @@ use std::{
 
 pub(crate) struct InodeValFilePollGuard<'a> {
     pub(crate) guard: RwLockReadGuard<'a, Kind>,
+    pub(crate) subscription: WasiSubscription,
 }
 
 impl<'a> std::fmt::Debug
@@ -102,77 +103,43 @@ impl<'a> InodeValFilePollGuard<'a> {
         }
     }
 
-    pub async fn wait_read(&self) -> wasmer_vfs::Result<()> {
-        match self.guard.deref() {
-            Kind::File { handle, .. } => {
-                if let Some(handle) = handle {
-                    handle.wait_read().await
-                } else {
-                    None
-                }
-            },
-            Kind::EventNotifications { counter, wakers, .. } => {
-                let counter = counter.clone();
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                {
-                    let mut wakers = wakers.lock().unwrap();
-                    wakers.push_back(tx);
-                }
-                rx.recv().await;
-                Some(Box::pin(async move {
-                    let _ = rx.recv().await;
-                    
-                }))
-            },
-            Kind::Socket { socket } => {
-                socket.poll_read()
-            }
-            _ => None
-        }
+    pub async fn wait_read(&self) -> wasmer_vfs::Result<usize> {
+        InodeValFilePollGuardReadJoin::new(self).await
     }
 
-    pub async fn wait_write(&self) -> wasmer_vfs::Result<()> {
-        match self.guard.deref() {
-            Kind::File { handle, .. } => {
-                if let Some(handle) = handle {
-                    handle.poll_write()
-                } else {
-                    None
-                }
-            },
-            Kind::EventNotifications { counter, wakers, .. } => {
-                let counter = counter.clone();
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                let mut wakers = wakers.lock().unwrap();
-                wakers.push_back(tx);
-                Some(Box::pin(async move {
-                    let _ = rx.recv().await;
-                    counter.load(std::sync::atomic::Ordering::Acquire) as usize
-                }))
-            },
-            Kind::Socket { socket } => {
-                socket.poll_write()
-            }
-            _ => None
-        }
+    pub async fn wait_write(&self) -> wasmer_vfs::Result<usize> {
+        InodeValFilePollGuardWriteJoin::new(self).await
+    }
+
+    pub async fn wait_close(&self) -> wasmer_vfs::Result<()> {
+        InodeValFilePollGuardCloseJoin::new(self).await
     }
 }
 
 struct InodeValFilePollGuardReadJoin<'a> {
     guard: &'a InodeValFilePollGuard<'a>,
     notifications: Option<mpsc::Receiver<()>>,
-    socket: Option<Pin<Box<dyn Future<Output=wasmer_vnet::Result<()>> + 'static>>>
+    socket: Option<Pin<Box<dyn Future<Output=wasmer_vnet::Result<usize>> + 'static>>>
+}
+impl<'a> InodeValFilePollGuardReadJoin<'a> {
+    fn new(guard: &'a InodeValFilePollGuard<'a>) -> Self {
+        Self {
+            guard,
+            notifications: None,
+            socket: None
+        }
+    }
 }
 impl<'a> Future
 for InodeValFilePollGuardReadJoin<'a>
 {
-    type Output = wasmer_vfs::Result<()>;
+    type Output = wasmer_vfs::Result<usize>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         match self.guard.guard.deref() {
             Kind::File { handle, .. } => {
                 if let Some(handle) = handle {
-                    handle.poll_read_ready(cx).map(|_| Ok(()))
+                    handle.poll_read_ready(cx)
                 } else {
                     Poll::Ready(Err(FsError::WouldBlock))
                 }
@@ -184,14 +151,19 @@ for InodeValFilePollGuardReadJoin<'a>
                     wakers.push_back(tx);
                     self.notifications.replace(rx);
                 }
-                let notifications = Pin::new(self.notifications.as_mut().unwrap());
-                notifications.poll_recv(cx).map(|_| Ok(()))
+                let counter = counter.clone();
+                let mut notifications = Pin::new(self.notifications.as_mut().unwrap());
+                notifications.poll_recv(cx).map(|_| {
+                    let cnt = counter.load(Ordering::Acquire);
+                    Ok(cnt as usize)
+                })
             },
             Kind::Socket { socket } => {
                 if self.socket.is_none() {
                     let socket = socket.clone();
-                    let work = socket.poll_read();
-                    self.socket.replace(Box::pin(work));
+                    self.socket.replace(Box::pin(async move {
+                        socket.poll_read().await
+                    }));
                 }
                 let socket = self.socket.as_mut().unwrap().as_mut();
                 socket.poll(cx).map_err(net_error_into_io_err).map_err(Into::<FsError>::into)
@@ -204,18 +176,27 @@ for InodeValFilePollGuardReadJoin<'a>
 struct InodeValFilePollGuardWriteJoin<'a> {
     guard: &'a InodeValFilePollGuard<'a>,
     notifications: Option<mpsc::Receiver<()>>,
-    socket: Option<Pin<Box<dyn Future<Output=wasmer_vnet::Result<()>> + 'static>>>
+    socket: Option<Pin<Box<dyn Future<Output=wasmer_vnet::Result<usize>> + 'static>>>
+}
+impl<'a> InodeValFilePollGuardWriteJoin<'a> {
+    fn new(guard: &'a InodeValFilePollGuard<'a>) -> Self {
+        Self {
+            guard,
+            notifications: None,
+            socket: None
+        }
+    }
 }
 impl<'a> Future
 for InodeValFilePollGuardWriteJoin<'a>
 {
-    type Output = wasmer_vfs::Result<()>;
+    type Output = wasmer_vfs::Result<usize>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         match self.guard.guard.deref() {
             Kind::File { handle, .. } => {
                 if let Some(handle) = handle {
-                    handle.poll_write_ready(cx).map(|_| Ok(()))
+                    handle.poll_write_ready(cx)
                 } else {
                     Poll::Ready(Err(FsError::WouldBlock))
                 }
@@ -227,18 +208,52 @@ for InodeValFilePollGuardWriteJoin<'a>
                     wakers.push_back(tx);
                     self.notifications.replace(rx);
                 }
-                let notifications = Pin::new(self.notifications.as_mut().unwrap());
-                notifications.poll_recv(cx).map(|_| Ok(()))
+                let counter = counter.clone();
+                let mut notifications = Pin::new(self.notifications.as_mut().unwrap());
+                notifications.poll_recv(cx).map(|_| {
+                    let cnt = counter.load(Ordering::Acquire);
+                    Ok(cnt as usize)
+                })
             },
             Kind::Socket { socket } => {
                 if self.socket.is_none() {
                     let socket = socket.clone();
-                    let work = socket.poll_write();
-                    self.socket.replace(Box::pin(work));
+                    self.socket.replace(Box::pin(async move {
+                        socket.poll_write().await
+                    }));
                 }
                 let socket = self.socket.as_mut().unwrap().as_mut();
                 socket.poll(cx).map_err(net_error_into_io_err).map_err(Into::<FsError>::into)
             }
+            _ => Poll::Ready(Err(FsError::WouldBlock))
+        }
+    }
+}
+
+struct InodeValFilePollGuardCloseJoin<'a> {
+    guard: &'a InodeValFilePollGuard<'a>,
+}
+impl<'a> InodeValFilePollGuardCloseJoin<'a> {
+    fn new(guard: &'a InodeValFilePollGuard<'a>) -> Self {
+        Self {
+            guard,
+        }
+    }
+}
+impl<'a> Future
+for InodeValFilePollGuardCloseJoin<'a>
+{
+    type Output = wasmer_vfs::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        match self.guard.guard.deref() {
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    handle.poll_close_ready(cx).map(|_| Ok(()))
+                } else {
+                    Poll::Ready(Err(FsError::WouldBlock))
+                }
+            },
             _ => Poll::Ready(Err(FsError::WouldBlock))
         }
     }
@@ -250,9 +265,10 @@ pub(crate) struct InodeValFileReadGuard<'a> {
 }
 
 impl<'a> InodeValFileReadGuard<'a> {
-    pub fn into_poll_guard(self) -> InodeValFilePollGuard::<'a> {
+    pub fn into_poll_guard(self, subscription: WasiSubscription) -> InodeValFilePollGuard::<'a> {
         InodeValFilePollGuard {
-            guard: self.guard
+            guard: self.guard,
+            subscription
         }
     }
 }

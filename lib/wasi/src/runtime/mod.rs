@@ -227,6 +227,28 @@ where Self: fmt::Debug + Sync,
         Ok(())
     }
 
+    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
+    /// execution environments) they will need to do asynchronous work whenever the main
+    /// thread goes idle and this is the place to hook for that.
+    #[cfg(not(feature = "sys-thread"))]
+    fn sleep_now_async(&self, _id: WasiCallingId, ms: u128) -> Result<Pin<Box<dyn Future<Output=()>>>, WasiThreadError> {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
+    /// execution environments) they will need to do asynchronous work whenever the main
+    /// thread goes idle and this is the place to hook for that.
+    #[cfg(feature = "sys-thread")]
+    fn sleep_now_async(&self, _id: WasiCallingId, ms: u128) -> Result<Pin<Box<dyn Future<Output=()>>>, WasiThreadError> {
+        Ok(Box::pin(async move {
+            if ms == 0 {
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            }
+        }))
+    }
+
     /// Starts an asynchronous task that will run on a shared worker pool
     /// This task must not block the execution or it could cause a deadlock
     #[cfg(not(feature = "sys-thread"))]
@@ -236,6 +258,16 @@ where Self: fmt::Debug + Sync,
             dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
         >,
     ) -> Result<(), WasiThreadError> {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Starts an asynchronous task on the local thread (by running it in a runtime)
+    #[cfg(not(feature = "sys-thread"))]
+    fn block_on(
+        &self,
+        task: Pin<Box<dyn Future<Output = ()>>>,
+    ) -> Result<(), WasiThreadError>
+    {
         Err(WasiThreadError::Unsupported)
     }
 
@@ -286,6 +318,17 @@ where Self: fmt::Debug + Sync,
             let fut = task();
             fut.await
         });
+        Ok(())
+    }
+
+    /// Starts an asynchronous task on the local thread (by running it in a runtime)
+    #[cfg(feature = "sys-thread")]
+    fn block_on(
+        &self,
+        task: Pin<Box<dyn Future<Output = ()>>>,
+    ) -> Result<(), WasiThreadError>
+    {
+        STATIC_RUNTIME.block_on(task);
         Ok(())
     }
 
