@@ -1,5 +1,5 @@
 #![allow(unused_variables)]
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
 use std::sync::Mutex;
@@ -259,7 +259,7 @@ impl VirtualTcpListener for LocalTcpListener {
                         read_timeout: None,
                         write_timeout: None,
                         linger_timeout: None,
-                        nonblocking: false,
+                        nonblocking: self.nonblocking,
                     }),
                     addr,
                 )
@@ -288,7 +288,7 @@ impl VirtualTcpListener for LocalTcpListener {
                         read_timeout: None,
                         write_timeout: None,
                         linger_timeout: None,
-                        nonblocking: false,
+                        nonblocking: self.nonblocking,
                     }),
                     addr,
                 )
@@ -321,7 +321,7 @@ impl VirtualTcpListener for LocalTcpListener {
                             read_timeout: None,
                             write_timeout: None,
                             linger_timeout: None,
-                            nonblocking: false,
+                            nonblocking: self.nonblocking,
                         }),
                         addr,
                     ));
@@ -362,7 +362,7 @@ impl VirtualTcpListener for LocalTcpListener {
                         read_timeout: None,
                         write_timeout: None,
                         linger_timeout: None,
-                        nonblocking: false,
+                        nonblocking: self.nonblocking,
                     }),
                     addr,
                 ));
@@ -663,14 +663,15 @@ impl VirtualConnectedSocket for LocalTcpStream {
     fn recv(&mut self) -> Result<SocketReceive> {
         use std::io::Read;
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
-        let _ = self.stream.as_blocking_mut().map_err(io_err_into_net_error)?.set_nonblocking(false);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
         let read = self
             .stream
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .read(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -678,7 +679,7 @@ impl VirtualConnectedSocket for LocalTcpStream {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -688,7 +689,8 @@ impl VirtualConnectedSocket for LocalTcpStream {
     async fn recv_async(&mut self) -> Result<SocketReceive> {
         use tokio::io::AsyncReadExt;
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
         let read = self
             .stream
             .as_async_mut()
@@ -696,6 +698,7 @@ impl VirtualConnectedSocket for LocalTcpStream {
             .read(&mut buf[..])
             .await
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -703,7 +706,7 @@ impl VirtualConnectedSocket for LocalTcpStream {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -713,7 +716,8 @@ impl VirtualConnectedSocket for LocalTcpStream {
     fn try_recv(&mut self) -> Result<Option<SocketReceive>> {
         use std::io::Read;
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
 
         let stream = self.stream
             .as_blocking_mut()
@@ -733,9 +737,9 @@ impl VirtualConnectedSocket for LocalTcpStream {
             },
             Err(err) => Err(io_err_into_net_error(err))
         }?;
-        
+        unsafe { buf.set_len(read); }        
 
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(Some(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -744,13 +748,16 @@ impl VirtualConnectedSocket for LocalTcpStream {
 
     fn peek(&mut self) -> Result<SocketReceive> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
+
         let read = self
             .stream
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .peek(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -758,7 +765,7 @@ impl VirtualConnectedSocket for LocalTcpStream {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -1100,12 +1107,15 @@ impl VirtualConnectedSocket for LocalUdpSocket {
 
     fn recv(&mut self) -> Result<SocketReceive> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
+
         let read = self.socket
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .recv(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -1113,7 +1123,7 @@ impl VirtualConnectedSocket for LocalUdpSocket {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -1122,13 +1132,16 @@ impl VirtualConnectedSocket for LocalUdpSocket {
 
     async fn recv_async(&mut self) -> Result<SocketReceive> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
+
         let read = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?
             .recv(&mut buf[..])
             .await
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -1136,7 +1149,7 @@ impl VirtualConnectedSocket for LocalUdpSocket {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -1145,7 +1158,8 @@ impl VirtualConnectedSocket for LocalUdpSocket {
 
     fn try_recv(&mut self) -> Result<Option<SocketReceive>> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
 
         let socket = self.socket.as_blocking_mut().map_err(io_err_into_net_error)?;
         socket.set_nonblocking(true).map_err(io_err_into_net_error)?;
@@ -1163,8 +1177,9 @@ impl VirtualConnectedSocket for LocalUdpSocket {
             },
             Err(err) => Err(io_err_into_net_error(err))
         }?;
+        unsafe { buf.set_len(read); }
 
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(Some(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -1173,13 +1188,15 @@ impl VirtualConnectedSocket for LocalUdpSocket {
 
     fn peek(&mut self) -> Result<SocketReceive> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
+
         let read = self.socket
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .peek(&mut buf[..])
             .map_err(io_err_into_net_error)?;
-
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -1188,7 +1205,7 @@ impl VirtualConnectedSocket for LocalUdpSocket {
             }
         }
 
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceive {
             data: buf,
             truncated: read == buf_size,
@@ -1233,7 +1250,8 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
 
     fn try_recv_from(&mut self) -> Result<Option<SocketReceiveFrom>> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
 
         let socket = self.socket.as_blocking_mut().map_err(io_err_into_net_error)?;
         socket.set_nonblocking(true).map_err(io_err_into_net_error)?;
@@ -1251,8 +1269,9 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
             },
             Err(err) => Err(io_err_into_net_error(err))
         }?;
+        unsafe { buf.set_len(read); }
         
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(Some(SocketReceiveFrom {
             data: buf,
             truncated: read == buf_size,
@@ -1262,13 +1281,16 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
 
     fn recv_from(&mut self) -> Result<SocketReceiveFrom> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
+
         let (read, peer) = self
             .socket
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .recv_from(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -1276,7 +1298,7 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceiveFrom {
             data: buf,
             truncated: read == buf_size,
@@ -1286,7 +1308,9 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
 
     async fn recv_from_async(&mut self) -> Result<SocketReceiveFrom> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
+
         let (read, peer) = self
             .socket
             .as_async_mut()
@@ -1294,6 +1318,7 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
             .recv_from(&mut buf[..])
             .await
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -1301,7 +1326,7 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceiveFrom {
             data: buf,
             truncated: read == buf_size,
@@ -1311,13 +1336,16 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
 
     fn peek_from(&mut self) -> Result<SocketReceiveFrom> {
         let buf_size = 8192;
-        let mut buf = BytesMut::with_capacity(buf_size);
+        let mut buf = Vec::with_capacity(buf_size);
+        unsafe { buf.set_len(buf_size); }
+
         let (read, peer) = self
             .socket
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .peek_from(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        unsafe { buf.set_len(read); }
         if read == 0 {
             if self.nonblocking {
                 return Err(NetworkError::WouldBlock);
@@ -1325,7 +1353,7 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf).slice(..read);
+        let buf = Bytes::from(buf);
         Ok(SocketReceiveFrom {
             data: buf,
             truncated: read == buf_size,
