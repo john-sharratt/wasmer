@@ -664,6 +664,7 @@ impl VirtualConnectedSocket for LocalTcpStream {
         use std::io::Read;
         let buf_size = 8192;
         let mut buf = BytesMut::with_capacity(buf_size);
+        let _ = self.stream.as_blocking_mut().map_err(io_err_into_net_error)?.set_nonblocking(false);
         let read = self
             .stream
             .as_blocking_mut()
