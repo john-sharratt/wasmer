@@ -824,7 +824,7 @@ impl VirtualSocket for LocalTcpStream {
             .map_err(io_err_into_net_error)?;
         stream
             .poll_read_ready(cx)
-            .map_ok(|a| 1usize)
+            .map_ok(|a| 8192usize)
             .map_err(io_err_into_net_error)
     }
 
@@ -1413,7 +1413,7 @@ impl VirtualSocket for LocalUdpSocket {
             .map_err(io_err_into_net_error)?;
         socket
             .poll_recv_ready(cx)
-            .map_ok(|a| 1usize)
+            .map_ok(|a| 8192usize)
             .map_err(io_err_into_net_error)
         
     }
@@ -1425,7 +1425,7 @@ impl VirtualSocket for LocalUdpSocket {
             .map_err(io_err_into_net_error)?;
         socket
             .poll_send_ready(cx)
-            .map_ok(|a| 1usize)
+            .map_ok(|a| 8192usize)
             .map_err(io_err_into_net_error)
     }
 }

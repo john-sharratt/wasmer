@@ -3329,7 +3329,10 @@ pub fn poll_oneoff<M: MemorySize>(
             }
         };
 
-        subscriptions.insert(fd, in_events);
+        let entry = subscriptions
+            .entry(fd)
+            .or_insert_with(|| HashMap::<state::PollEventSet, WasiSubscription>::default());
+        entry.extend(in_events.into_iter());
     }
     drop(env);
     
