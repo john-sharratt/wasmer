@@ -185,7 +185,7 @@ pub enum Kind {
         is_semaphore: bool,
         /// Receiver that wakes sleeping threads
         #[cfg_attr(feature = "enable-serde", serde(skip))]
-        wakers: Arc<Mutex<VecDeque<tokio::sync::mpsc::Sender<()>>>>,
+        wakers: Arc<Mutex<VecDeque<tokio::sync::mpsc::UnboundedSender<()>>>>,
         /// Immediate waker
         immediate: Arc<AtomicBool>,
     },

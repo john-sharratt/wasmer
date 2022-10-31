@@ -1,8 +1,12 @@
 #![allow(unused_variables)]
 use bytes::Bytes;
+use tokio::io::AsyncRead;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
+use std::pin::Pin;
+use std::ptr;
 use std::sync::Mutex;
+use std::task::{RawWakerVTable, RawWaker, Waker, Context, Poll};
 use std::time::Duration;
 #[allow(unused_imports, dead_code)]
 use tracing::{debug, error, info, trace, warn};
@@ -20,27 +24,7 @@ pub struct LocalNetworking {}
 #[async_trait::async_trait]
 #[allow(unused_variables)]
 impl VirtualNetworking for LocalNetworking {
-    fn listen_tcp(
-        &self,
-        addr: SocketAddr,
-        only_v6: bool,
-        reuse_port: bool,
-        reuse_addr: bool,
-    ) -> Result<Box<dyn VirtualTcpListener + Sync>> {
-        let listener = std::net::TcpListener::bind(addr)
-            .map(|sock| {
-                Box::new(LocalTcpListener {
-                    stream: LocalTcpListenerMode::Blocking(sock),
-                    timeout: None,
-                    backlog: Mutex::new(Vec::new()),
-                    nonblocking: false,
-                })
-            })
-            .map_err(io_err_into_net_error)?;
-        Ok(listener)
-    }
-
-    async fn listen_tcp_async(
+    async fn listen_tcp(
         &self,
         addr: SocketAddr,
         only_v6: bool,
@@ -51,7 +35,7 @@ impl VirtualNetworking for LocalNetworking {
             .await
             .map(|sock| {
                 Box::new(LocalTcpListener {
-                    stream: LocalTcpListenerMode::Async(sock),
+                    stream: sock,
                     timeout: None,
                     backlog: Mutex::new(Vec::new()),
                     nonblocking: false,
@@ -61,22 +45,7 @@ impl VirtualNetworking for LocalNetworking {
         Ok(listener)
     }
 
-    fn bind_udp(
-        &self,
-        addr: SocketAddr,
-        _reuse_port: bool,
-        _reuse_addr: bool,
-    ) -> Result<Box<dyn VirtualUdpSocket + Sync>> {
-        let socket = std::net::UdpSocket::bind(addr)
-            .map_err(io_err_into_net_error)?;
-        Ok(Box::new(LocalUdpSocket {
-            socket: LocalUdpSocketMode::Blocking(socket),
-            addr,
-            nonblocking: false
-        }))
-    }
-
-    async fn bind_udp_async(
+    async fn bind_udp(
         &self,
         addr: SocketAddr,
         _reuse_port: bool,
@@ -92,31 +61,7 @@ impl VirtualNetworking for LocalNetworking {
         }))
     }
 
-    fn connect_tcp(
-        &self,
-        _addr: SocketAddr,
-        peer: SocketAddr,
-        timeout: Option<Duration>,
-    ) -> Result<Box<dyn VirtualTcpSocket + Sync>> {
-        let stream = if let Some(timeout) = timeout {
-            std::net::TcpStream::connect_timeout(&peer, timeout)
-        } else {
-            std::net::TcpStream::connect(peer)
-        }
-        .map_err(io_err_into_net_error)?;
-        let peer = stream.peer_addr().map_err(io_err_into_net_error)?;
-        Ok(Box::new(LocalTcpStream {
-            stream: LocalTcpStreamMode::Blocking(stream),
-            addr: peer,
-            connect_timeout: None,
-            read_timeout: None,
-            write_timeout: None,
-            linger_timeout: None,
-            nonblocking: false,
-        }))
-    }
-
-    async fn connect_tcp_async(
+    async fn connect_tcp(
         &self,
         _addr: SocketAddr,
         peer: SocketAddr,
@@ -137,36 +82,18 @@ impl VirtualNetworking for LocalNetworking {
         .map_err(io_err_into_net_error)?;
         let peer = stream.peer_addr().map_err(io_err_into_net_error)?;
         Ok(Box::new(LocalTcpStream {
-            stream: LocalTcpStreamMode::Async(stream),
+            stream: stream,
             addr: peer,
             connect_timeout: None,
             read_timeout: None,
             write_timeout: None,
             linger_timeout: None,
             nonblocking: false,
+            shutdown: None
         }))
     }
 
-    fn resolve(
-        &self,
-        host: &str,
-        port: Option<u16>,
-        dns_server: Option<IpAddr>,
-    ) -> Result<Vec<IpAddr>> {
-        use std::net::ToSocketAddrs;
-        Ok(if let Some(port) = port {
-            let host = format!("{}:{}", host, port);
-            host.to_socket_addrs()
-                .map(|a| a.map(|a| a.ip()).collect::<Vec<_>>())
-                .map_err(io_err_into_net_error)?
-        } else {
-            host.to_socket_addrs()
-                .map(|a| a.map(|a| a.ip()).collect::<Vec<_>>())
-                .map_err(io_err_into_net_error)?
-        })
-    }
-
-    async fn resolve_async(
+    async fn resolve(
         &self,
         host: &str,
         port: Option<u16>,
@@ -180,58 +107,8 @@ impl VirtualNetworking for LocalNetworking {
 }
 
 #[derive(Debug)]
-enum LocalTcpListenerMode {
-    Blocking(std::net::TcpListener),
-    Async(tokio::net::TcpListener),
-    Uninitialized
-}
-
-impl LocalTcpListenerMode
-{
-    fn as_blocking_mut(&mut self) -> std::io::Result<&mut std::net::TcpListener> {
-        match self {
-            Self::Blocking(a) => Ok(a),
-            Self::Async(_) => {
-                let mut listener = Self::Uninitialized;
-                std::mem::swap(self, &mut listener);
-                listener = match listener {
-                    Self::Async(a) => Self::Blocking(a.into_std()?),
-                    a => unreachable!(),
-                };
-                std::mem::swap(self, &mut listener);
-                match self {
-                    Self::Blocking(a) => Ok(a),
-                    _ => unreachable!()
-                }
-            },
-            Self::Uninitialized => unreachable!()
-        }
-    }
-
-    fn as_async_mut(&mut self) -> std::io::Result<&mut tokio::net::TcpListener> {
-        match self {
-            Self::Async(a) => Ok(a),
-            Self::Blocking(_) => {
-                let mut listener = Self::Uninitialized;
-                std::mem::swap(self, &mut listener);
-                listener = match listener {
-                    Self::Blocking(a) => Self::Async(tokio::net::TcpListener::from_std(a)?),
-                    a => unreachable!(),
-                };
-                std::mem::swap(self, &mut listener);
-                match self {
-                    Self::Async(a) => Ok(a),
-                    _ => unreachable!()
-                }
-            },
-            Self::Uninitialized => unreachable!()
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct LocalTcpListener {
-    stream: LocalTcpListenerMode,
+    stream: tokio::net::TcpListener,
     timeout: Option<Duration>,
     backlog: Mutex<Vec<(Box<LocalTcpStream>, SocketAddr)>>,
     nonblocking: bool,
@@ -239,56 +116,48 @@ pub struct LocalTcpListener {
 
 #[async_trait::async_trait]
 impl VirtualTcpListener for LocalTcpListener {
-    fn accept(&mut self) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr)> {
+    async fn accept(&mut self) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr)> {
         {
             let mut backlog = self.backlog.lock().unwrap();
             if let Some((sock, addr)) = backlog.pop() {
                 return Ok((sock, addr));
             }
         }
-        
-        let stream = self.stream.as_blocking_mut().map_err(io_err_into_net_error)?;
-        let (sock, addr) = stream
-            .accept()
-            .map(|(sock, addr)| {
-                (
-                    Box::new(LocalTcpStream {
-                        stream: LocalTcpStreamMode::Blocking(sock),
-                        addr,
-                        connect_timeout: None,
-                        read_timeout: None,
-                        write_timeout: None,
-                        linger_timeout: None,
-                        nonblocking: self.nonblocking,
-                    }),
-                    addr,
-                )
-            })
-            .map_err(io_err_into_net_error)?;
-        Ok((sock, addr))
-    }
 
-    async fn accept_async(&mut self) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr)> {
-        {
-            let mut backlog = self.backlog.lock().unwrap();
-            if let Some((sock, addr)) = backlog.pop() {
-                return Ok((sock, addr));
+        let nonblocking = self.nonblocking;
+        if nonblocking {
+            let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
+            let mut cx = Context::from_waker(&waker);
+            if self.stream.poll_accept(&mut cx).is_pending() == true {
+                return Err(NetworkError::WouldBlock);
             }
         }
-        let stream = self.stream.as_async_mut().map_err(io_err_into_net_error)?;
-        let (sock, addr) = stream
-            .accept()
+
+        let timeout = self.timeout.clone();
+        let work = async move {
+            match timeout {
+                Some(timeout) => {
+                    tokio::time::timeout(timeout, self.stream.accept())
+                        .await
+                        .map_err(|_| Into::<std::io::Error>::into(std::io::ErrorKind::WouldBlock))?                        
+                },
+                None => self.stream.accept().await
+            }
+        };
+
+        let (sock, addr) = work
             .await
             .map(|(sock, addr)| {
                 (
                     Box::new(LocalTcpStream {
-                        stream: LocalTcpStreamMode::Async(sock),
+                        stream: sock,
                         addr,
                         connect_timeout: None,
                         read_timeout: None,
                         write_timeout: None,
                         linger_timeout: None,
-                        nonblocking: self.nonblocking,
+                        nonblocking,
+                        shutdown: None
                     }),
                     addr,
                 )
@@ -305,64 +174,52 @@ impl VirtualTcpListener for LocalTcpListener {
             }
         }
 
-        let mut ret_err = None;
-        let stream = self.stream.as_blocking_mut().map_err(io_err_into_net_error)?;
-        stream.set_nonblocking(true).map_err(io_err_into_net_error)?;
-        loop {
-            match stream.accept()
-            {
-                Ok((sock, addr)) => {
-                    let mut backlog = self.backlog.lock().unwrap();
-                    backlog.push((
-                        Box::new(LocalTcpStream {
-                            stream: LocalTcpStreamMode::Blocking(sock),
-                            addr,
-                            connect_timeout: None,
-                            read_timeout: None,
-                            write_timeout: None,
-                            linger_timeout: None,
-                            nonblocking: self.nonblocking,
-                        }),
-                        addr,
-                    ));
-                },
-                Err(err) if err.kind() == std::io::ErrorKind::TimedOut ||
-                                err.kind() == std::io::ErrorKind::WouldBlock => {
-                    break;
-                },
-                Err(err) => {
-                    ret_err = Some(io_err_into_net_error(err));
-                    break;
-                }
-            }
-        }
-        let _ = stream.set_nonblocking(self.nonblocking);
-        if let Some(err) = ret_err {
-            return Err(err);
-        }
-
-        let backlog = self.backlog.lock().unwrap();
-        Ok(backlog.len())
-    }
-
-    fn poll_accept_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>> {
-        let stream = self.stream
-            .as_async_mut()
-            .map_err(io_err_into_net_error)?;
-        stream
-            .poll_accept(cx)
-            .map_err(io_err_into_net_error)
-            .map_ok(|(sock, addr)| {
+        let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        match self.stream.poll_accept(&mut cx) {
+            Poll::Ready(Ok((sock, addr))) => {
                 let mut backlog = self.backlog.lock().unwrap();
                 backlog.push((
                     Box::new(LocalTcpStream {
-                        stream: LocalTcpStreamMode::Async(sock),
+                        stream: sock,
                         addr,
                         connect_timeout: None,
                         read_timeout: None,
                         write_timeout: None,
                         linger_timeout: None,
                         nonblocking: self.nonblocking,
+                        shutdown: None
+                    }),
+                    addr,
+                ));
+                Ok(backlog.len())
+            },
+            Poll::Ready(Err(err)) => {
+                Err(io_err_into_net_error(err))
+            }
+            Poll::Pending => {
+                let backlog = self.backlog.lock().unwrap();
+                Ok(backlog.len())
+            }
+        }
+    }
+
+    fn poll_accept_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>> {
+        self.stream
+            .poll_accept(cx)
+            .map_err(io_err_into_net_error)
+            .map_ok(|(sock, addr)| {
+                let mut backlog = self.backlog.lock().unwrap();
+                backlog.push((
+                    Box::new(LocalTcpStream {
+                        stream: sock,
+                        addr,
+                        connect_timeout: None,
+                        read_timeout: None,
+                        write_timeout: None,
+                        linger_timeout: None,
+                        nonblocking: self.nonblocking,
+                        shutdown: None
                     }),
                     addr,
                 ));
@@ -382,36 +239,19 @@ impl VirtualTcpListener for LocalTcpListener {
     }
 
     fn addr_local(&self) -> Result<SocketAddr> {
-        match &self.stream {
-            LocalTcpListenerMode::Blocking(a) => a.local_addr().map_err(io_err_into_net_error),
-            LocalTcpListenerMode::Async(a) => a.local_addr().map_err(io_err_into_net_error),
-            LocalTcpListenerMode::Uninitialized => unreachable!()
-        }
+        self.stream.local_addr().map_err(io_err_into_net_error)
     }
 
     fn set_ttl(&mut self, ttl: u8) -> Result<()> {
-        match &mut self.stream {
-            LocalTcpListenerMode::Blocking(a) => a.set_ttl(ttl as u32).map_err(io_err_into_net_error),
-            LocalTcpListenerMode::Async(a) => a.set_ttl(ttl as u32).map_err(io_err_into_net_error),
-            LocalTcpListenerMode::Uninitialized => unreachable!()
-        }
+        self.stream.set_ttl(ttl as u32).map_err(io_err_into_net_error)
     }
 
     fn ttl(&self) -> Result<u8> {
-        match &self.stream {
-            LocalTcpListenerMode::Blocking(a) => a.ttl().map(|ttl| ttl as u8).map_err(io_err_into_net_error),
-            LocalTcpListenerMode::Async(a) => a.ttl().map(|ttl| ttl as u8).map_err(io_err_into_net_error),
-            LocalTcpListenerMode::Uninitialized => unreachable!()
-        }
+        self.stream.ttl().map(|ttl| ttl as u8).map_err(io_err_into_net_error)
     }
 
     fn set_nonblocking(&mut self, nonblocking: bool) -> Result<()> {
         self.nonblocking = nonblocking;
-        self.stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .set_nonblocking(nonblocking)
-            .map_err(io_err_into_net_error)?;
         Ok(())
     }
 
@@ -422,63 +262,14 @@ impl VirtualTcpListener for LocalTcpListener {
 
 #[derive(Debug)]
 pub struct LocalTcpStream {
-    stream: LocalTcpStreamMode,
+    stream: tokio::net::TcpStream,
     addr: SocketAddr,
     read_timeout: Option<Duration>,
     write_timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
     linger_timeout: Option<Duration>,
     nonblocking: bool,
-}
-
-#[derive(Debug)]
-enum LocalTcpStreamMode {
-    Blocking(std::net::TcpStream),
-    Async(tokio::net::TcpStream),
-    Uninitialized
-}
-
-impl LocalTcpStreamMode
-{
-    fn as_blocking_mut(&mut self) -> std::io::Result<&mut std::net::TcpStream> {
-        match self {
-            Self::Blocking(a) => Ok(a),
-            Self::Async(_) => {
-                let mut listener = Self::Uninitialized;
-                std::mem::swap(self, &mut listener);
-                listener = match listener {
-                    Self::Async(a) => Self::Blocking(a.into_std()?),
-                    a => unreachable!(),
-                };
-                std::mem::swap(self, &mut listener);
-                match self {
-                    Self::Blocking(a) => Ok(a),
-                    _ => unreachable!()
-                }
-            },
-            Self::Uninitialized => unreachable!()
-        }
-    }
-
-    fn as_async_mut(&mut self) -> std::io::Result<&mut tokio::net::TcpStream> {
-        match self {
-            Self::Async(a) => Ok(a),
-            Self::Blocking(_) => {
-                let mut listener = Self::Uninitialized;
-                std::mem::swap(self, &mut listener);
-                listener = match listener {
-                    Self::Blocking(a) => Self::Async(tokio::net::TcpStream::from_std(a)?),
-                    a => unreachable!(),
-                };
-                std::mem::swap(self, &mut listener);
-                match self {
-                    Self::Async(a) => Ok(a),
-                    _ => unreachable!()
-                }
-            },
-            Self::Uninitialized => unreachable!()
-        }
-    }
+    shutdown: Option<Shutdown>,
 }
 
 #[async_trait::async_trait]
@@ -487,38 +278,22 @@ impl VirtualTcpSocket for LocalTcpStream {
         match ty {
             TimeType::ReadTimeout => {
                 self.read_timeout = timeout.clone();
-                self
-                    .stream
-                    .as_blocking_mut()
-                    .map_err(io_err_into_net_error)?
-                    .set_read_timeout(timeout)
-                    .map_err(io_err_into_net_error)
             },
             TimeType::WriteTimeout => {
                 self.write_timeout = timeout.clone();
-                self
-                    .stream
-                    .as_blocking_mut()
-                    .map_err(io_err_into_net_error)?
-                    .set_write_timeout(timeout)
-                    .map_err(io_err_into_net_error)
             },
             TimeType::ConnectTimeout => {
                 self.connect_timeout = timeout;
-                Ok(())
             }
             #[cfg(feature = "wasix")]
             TimeType::Linger => {
                 self.linger_timeout = timeout.clone();
-                self
-                    .stream
-                    .as_blocking_mut()
-                    .map_err(io_err_into_net_error)?
-                    .set_linger(timeout)
-                    .map_err(io_err_into_net_error)
             },
-            _ => Err(NetworkError::InvalidInput),
+            _ => {
+                return Err(NetworkError::InvalidInput)
+            },
         }
+        Ok(())
     }
 
     fn opt_time(&self, ty: TimeType) -> Result<Option<Duration>> {
@@ -548,39 +323,24 @@ impl VirtualTcpSocket for LocalTcpStream {
     }
 
     fn set_nodelay(&mut self, nodelay: bool) -> Result<()> {
-        match &mut self.stream {
-            LocalTcpStreamMode::Blocking(a) => a.set_nodelay(nodelay).map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Async(a) => a.set_nodelay(nodelay).map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Uninitialized => unreachable!()
-        }
+        self.stream.set_nodelay(nodelay).map_err(io_err_into_net_error)
     }
 
     fn nodelay(&self) -> Result<bool> {
-        match &self.stream {
-            LocalTcpStreamMode::Blocking(a) => a.nodelay().map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Async(a) => a.nodelay().map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Uninitialized => unreachable!()
-        }
+        self.stream.nodelay().map_err(io_err_into_net_error)
     }
 
     fn addr_peer(&self) -> Result<SocketAddr> {
         Ok(self.addr)
     }
 
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn flush_async(&mut self) -> Result<()> {
+    async fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 
     fn shutdown(&mut self, how: Shutdown) -> Result<()> {
-        self.stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .shutdown(how)
-            .map_err(io_err_into_net_error)
+        self.shutdown = Some(how);
+        Ok(())
     }
 }
 
@@ -604,16 +364,35 @@ impl VirtualConnectedSocket for LocalTcpStream {
         Ok(None)
     }
 
-    fn send(&mut self, data: Bytes) -> Result<usize> {
-        use std::io::Write;
-        let amt = self.stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .write_all(&data[..])
+    async fn send(&mut self, data: Bytes) -> Result<usize> {
+        let nonblocking = self.nonblocking;
+        if nonblocking {
+            let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
+            let mut cx = Context::from_waker(&waker);
+            if self.stream.poll_write_ready(&mut cx).is_pending() {
+                return Err(NetworkError::WouldBlock);
+            }
+        }
+
+        use tokio::io::AsyncWriteExt;
+        let timeout = self.write_timeout.clone();
+        let work = async move {
+            match timeout {
+                Some(timeout) => {
+                    tokio::time::timeout(timeout, self.stream.write_all(&data[..]))
+                        .await
+                        .map_err(|_| Into::<std::io::Error>::into(std::io::ErrorKind::WouldBlock))?                        
+                },
+                None => self.stream.write_all(&data[..]).await
+            }
             .map(|_| data.len())
+        };
+
+        let amt = work
+            .await
             .map_err(io_err_into_net_error)?;
         if amt == 0 {
-            if self.nonblocking {
+            if nonblocking {
                 return Err(NetworkError::WouldBlock);
             } else {
                 return Err(NetworkError::BrokenPipe);
@@ -622,153 +401,185 @@ impl VirtualConnectedSocket for LocalTcpStream {
         Ok(amt)
     }
 
-    async fn send_async(&mut self, data: Bytes) -> Result<usize> {
-        use tokio::io::AsyncWriteExt;
-        let amt = self.stream
-            .as_async_mut()
-            .map_err(io_err_into_net_error)?
-            .write_all(&data[..])
-            .await
-            .map(|_| data.len())
-            .map_err(io_err_into_net_error)?;
-        if amt == 0 {
-            if self.nonblocking {
+    async fn flush(&mut self) -> Result<()> {
+        if self.nonblocking {
+            let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
+            let mut cx = Context::from_waker(&waker);
+            if self.stream.poll_write_ready(&mut cx).is_pending() {
                 return Err(NetworkError::WouldBlock);
-            } else {
-                return Err(NetworkError::BrokenPipe);
             }
         }
-        Ok(amt)
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        use std::io::Write;
-        self.stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .flush()
-            .map_err(io_err_into_net_error)
-    }
-
-    async fn flush_async(&mut self) -> Result<()> {
         use tokio::io::AsyncWriteExt;
-        self.stream
-            .as_async_mut()
-            .map_err(io_err_into_net_error)?
-            .flush()
+        let timeout = self.write_timeout.clone();
+        let work = async move {
+            match timeout {
+                Some(timeout) => {
+                    tokio::time::timeout(timeout, self.stream.flush())
+                        .await
+                        .map_err(|_| Into::<std::io::Error>::into(std::io::ErrorKind::WouldBlock))?                        
+                },
+                None => self.stream.flush().await
+            }
+        };
+
+        work
             .await
             .map_err(io_err_into_net_error)
     }
 
-    fn recv(&mut self) -> Result<SocketReceive> {
-        use std::io::Read;
-        let buf_size = 8192;
-        let mut buf = Vec::with_capacity(buf_size);
-        unsafe { buf.set_len(buf_size); }
-        let read = self
-            .stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .read(&mut buf[..])
-            .map_err(io_err_into_net_error)?;
-        unsafe { buf.set_len(read); }
-        if read == 0 {
-            if self.nonblocking {
-                return Err(NetworkError::WouldBlock);
-            } else {
-                return Err(NetworkError::BrokenPipe);
-            }
-        }
-        let buf = Bytes::from(buf);
-        Ok(SocketReceive {
-            data: buf,
-            truncated: read == buf_size,
-        })
-    }
-
-    async fn recv_async(&mut self) -> Result<SocketReceive> {
+    async fn recv(&mut self) -> Result<SocketReceive> {
         use tokio::io::AsyncReadExt;
-        let buf_size = 8192;
-        let mut buf = Vec::with_capacity(buf_size);
-        unsafe { buf.set_len(buf_size); }
-        let read = self
-            .stream
-            .as_async_mut()
-            .map_err(io_err_into_net_error)?
-            .read(&mut buf[..])
+        let max_buf_size = 8192;
+        let mut buf = Vec::with_capacity(max_buf_size);
+        unsafe { buf.set_len(max_buf_size); }
+
+        let nonblocking = self.nonblocking;
+        if nonblocking {
+            let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
+            let mut cx = Context::from_waker(&waker);
+            let stream = Pin::new(&mut self.stream);
+            let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+            return match stream.poll_read(&mut cx, &mut read_buf) {
+                Poll::Ready(Ok(read)) => {
+                    let read = read_buf.remaining();
+                    unsafe { buf.set_len(read); }
+                    if read == 0 {
+                        return Err(NetworkError::WouldBlock);
+                    }
+                    let buf = Bytes::from(buf);
+                    Ok(SocketReceive {
+                        data: buf,
+                        truncated: read == max_buf_size,
+                    })
+                },
+                Poll::Ready(Err(err)) => {
+                    Err(io_err_into_net_error(err))
+                },
+                Poll::Pending => {
+                    Err(NetworkError::WouldBlock)
+                }
+            };
+        }
+
+        let timeout = self.write_timeout.clone();
+        let work = async move {
+            match timeout {
+                Some(timeout) => {
+                    tokio::time::timeout(timeout, self.stream.read(&mut buf[..]))
+                        .await
+                        .map_err(|_| Into::<std::io::Error>::into(std::io::ErrorKind::WouldBlock))?                        
+                },
+                None => self.stream.read(&mut buf[..]).await
+            }
+            .map(|read| {
+                unsafe { buf.set_len(read); }
+                Bytes::from(buf)
+            })
+        };
+
+        let buf = work
             .await
             .map_err(io_err_into_net_error)?;
-        unsafe { buf.set_len(read); }
-        if read == 0 {
-            if self.nonblocking {
+        if buf.is_empty() {
+            if nonblocking {
                 return Err(NetworkError::WouldBlock);
             } else {
                 return Err(NetworkError::BrokenPipe);
             }
         }
-        let buf = Bytes::from(buf);
         Ok(SocketReceive {
+            truncated: buf.len() == max_buf_size,
             data: buf,
-            truncated: read == buf_size,
         })
     }
 
     fn try_recv(&mut self) -> Result<Option<SocketReceive>> {
-        use std::io::Read;
-        let buf_size = 8192;
-        let mut buf = Vec::with_capacity(buf_size);
-        unsafe { buf.set_len(buf_size); }
+        let max_buf_size = 8192;
+        let mut buf = Vec::with_capacity(max_buf_size);
+        unsafe { buf.set_len(max_buf_size); }
 
-        let stream = self.stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?;
-        stream.set_nonblocking(true).map_err(io_err_into_net_error)?;
-        let read = stream.read(&mut buf[..]);
-        let _ = stream.set_nonblocking(self.nonblocking);
-
-        let read = match read {
-            Ok(0) => {
-                return Ok(None);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        let stream = Pin::new(&mut self.stream);
+        let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+        match stream.poll_read(&mut cx, &mut read_buf) {
+            Poll::Ready(Ok(read)) => {
+                let read = read_buf.remaining();
+                unsafe { buf.set_len(read); }
+                if read == 0 {
+                    return Err(NetworkError::WouldBlock);
+                }
+                let buf = Bytes::from(buf);
+                Ok(Some(SocketReceive {
+                    data: buf,
+                    truncated: read == max_buf_size,
+                }))
             },
-            Ok(a) => Ok(a),
-            Err(err) if err.kind() == std::io::ErrorKind::TimedOut ||
-                               err.kind() == std::io::ErrorKind::WouldBlock => {
-                return Ok(None);
+            Poll::Ready(Err(err)) => {
+                Err(io_err_into_net_error(err))
             },
-            Err(err) => Err(io_err_into_net_error(err))
-        }?;
-        unsafe { buf.set_len(read); }        
-
-        let buf = Bytes::from(buf);
-        Ok(Some(SocketReceive {
-            data: buf,
-            truncated: read == buf_size,
-        }))
-    }
-
-    fn peek(&mut self) -> Result<SocketReceive> {
-        let buf_size = 8192;
-        let mut buf = Vec::with_capacity(buf_size);
-        unsafe { buf.set_len(buf_size); }
-
-        let read = self
-            .stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .peek(&mut buf[..])
-            .map_err(io_err_into_net_error)?;
-        unsafe { buf.set_len(read); }
-        if read == 0 {
-            if self.nonblocking {
-                return Err(NetworkError::WouldBlock);
-            } else {
-                return Err(NetworkError::BrokenPipe);
+            Poll::Pending => {
+                Ok(None)
             }
         }
-        let buf = Bytes::from(buf);
+    }
+
+    async fn peek(&mut self) -> Result<SocketReceive> {
+        let max_buf_size = 8192;
+        let mut buf = Vec::with_capacity(max_buf_size);
+        unsafe { buf.set_len(max_buf_size); }
+
+        if self.nonblocking {
+            let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
+            let mut cx = Context::from_waker(&waker);
+            let stream = Pin::new(&mut self.stream);
+            let mut read_buf = tokio::io::ReadBuf::new(&mut buf);
+            return match stream.poll_peek(&mut cx, &mut read_buf) {
+                Poll::Ready(Ok(read)) => {
+                    unsafe { buf.set_len(read); }
+                    if read == 0 {
+                        return Err(NetworkError::WouldBlock);
+                    }
+                    let buf = Bytes::from(buf);
+                    Ok(SocketReceive {
+                        data: buf,
+                        truncated: read == max_buf_size,
+                    })
+                },
+                Poll::Ready(Err(err)) => {
+                    Err(io_err_into_net_error(err))
+                },
+                Poll::Pending => {
+                    Err(NetworkError::WouldBlock)
+                }
+            };
+        }
+
+        let timeout = self.write_timeout.clone();
+        let work = async move {
+            match timeout {
+                Some(timeout) => {
+                    tokio::time::timeout(timeout, self.stream.peek(&mut buf[..]))
+                        .await
+                        .map_err(|_| Into::<std::io::Error>::into(std::io::ErrorKind::WouldBlock))?                        
+                },
+                None => self.stream.peek(&mut buf[..]).await
+            }
+            .map(|read| {
+                unsafe { buf.set_len(read); }
+                Bytes::from(buf)
+            })
+        };
+
+        let buf = work
+            .await
+            .map_err(io_err_into_net_error)?;
+        if buf.len() == 0 {
+            return Err(NetworkError::BrokenPipe);
+        }
         Ok(SocketReceive {
-            data: buf,
-            truncated: read == buf_size,
+            truncated: buf.len() == max_buf_size,
+            data: buf,            
         })
     }
 }
@@ -776,28 +587,15 @@ impl VirtualConnectedSocket for LocalTcpStream {
 #[async_trait::async_trait]
 impl VirtualSocket for LocalTcpStream {
     fn set_ttl(&mut self, ttl: u32) -> Result<()> {
-        match &mut self.stream {
-            LocalTcpStreamMode::Blocking(a) => a.set_ttl(ttl).map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Async(a) => a.set_ttl(ttl).map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Uninitialized => unreachable!()
-        }
+        self.stream.set_ttl(ttl).map_err(io_err_into_net_error)
     }
 
     fn ttl(&self) -> Result<u32> {
-        match &self.stream {
-            LocalTcpStreamMode::Blocking(a) => a.ttl().map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Async(a) => a.ttl().map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Uninitialized => unreachable!()
-        }
+        self.stream.ttl().map_err(io_err_into_net_error)
     }
 
     fn set_nonblocking(&mut self, nonblocking: bool) -> Result<()> {
         self.nonblocking = nonblocking;
-        self.stream
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .set_nonblocking(nonblocking)
-            .map_err(io_err_into_net_error)?;
         Ok(())
     }
 
@@ -806,11 +604,7 @@ impl VirtualSocket for LocalTcpStream {
     }
 
     fn addr_local(&self) -> Result<SocketAddr> {
-        match &self.stream {
-            LocalTcpStreamMode::Blocking(a) => a.local_addr().map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Async(a) => a.local_addr().map_err(io_err_into_net_error),
-            LocalTcpStreamMode::Uninitialized => unreachable!()
-        }
+        self.stream.local_addr().map_err(io_err_into_net_error)
     }
 
     fn status(&self) -> Result<SocketStatus> {
@@ -819,10 +613,7 @@ impl VirtualSocket for LocalTcpStream {
 
     fn poll_read_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>
     {
-        let stream = self.stream
-            .as_async_mut()
-            .map_err(io_err_into_net_error)?;
-        stream
+        self.stream
             .poll_read_ready(cx)
             .map_ok(|a| 8192usize)
             .map_err(io_err_into_net_error)
@@ -830,10 +621,7 @@ impl VirtualSocket for LocalTcpStream {
 
     fn poll_write_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>>
     {
-        let stream = self.stream
-            .as_async_mut()
-            .map_err(io_err_into_net_error)?;
-        stream
+        self.stream
             .poll_write_ready(cx)
             .map_ok(|a| 8192usize)
             .map_err(io_err_into_net_error)
@@ -932,15 +720,7 @@ impl LocalUdpSocketMode
 
 #[async_trait::async_trait]
 impl VirtualUdpSocket for LocalUdpSocket {
-    fn connect(&mut self, addr: SocketAddr) -> Result<()> {
-        self.socket
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .connect(addr)
-            .map_err(io_err_into_net_error)
-    }
-
-    async fn connect_async(&mut self, addr: SocketAddr) -> Result<()> {
+    async fn connect(&mut self, addr: SocketAddr) -> Result<()> {
         self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?
@@ -1064,23 +844,7 @@ impl VirtualConnectedSocket for LocalUdpSocket {
         Err(NetworkError::Unsupported)
     }
 
-    fn send(&mut self, data: Bytes) -> Result<usize> {
-        let amt = self.socket
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .send(&data[..])
-            .map_err(io_err_into_net_error)?;
-        if amt == 0 {
-            if self.nonblocking {
-                return Err(NetworkError::WouldBlock);
-            } else {
-                return Err(NetworkError::BrokenPipe);
-            }
-        }
-        Ok(amt)
-    }
-
-    async fn send_async(&mut self, data: Bytes) -> Result<usize> {
+    async fn send(&mut self, data: Bytes) -> Result<usize> {
         let amt = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?
@@ -1097,40 +861,11 @@ impl VirtualConnectedSocket for LocalUdpSocket {
         Ok(amt)
     }
 
-    fn flush(&mut self) -> Result<()> {
+    async fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 
-    async fn flush_async(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    fn recv(&mut self) -> Result<SocketReceive> {
-        let buf_size = 8192;
-        let mut buf = Vec::with_capacity(buf_size);
-        unsafe { buf.set_len(buf_size); }
-
-        let read = self.socket
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .recv(&mut buf[..])
-            .map_err(io_err_into_net_error)?;
-        unsafe { buf.set_len(read); }
-        if read == 0 {
-            if self.nonblocking {
-                return Err(NetworkError::WouldBlock);
-            } else {
-                return Err(NetworkError::BrokenPipe);
-            }
-        }
-        let buf = Bytes::from(buf);
-        Ok(SocketReceive {
-            data: buf,
-            truncated: read == buf_size,
-        })
-    }
-
-    async fn recv_async(&mut self) -> Result<SocketReceive> {
+    async fn recv(&mut self) -> Result<SocketReceive> {
         let buf_size = 8192;
         let mut buf = Vec::with_capacity(buf_size);
         unsafe { buf.set_len(buf_size); }
@@ -1186,7 +921,7 @@ impl VirtualConnectedSocket for LocalUdpSocket {
         }))
     }
 
-    fn peek(&mut self) -> Result<SocketReceive> {
+    async fn peek(&mut self) -> Result<SocketReceive> {
         let buf_size = 8192;
         let mut buf = Vec::with_capacity(buf_size);
         unsafe { buf.set_len(buf_size); }
@@ -1215,23 +950,7 @@ impl VirtualConnectedSocket for LocalUdpSocket {
 
 #[async_trait::async_trait]
 impl VirtualConnectionlessSocket for LocalUdpSocket {
-    fn send_to(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize> {
-        let amt = self.socket
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .send_to(&data[..], addr)
-            .map_err(io_err_into_net_error)?;
-        if amt == 0 {
-            if self.nonblocking {
-                return Err(NetworkError::WouldBlock);
-            } else {
-                return Err(NetworkError::BrokenPipe);
-            }
-        }        
-        Ok(amt)
-    }
-
-    async fn send_to_async(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize> {
+    async fn send_to(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize> {
         let amt = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?
@@ -1279,34 +998,7 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
         }))
     }
 
-    fn recv_from(&mut self) -> Result<SocketReceiveFrom> {
-        let buf_size = 8192;
-        let mut buf = Vec::with_capacity(buf_size);
-        unsafe { buf.set_len(buf_size); }
-
-        let (read, peer) = self
-            .socket
-            .as_blocking_mut()
-            .map_err(io_err_into_net_error)?
-            .recv_from(&mut buf[..])
-            .map_err(io_err_into_net_error)?;
-        unsafe { buf.set_len(read); }
-        if read == 0 {
-            if self.nonblocking {
-                return Err(NetworkError::WouldBlock);
-            } else {
-                return Err(NetworkError::BrokenPipe);
-            }
-        }
-        let buf = Bytes::from(buf);
-        Ok(SocketReceiveFrom {
-            data: buf,
-            truncated: read == buf_size,
-            addr: peer,
-        })
-    }
-
-    async fn recv_from_async(&mut self) -> Result<SocketReceiveFrom> {
+    async fn recv_from(&mut self) -> Result<SocketReceiveFrom> {
         let buf_size = 8192;
         let mut buf = Vec::with_capacity(buf_size);
         unsafe { buf.set_len(buf_size); }
@@ -1461,3 +1153,9 @@ for LocalUdpSocketWriteReady<'a>
             .map_ok(|_| 1usize)
     }
 }
+
+const NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
+unsafe fn noop_clone(_data: *const ()) -> RawWaker {
+    RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)
+}
+unsafe fn noop(_data: *const ()) {}

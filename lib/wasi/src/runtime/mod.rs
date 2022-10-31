@@ -1,7 +1,7 @@
 use std::io::Write;
+use std::sync::Arc;
 use std::{fmt, io};
 use std::future::Future;
-use std::ops::Deref;
 use std::pin::Pin;
 use thiserror::Error;
 use wasmer::{Module, Store, MemoryType};
@@ -137,11 +137,11 @@ where Self: fmt::Debug + Sync,
     /// which allows runtimes to pass serialized messages between each other similar to
     /// RPC's. BUS implementation can be implemented that communicate across runtimes
     /// thus creating a distributed computing architecture.
-    fn bus(&self) -> &(dyn VirtualBus<WasiEnv>);
+    fn bus(&self) -> Arc<dyn VirtualBus<WasiEnv> + Send + Sync + 'static>;
 
     /// Provides access to all the networking related functions such as sockets.
     /// By default networking is not implemented.
-    fn networking(&self) -> &(dyn VirtualNetworking);
+    fn networking(&self) -> Arc<dyn VirtualNetworking + Send + Sync + 'static>;
 
     /// Gets the TTY state
     #[cfg(not(feature = "host-termios"))]
@@ -489,10 +489,10 @@ where Self: fmt::Debug + Sync,
             }
         };
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         self.task_shared(Box::new(move || Box::pin(async move {
             let result = work.await;
-            let _ = tx.send(result).await;
+            let _ = tx.send(result);
         })))
         .map_err(|err| {
             debug!("failed to process reqwest request - {}", err);
@@ -518,14 +518,14 @@ where Self: fmt::Debug + Sync,
     #[cfg(feature = "host-ws")]
     fn web_socket(&self, url: &str) -> Result<Box<dyn WebSocketAbi>, String> {
         let url = url.to_string();
-        let (tx_done, rx_done) = mpsc::channel(1);
+        let (tx_done, rx_done) = mpsc::unbounded_channel();
         self.task_shared(Box::new(move ||
             Box::pin(async move {
                 let ret = move || async move {
                     Box::new(TerminalWebSocket::new(url.as_str())).await
                 };
                 let ret = ret().await;
-                let _ = tx_done.send(ret).await;
+                let _ = tx_done.send(ret);
             })
         ));
         tokio::task::block_in_place(move || {
@@ -577,8 +577,8 @@ where Self: fmt::Debug + Sync,
 #[derivative(Debug)]
 pub struct PluggableRuntimeImplementation
 {
-    pub bus: Box<dyn VirtualBus<WasiEnv> + Sync>,
-    pub networking: Box<dyn VirtualNetworking + Sync>,
+    pub bus: Arc<dyn VirtualBus<WasiEnv> + Send + Sync + 'static>,
+    pub networking: Arc<dyn VirtualNetworking + Send + Sync + 'static>,
 }
 
 impl PluggableRuntimeImplementation
@@ -587,14 +587,14 @@ impl PluggableRuntimeImplementation
     where
         I: VirtualBus<WasiEnv> + Sync,
     {
-        self.bus = Box::new(bus)
+        self.bus = Arc::new(bus)
     }
 
     pub fn set_networking_implementation<I>(&mut self, net: I)
     where
         I: VirtualNetworking + Sync,
     {
-        self.networking = Box::new(net)
+        self.networking = Arc::new(net)
     }
 }
 
@@ -604,10 +604,10 @@ for PluggableRuntimeImplementation
     fn default() -> Self {
         Self {
             #[cfg(not(feature = "host-vnet"))]
-            networking: Box::new(wasmer_vnet::UnsupportedVirtualNetworking::default()),
+            networking: Arc::new(wasmer_vnet::UnsupportedVirtualNetworking::default()),
             #[cfg(feature = "host-vnet")]
-            networking: Box::new(wasmer_wasi_local_networking::LocalNetworking::default()),
-            bus: Box::new(DefaultVirtualBus::default()),
+            networking: Arc::new(wasmer_wasi_local_networking::LocalNetworking::default()),
+            bus: Arc::new(DefaultVirtualBus::default()),
         }
     }
 }
@@ -615,11 +615,11 @@ for PluggableRuntimeImplementation
 impl WasiRuntimeImplementation
 for PluggableRuntimeImplementation
 {
-    fn bus<'a>(&'a self) -> &'a (dyn VirtualBus<WasiEnv>) {
-        self.bus.deref()
+    fn bus<'a>(&'a self) -> Arc<dyn VirtualBus<WasiEnv> + Send + Sync + 'static> {
+        self.bus.clone()
     }
 
-    fn networking<'a>(&'a self) -> &'a (dyn VirtualNetworking) {
-        self.networking.deref()
+    fn networking<'a>(&'a self) -> Arc<dyn VirtualNetworking + Send + Sync + 'static> {
+        self.networking.clone()
     }
 }

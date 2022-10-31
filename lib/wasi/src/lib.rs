@@ -537,12 +537,12 @@ impl WasiEnv {
     }
 
     /// Accesses the virtual networking implementation
-    pub fn net<'a>(&'a self) -> &'a (dyn VirtualNetworking) {
+    pub fn net<'a>(&'a self) -> Arc<dyn VirtualNetworking + Send + Sync + 'static> {
         self.runtime.networking()
     }
 
     /// Accesses the virtual bus implementation
-    pub fn bus<'a>(&'a self) -> &'a (dyn VirtualBus<WasiEnv>) {
+    pub fn bus<'a>(&'a self) -> Arc<dyn VirtualBus<WasiEnv> + Send + Sync + 'static> {
         self.runtime.bus()
     }
 

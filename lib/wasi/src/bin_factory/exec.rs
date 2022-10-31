@@ -63,7 +63,7 @@ pub fn spawn_exec_module(module: Module, store: Store, config: SpawnOptionsConfi
     let signaler = Box::new(config.env().process.clone());
 
     // Now run the binary
-    let (exit_code_tx, exit_code_rx) = mpsc::channel(1);
+    let (exit_code_tx, exit_code_rx) = mpsc::unbounded_channel();
     {
         // Determine if shared memory needs to be created and imported
         let shared_memory = module
@@ -131,7 +131,7 @@ pub fn spawn_exec_module(module: Module, store: Store, config: SpawnOptionsConfi
                                 9999u32
                             },
                         };
-                        let _ = exit_code_tx.blocking_send(code);
+                        let _ = exit_code_tx.send(code);
                         return;
                     }
                 }
@@ -168,7 +168,7 @@ pub fn spawn_exec_module(module: Module, store: Store, config: SpawnOptionsConfi
                 debug!("wasi[{}]::main() has exited with {}", pid, ret);
 
                 // Send the result
-                let _ = exit_code_tx.blocking_send(ret);
+                let _ = exit_code_tx.send(ret);
                 drop(exit_code_tx);
             }
         ), store, module, memory_spawn)
@@ -225,7 +225,7 @@ for BinFactory
 #[derive(Debug)]
 pub(crate) struct SpawnedProcess {
     pub exit_code: Mutex<Option<u32>>,
-    pub exit_code_rx: Mutex<mpsc::Receiver<u32>>,
+    pub exit_code_rx: Mutex<mpsc::UnboundedReceiver<u32>>,
 }
 
 impl VirtualBusProcess

@@ -42,14 +42,7 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
     /// Establishes a web socket connection
     /// (note: this does not use the virtual sockets and is standalone
     ///        functionality that works without the network being connected)
-    fn ws_connect(&self, url: &str) -> Result<Box<dyn VirtualWebSocket + Sync>> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Establishes a web socket connection
-    /// (note: this does not use the virtual sockets and is standalone
-    ///        functionality that works without the network being connected)
-    async fn ws_connect_async(&self, url: &str) -> Result<Box<dyn VirtualWebSocket + Sync>> {
+    async fn ws_connect(&self, url: &str) -> Result<Box<dyn VirtualWebSocket + Sync>> {
         Err(NetworkError::Unsupported)
     }
 
@@ -57,21 +50,7 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
     /// The headers are separated by line breaks
     /// (note: this does not use the virtual sockets and is standalone
     ///        functionality that works without the network being connected)
-    fn http_request(
-        &self,
-        url: &str,
-        method: &str,
-        headers: &str,
-        gzip: bool,
-    ) -> Result<SocketHttpRequest> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Makes a HTTP request to a remote web resource
-    /// The headers are separated by line breaks
-    /// (note: this does not use the virtual sockets and is standalone
-    ///        functionality that works without the network being connected)
-    async fn http_request_async(
+    async fn http_request(
         &self,
         url: &str,
         method: &str,
@@ -93,12 +72,7 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Acquires an IP address on the network and configures the routing tables
-    fn dhcp_acquire(&self) -> Result<Vec<IpAddr>> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Acquires an IP address on the network and configures the routing tables
-    async fn dhcp_acquire_async(&self) -> Result<Vec<IpAddr>> {
+    async fn dhcp_acquire(&self) -> Result<Vec<IpAddr>> {
         Err(NetworkError::Unsupported)
     }
 
@@ -160,12 +134,6 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
 
     /// Creates a low level socket that can read and write Ethernet packets
     /// directly to the interface
-    fn blocking_bind_raw(&self) -> Result<Box<dyn VirtualRawSocket + Sync>> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Creates a low level socket that can read and write Ethernet packets
-    /// directly to the interface
     async fn bind_raw(&self) -> Result<Box<dyn VirtualRawSocket + Sync>> {
         Err(NetworkError::Unsupported)
     }
@@ -173,7 +141,7 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
     /// Lists for TCP connections on a specific IP and Port combination
     /// Multiple servers (processes or threads) can bind to the same port if they each set
     /// the reuse-port and-or reuse-addr flags
-    fn listen_tcp(
+    async fn listen_tcp(
         &self,
         addr: SocketAddr,
         only_v6: bool,
@@ -182,36 +150,11 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Box<dyn VirtualTcpListener + Sync>> {
         Err(NetworkError::Unsupported)
     }
-
-    /// Lists for TCP connections on a specific IP and Port combination
-    /// Multiple servers (processes or threads) can bind to the same port if they each set
-    /// the reuse-port and-or reuse-addr flags
-    async fn listen_tcp_async(
-        &self,
-        addr: SocketAddr,
-        only_v6: bool,
-        reuse_port: bool,
-        reuse_addr: bool,
-    ) -> Result<Box<dyn VirtualTcpListener + Sync>> {
-        Err(NetworkError::Unsupported)
-    }
-
+    
     /// Opens a UDP socket that listens on a specific IP and Port combination
     /// Multiple servers (processes or threads) can bind to the same port if they each set
     /// the reuse-port and-or reuse-addr flags
-    fn bind_udp(
-        &self,
-        addr: SocketAddr,
-        reuse_port: bool,
-        reuse_addr: bool,
-    ) -> Result<Box<dyn VirtualUdpSocket + Sync>> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Opens a UDP socket that listens on a specific IP and Port combination
-    /// Multiple servers (processes or threads) can bind to the same port if they each set
-    /// the reuse-port and-or reuse-addr flags
-    async fn bind_udp_async(
+    async fn bind_udp(
         &self,
         addr: SocketAddr,
         reuse_port: bool,
@@ -222,28 +165,12 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
 
     /// Creates a socket that can be used to send and receive ICMP packets
     /// from a paritcular IP address
-    fn bind_icmp(&self, addr: IpAddr) -> Result<Box<dyn VirtualIcmpSocket + Sync>> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Creates a socket that can be used to send and receive ICMP packets
-    /// from a paritcular IP address
-    async fn bind_icmp_async(&self, addr: IpAddr) -> Result<Box<dyn VirtualIcmpSocket + Sync>> {
+    async fn bind_icmp(&self, addr: IpAddr) -> Result<Box<dyn VirtualIcmpSocket + Sync>> {
         Err(NetworkError::Unsupported)
     }
 
     /// Opens a TCP connection to a particular destination IP address and port
-    fn connect_tcp(
-        &self,
-        addr: SocketAddr,
-        peer: SocketAddr,
-        timeout: Option<Duration>,
-    ) -> Result<Box<dyn VirtualTcpSocket + Sync>> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Opens a TCP connection to a particular destination IP address and port
-    async fn connect_tcp_async(
+    async fn connect_tcp(
         &self,
         addr: SocketAddr,
         peer: SocketAddr,
@@ -253,17 +180,7 @@ pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Performs DNS resolution for a specific hostname
-    fn resolve(
-        &self,
-        host: &str,
-        port: Option<u16>,
-        dns_server: Option<IpAddr>,
-    ) -> Result<Vec<IpAddr>> {
-        Err(NetworkError::Unsupported)
-    }
-
-    /// Performs DNS resolution for a specific hostname
-    async fn resolve_async(
+    async fn resolve(
         &self,
         host: &str,
         port: Option<u16>,
@@ -323,10 +240,7 @@ pub struct SocketReceiveFrom {
 #[async_trait::async_trait]
 pub trait VirtualTcpListener: fmt::Debug + Send + Sync + 'static {
     /// Accepts an connection attempt that was made to this listener
-    fn accept(&mut self) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr)>;
-
-    /// Accepts an connection attempt that was made to this listener
-    async fn accept_async(&mut self) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr)>;
+    async fn accept(&mut self) -> Result<(Box<dyn VirtualTcpSocket + Sync>, SocketAddr)>;
 
     /// Checks how many sockets are waiting to be accepted
     fn peek(&mut self) -> Result<usize>;
@@ -403,19 +317,13 @@ pub enum StreamSecurity {
 #[async_trait::async_trait]
 pub trait VirtualWebSocket: fmt::Debug + Send + Sync + 'static {
     /// Sends out a datagram or stream of bytes on this socket
-    fn send(&mut self, data: Bytes) -> Result<usize>;
-
-    /// Sends out a datagram or stream of bytes on this socket
-    async fn send_async(&mut self, data: Bytes) -> Result<usize>;
+    async fn send(&mut self, data: Bytes) -> Result<usize>;
 
     /// FLushes all the datagrams
     fn flush(&mut self) -> Result<()>;
 
     /// Recv a packet from the socket
-    fn recv(&mut self) -> Result<SocketReceive>;
-
-    /// Recv a packet from the socket
-    async fn recv_async(&mut self) -> Result<SocketReceive>;
+    async fn recv(&mut self) -> Result<SocketReceive>;
 
     /// Recv a packet from the socket
     fn try_recv(&mut self) -> Result<Option<SocketReceive>>;
@@ -441,28 +349,19 @@ pub trait VirtualConnectedSocket: VirtualSocket + fmt::Debug + Send + Sync + 'st
     fn linger(&self) -> Result<Option<Duration>>;
 
     /// Sends out a datagram or stream of bytes on this socket
-    fn send(&mut self, data: Bytes) -> Result<usize>;
-
-    /// Sends out a datagram or stream of bytes on this socket
-    async fn send_async(&mut self, data: Bytes) -> Result<usize>;
+    async fn send(&mut self, data: Bytes) -> Result<usize>;
 
     /// FLushes all the datagrams
-    fn flush(&mut self) -> Result<()>;
-
-    /// FLushes all the datagrams
-    async fn flush_async(&mut self) -> Result<()>;
+    async fn flush(&mut self) -> Result<()>;
 
     /// Recv a packet from the socket
-    fn recv(&mut self) -> Result<SocketReceive>;
-
-    /// Recv a packet from the socket
-    async fn recv_async(&mut self) -> Result<SocketReceive>;
+    async fn recv(&mut self) -> Result<SocketReceive>;
 
     /// Recv a packet from the socket
     fn try_recv(&mut self) -> Result<Option<SocketReceive>>;
 
     /// Peeks for a packet from the socket
-    fn peek(&mut self) -> Result<SocketReceive>;
+    async fn peek(&mut self) -> Result<SocketReceive>;
 }
 
 /// Connectionless sockets are able to send and receive datagrams and stream
@@ -471,17 +370,10 @@ pub trait VirtualConnectedSocket: VirtualSocket + fmt::Debug + Send + Sync + 'st
 pub trait VirtualConnectionlessSocket: VirtualSocket + fmt::Debug + Send + Sync + 'static {
     /// Sends out a datagram or stream of bytes on this socket
     /// to a specific address
-    fn send_to(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize>;
-
-    /// Sends out a datagram or stream of bytes on this socket
-    /// to a specific address
-    async fn send_to_async(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize>;
+    async fn send_to(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize>;
 
     /// Recv a packet from the socket
-    fn recv_from(&mut self) -> Result<SocketReceiveFrom>;
-
-    /// Recv a packet from the socket
-    async fn recv_from_async(&mut self) -> Result<SocketReceiveFrom>;
+    async fn recv_from(&mut self) -> Result<SocketReceiveFrom>;
 
     /// Recv a packet from the socket
     fn try_recv_from(&mut self) -> Result<Option<SocketReceiveFrom>>;
@@ -501,22 +393,13 @@ pub trait VirtualIcmpSocket:
 #[async_trait::async_trait]
 pub trait VirtualRawSocket: VirtualSocket + fmt::Debug + Send + Sync + 'static {
     /// Sends out a raw packet on this socket
-    fn send(&mut self, data: Bytes) -> Result<usize>;
-
-    /// Sends out a raw packet on this socket
-    async fn send_async(&mut self, data: Bytes) -> Result<usize>;
+    async fn send(&mut self, data: Bytes) -> Result<usize>;
 
     /// FLushes all the datagrams
-    fn flush(&mut self) -> Result<()>;
-
-    /// FLushes all the datagrams
-    async fn flush_async(&mut self) -> Result<()>;
+    async fn flush(&mut self) -> Result<()>;
 
     /// Recv a packet from the socket
-    fn recv(&mut self) -> Result<SocketReceive>;
-
-    /// Recv a packet from the socket
-    async fn recv_async(&mut self) -> Result<SocketReceive>;
+    async fn recv(&mut self) -> Result<SocketReceive>;
 
     /// Recv a packet from the socket
     fn try_recv(&mut self) -> Result<Option<SocketReceive>>;
@@ -582,11 +465,7 @@ pub trait VirtualTcpSocket: VirtualConnectedSocket + fmt::Debug + Send + Sync + 
 
     /// Causes all the data held in the send buffer to be immediately
     /// flushed to the destination peer
-    fn flush(&mut self) -> Result<()>;
-
-    /// Causes all the data held in the send buffer to be immediately
-    /// flushed to the destination peer
-    async fn flush_async(&mut self) -> Result<()>;
+    async fn flush(&mut self) -> Result<()>;
 
     /// Shuts down either the READER or WRITER sides of the socket
     /// connection.
@@ -599,11 +478,7 @@ pub trait VirtualUdpSocket:
 {
     /// Connects to a destination peer so that the normal
     /// send/recv operations can be used.
-    fn connect(&mut self, addr: SocketAddr) -> Result<()>;
-
-    /// Connects to a destination peer so that the normal
-    /// send/recv operations can be used.
-    async fn connect_async(&mut self, addr: SocketAddr) -> Result<()>;
+    async fn connect(&mut self, addr: SocketAddr) -> Result<()>;
 
     /// Sets a flag that means that the UDP socket is able
     /// to receive and process broadcast packets.

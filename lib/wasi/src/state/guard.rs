@@ -1,5 +1,5 @@
 use tokio::sync::mpsc;
-use wasmer_vnet::net_error_into_io_err;
+use wasmer_vnet::{net_error_into_io_err, NetworkError};
 
 use super::*;
 use std::{
@@ -11,9 +11,9 @@ pub(crate) enum InodeValFilePollGuardMode {
     File(Arc<RwLock<Box<dyn VirtualFile + Send + Sync + 'static>>>),
     EventNotifications {
         immediate: bool,
-        waker: Mutex<mpsc::Receiver<()>>,
+        waker: Mutex<mpsc::UnboundedReceiver<()>>,
         counter: Arc<AtomicU64>,
-        wakers: Arc<Mutex<VecDeque<tokio::sync::mpsc::Sender<()>>>>
+        wakers: Arc<Mutex<VecDeque<tokio::sync::mpsc::UnboundedSender<()>>>>
     },
     Socket(InodeSocket)
 }
@@ -27,7 +27,7 @@ impl<'a> InodeValFilePollGuard {
     pub(crate) fn new(fd: u32, guard: &Kind, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> Option<Self> {
         let mode = match guard.deref() {
             Kind::EventNotifications { counter, wakers, immediate, .. } => {
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 let immediate = {
                     let mut wakers = wakers.lock().unwrap();
                     wakers.push_back(tx);
@@ -140,7 +140,7 @@ impl InodeValFilePollGuard {
         }
     }
 
-    pub async fn wait(&self) -> __wasi_event_t {
+    pub async fn wait(&self) -> Vec<__wasi_event_t> {
         InodeValFilePollGuardJoin::new(self).await
     }
 }
@@ -160,133 +160,233 @@ impl<'a> InodeValFilePollGuardJoin<'a> {
 impl<'a> Future
 for InodeValFilePollGuardJoin<'a>
 {
-    type Output = __wasi_event_t;
+    type Output = Vec<__wasi_event_t>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let mut has_read = None;
+        let mut has_write = None;
+        let mut has_close = None;
+        let mut has_hangup = false;
+
+        let mut ret = Vec::new();
         for (set, s) in self.subscriptions.iter() {
             for in_event in iterate_poll_events(*set) {
                 match in_event {
-                    PollEvent::PollIn => {
-                        let poll_result = match &self.mode {
-                            InodeValFilePollGuardMode::File(file) => {
-                                let guard = file.read().unwrap();
-                                guard.poll_read_ready(cx)
-                            },
-                            InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
-                                if *immediate {
-                                    let cnt = counter.load(Ordering::Acquire);
-                                    Poll::Ready(Ok(cnt as usize))
-                                } else {
-                                    let counter = counter.clone();
-                                    let mut waker = waker.lock().unwrap();
-                                    let mut notifications = Pin::new(waker.deref_mut());
-                                    notifications.poll_recv(cx).map(|_| {
-                                        let cnt = counter.load(Ordering::Acquire);
-                                        Ok(cnt as usize)
-                                    })
-                                }
-                            },
-                            InodeValFilePollGuardMode::Socket(socket) => {
-                                socket.poll_read_ready(cx)
-                                    .map_err(net_error_into_io_err)
-                                    .map_err(Into::<FsError>::into)
-                            }
-                        };
-                        if let Poll::Ready(bytes_available) = poll_result {
-                            return Poll::Ready(__wasi_event_t {
-                                userdata: s.user_data,
-                                error: bytes_available.clone().map(|_| __WASI_ESUCCESS).unwrap_or_else(fs_error_into_wasi_err),
-                                type_: s.event_type.raw_tag(),
-                                u: {
-                                    __wasi_event_u {
-                                        fd_readwrite: __wasi_event_fd_readwrite_t {
-                                            nbytes: bytes_available.unwrap_or_default() as u64,
-                                            flags: 0,
-                                        },
-                                    }
-                                },
-                            });
-                        }
-                    },
-                    PollEvent::PollOut => {
-                        let poll_result = match self.mode {
-                            InodeValFilePollGuardMode::File(file) => {
-                                let guard = file.read().unwrap();
-                                guard.poll_write_ready(cx)
-                            },
-                            InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
-                                if *immediate {
-                                    let cnt = counter.load(Ordering::Acquire);
-                                    Poll::Ready(Ok(cnt as usize))
-                                } else {
-                                    let counter = counter.clone();
-                                    let mut waker = waker.lock().unwrap();
-                                    let mut notifications = Pin::new(waker.deref_mut());
-                                    notifications.poll_recv(cx).map(|_| {
-                                        let cnt = counter.load(Ordering::Acquire);
-                                        Ok(cnt as usize)
-                                    })
-                                }
-                            },
-                            InodeValFilePollGuardMode::Socket(socket) => {
-                                socket.poll_write_ready(cx)
-                                    .map_err(net_error_into_io_err)
-                                    .map_err(Into::<FsError>::into)
-                            }
-                        };
-                        if let Poll::Ready(bytes_available) = poll_result {
-                            return Poll::Ready(__wasi_event_t {
-                                userdata: s.user_data,
-                                error: bytes_available.clone().map(|_| __WASI_ESUCCESS).unwrap_or_else(fs_error_into_wasi_err),
-                                type_: s.event_type.raw_tag(),
-                                u: {
-                                    __wasi_event_u {
-                                        fd_readwrite: __wasi_event_fd_readwrite_t {
-                                            nbytes: bytes_available.unwrap_or_default() as u64,
-                                            flags: 0,
-                                        },
-                                    }
-                                },
-                            });
-                        }
-                    },
+                    PollEvent::PollIn => { has_read = Some(s.clone()); },
+                    PollEvent::PollOut => { has_write = Some(s.clone()); },
+                    PollEvent::PollHangUp => {
+                        has_hangup = true;
+                        has_close = Some(s.clone());
+                    }
                     PollEvent::PollError |
-                    PollEvent::PollHangUp |
                     PollEvent::PollInvalid => {
-                        let poll_result = match self.mode {
-                            InodeValFilePollGuardMode::File(file) => {
-                                let guard = file.read().unwrap();
-                                guard.poll_close_ready(cx).map(|_| Ok(()))
-                            },
-                            InodeValFilePollGuardMode::EventNotifications { .. } => {
-                                Poll::Ready(Err(FsError::WouldBlock))
-                            },
-                            InodeValFilePollGuardMode::Socket(..) => {
-                                Poll::Ready(Err(FsError::WouldBlock))
-                            }
-                        };
-                        if let Poll::Ready(bytes_available) = poll_result {
-                            return Poll::Ready(__wasi_event_t {
-                                userdata: s.user_data,
-                                error: bytes_available.clone().map(|_| __WASI_ESUCCESS).unwrap_or_else(fs_error_into_wasi_err),
-                                type_: s.event_type.raw_tag(),
-                                u: {
-                                    __wasi_event_u {
-                                        fd_readwrite: __wasi_event_fd_readwrite_t {
-                                            nbytes: 0,
-                                            flags: if let PollEvent::PollHangUp = in_event {
-                                                __WASI_EVENT_FD_READWRITE_HANGUP
-                                            } else { 0 },
-                                        },
-                                    }
-                                },
-                            });
+                        if has_hangup == false {
+                            has_close = Some(s.clone());
                         }
                     }
                 }
             }
         }
-        Poll::Pending
+        if let Some(s) = has_close.as_ref() {
+            let is_closed = match self.mode {
+                InodeValFilePollGuardMode::File(file) => {
+                    let guard = file.read().unwrap();
+                    guard.poll_close_ready(cx).is_ready()
+                },
+                InodeValFilePollGuardMode::EventNotifications { .. } => {
+                    false
+                },
+                InodeValFilePollGuardMode::Socket(socket) => {
+                    let inner = socket.inner.read().unwrap();
+                    if let InodeSocketKind::Closed = inner.kind {
+                        true
+                    } else {
+                        if has_read.is_some() || has_write.is_some()
+                        {
+                            // this will be handled in the read/write poll instead
+                            false
+                        } else {
+                            // we do a read poll which will error out if its closed
+                            match socket.poll_read_ready(cx) {
+                                Poll::Ready(Err(NetworkError::ConnectionAborted)) |
+                                Poll::Ready(Err(NetworkError::ConnectionRefused)) |
+                                Poll::Ready(Err(NetworkError::ConnectionReset)) |
+                                Poll::Ready(Err(NetworkError::BrokenPipe)) |
+                                Poll::Ready(Err(NetworkError::NotConnected)) |
+                                Poll::Ready(Err(NetworkError::UnexpectedEof)) => {
+                                    true
+                                },
+                                _ => {
+                                    false
+                                }
+                            }
+                        }                        
+                    }
+                }
+            };
+            if is_closed {
+                ret.push(__wasi_event_t {
+                    userdata: s.user_data,
+                    error: __WASI_ESUCCESS,
+                    type_: s.event_type.raw_tag(),
+                    u: {
+                        __wasi_event_u {
+                            fd_readwrite: __wasi_event_fd_readwrite_t {
+                                nbytes: 0,
+                                flags: if has_hangup {
+                                    __WASI_EVENT_FD_READWRITE_HANGUP
+                                } else { 0 },
+                            },
+                        }
+                    },
+                });
+            }
+        }
+        if let Some(s) = has_read {
+            let mut poll_result = match &self.mode {
+                InodeValFilePollGuardMode::File(file) => {
+                    let guard = file.read().unwrap();
+                    guard.poll_read_ready(cx)
+                },
+                InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
+                    if *immediate {
+                        let cnt = counter.load(Ordering::Acquire);
+                        Poll::Ready(Ok(cnt as usize))
+                    } else {
+                        let counter = counter.clone();
+                        let mut waker = waker.lock().unwrap();
+                        let mut notifications = Pin::new(waker.deref_mut());
+                        notifications.poll_recv(cx).map(|_| {
+                            let cnt = counter.load(Ordering::Acquire);
+                            Ok(cnt as usize)
+                        })
+                    }
+                },
+                InodeValFilePollGuardMode::Socket(socket) => {
+                    socket.poll_read_ready(cx)
+                        .map_err(net_error_into_io_err)
+                        .map_err(Into::<FsError>::into)
+                }
+            };
+            if let Some(s) = has_close.as_ref() {
+                poll_result = match poll_result {
+                    Poll::Ready(Err(FsError::ConnectionAborted)) |
+                    Poll::Ready(Err(FsError::ConnectionRefused)) |
+                    Poll::Ready(Err(FsError::ConnectionReset)) |
+                    Poll::Ready(Err(FsError::BrokenPipe)) |
+                    Poll::Ready(Err(FsError::NotConnected)) |
+                    Poll::Ready(Err(FsError::UnexpectedEof)) => {
+                        ret.push(__wasi_event_t {
+                            userdata: s.user_data,
+                            error: __WASI_ESUCCESS,
+                            type_: s.event_type.raw_tag(),
+                            u: {
+                                __wasi_event_u {
+                                    fd_readwrite: __wasi_event_fd_readwrite_t {
+                                        nbytes: 0,
+                                        flags: if has_hangup {
+                                            __WASI_EVENT_FD_READWRITE_HANGUP
+                                        } else { 0 },
+                                    },
+                                }
+                            },
+                        });
+                        Poll::Pending
+                    }
+                    a => a
+                };
+            }
+            if let Poll::Ready(bytes_available) = poll_result {
+                ret.push(__wasi_event_t {
+                    userdata: s.user_data,
+                    error: bytes_available.clone().map(|_| __WASI_ESUCCESS).unwrap_or_else(fs_error_into_wasi_err),
+                    type_: s.event_type.raw_tag(),
+                    u: {
+                        __wasi_event_u {
+                            fd_readwrite: __wasi_event_fd_readwrite_t {
+                                nbytes: bytes_available.unwrap_or_default() as u64,
+                                flags: 0,
+                            },
+                        }
+                    },
+                });
+            }
+        }
+        if let Some(s) = has_write {
+            let mut poll_result = match self.mode {
+                InodeValFilePollGuardMode::File(file) => {
+                    let guard = file.read().unwrap();
+                    guard.poll_write_ready(cx)
+                },
+                InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
+                    if *immediate {
+                        let cnt = counter.load(Ordering::Acquire);
+                        Poll::Ready(Ok(cnt as usize))
+                    } else {
+                        let counter = counter.clone();
+                        let mut waker = waker.lock().unwrap();
+                        let mut notifications = Pin::new(waker.deref_mut());
+                        notifications.poll_recv(cx).map(|_| {
+                            let cnt = counter.load(Ordering::Acquire);
+                            Ok(cnt as usize)
+                        })
+                    }
+                },
+                InodeValFilePollGuardMode::Socket(socket) => {
+                    socket.poll_write_ready(cx)
+                        .map_err(net_error_into_io_err)
+                        .map_err(Into::<FsError>::into)
+                }
+            };
+            if let Some(s) = has_close.as_ref() {
+                poll_result = match poll_result {
+                    Poll::Ready(Err(FsError::ConnectionAborted)) |
+                    Poll::Ready(Err(FsError::ConnectionRefused)) |
+                    Poll::Ready(Err(FsError::ConnectionReset)) |
+                    Poll::Ready(Err(FsError::BrokenPipe)) |
+                    Poll::Ready(Err(FsError::NotConnected)) |
+                    Poll::Ready(Err(FsError::UnexpectedEof)) => {
+                        ret.push(__wasi_event_t {
+                            userdata: s.user_data,
+                            error: __WASI_ESUCCESS,
+                            type_: s.event_type.raw_tag(),
+                            u: {
+                                __wasi_event_u {
+                                    fd_readwrite: __wasi_event_fd_readwrite_t {
+                                        nbytes: 0,
+                                        flags: if has_hangup {
+                                            __WASI_EVENT_FD_READWRITE_HANGUP
+                                        } else { 0 },
+                                    },
+                                }
+                            },
+                        });
+                        Poll::Pending
+                    }
+                    a => a
+                };
+            }
+            if let Poll::Ready(bytes_available) = poll_result {
+                ret.push(__wasi_event_t {
+                    userdata: s.user_data,
+                    error: bytes_available.clone().map(|_| __WASI_ESUCCESS).unwrap_or_else(fs_error_into_wasi_err),
+                    type_: s.event_type.raw_tag(),
+                    u: {
+                        __wasi_event_u {
+                            fd_readwrite: __wasi_event_fd_readwrite_t {
+                                nbytes: bytes_available.unwrap_or_default() as u64,
+                                flags: 0,
+                            },
+                        }
+                    },
+                });
+            }
+        }
+        if ret.len() > 0 {
+            Poll::Ready(ret)
+        } else {
+            Poll::Pending
+        }
     }
 }
 
