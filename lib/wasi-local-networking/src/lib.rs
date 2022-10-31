@@ -606,23 +606,39 @@ impl VirtualConnectedSocket for LocalTcpStream {
 
     fn send(&mut self, data: Bytes) -> Result<usize> {
         use std::io::Write;
-        self.stream
+        let amt = self.stream
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .write_all(&data[..])
             .map(|_| data.len())
-            .map_err(io_err_into_net_error)
+            .map_err(io_err_into_net_error)?;
+        if amt == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
+        Ok(amt)
     }
 
     async fn send_async(&mut self, data: Bytes) -> Result<usize> {
         use tokio::io::AsyncWriteExt;
-        self.stream
+        let amt = self.stream
             .as_async_mut()
             .map_err(io_err_into_net_error)?
             .write_all(&data[..])
             .await
             .map(|_| data.len())
-            .map_err(io_err_into_net_error)
+            .map_err(io_err_into_net_error)?;
+        if amt == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
+        Ok(amt)
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -654,6 +670,13 @@ impl VirtualConnectedSocket for LocalTcpStream {
             .map_err(io_err_into_net_error)?
             .read(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceive {
             data: buf,
@@ -672,6 +695,13 @@ impl VirtualConnectedSocket for LocalTcpStream {
             .read(&mut buf[..])
             .await
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceive {
             data: buf,
@@ -692,6 +722,9 @@ impl VirtualConnectedSocket for LocalTcpStream {
         let _ = stream.set_nonblocking(self.nonblocking);
 
         let read = match read {
+            Ok(0) => {
+                return Ok(None);
+            },
             Ok(a) => Ok(a),
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut ||
                                err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -717,6 +750,13 @@ impl VirtualConnectedSocket for LocalTcpStream {
             .map_err(io_err_into_net_error)?
             .peek(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceive {
             data: buf,
@@ -1017,20 +1057,36 @@ impl VirtualConnectedSocket for LocalUdpSocket {
     }
 
     fn send(&mut self, data: Bytes) -> Result<usize> {
-        self.socket
+        let amt = self.socket
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .send(&data[..])
-            .map_err(io_err_into_net_error)
+            .map_err(io_err_into_net_error)?;
+        if amt == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
+        Ok(amt)
     }
 
     async fn send_async(&mut self, data: Bytes) -> Result<usize> {
-        self.socket
+        let amt = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?
             .send(&data[..])
             .await
-            .map_err(io_err_into_net_error)
+            .map_err(io_err_into_net_error)?;
+        if amt == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
+        Ok(amt)
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -1049,6 +1105,13 @@ impl VirtualConnectedSocket for LocalUdpSocket {
             .map_err(io_err_into_net_error)?
             .recv(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceive {
             data: buf,
@@ -1065,6 +1128,13 @@ impl VirtualConnectedSocket for LocalUdpSocket {
             .recv(&mut buf[..])
             .await
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceive {
             data: buf,
@@ -1082,6 +1152,9 @@ impl VirtualConnectedSocket for LocalUdpSocket {
         let _ = socket.set_nonblocking(self.nonblocking);
 
         let read = match read {
+            Ok(0) => {
+                return Ok(None);
+            }
             Ok(a) => Ok(a),
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut ||
                                err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1105,6 +1178,15 @@ impl VirtualConnectedSocket for LocalUdpSocket {
             .map_err(io_err_into_net_error)?
             .peek(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
+
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceive {
             data: buf,
@@ -1116,20 +1198,36 @@ impl VirtualConnectedSocket for LocalUdpSocket {
 #[async_trait::async_trait]
 impl VirtualConnectionlessSocket for LocalUdpSocket {
     fn send_to(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize> {
-        self.socket
+        let amt = self.socket
             .as_blocking_mut()
             .map_err(io_err_into_net_error)?
             .send_to(&data[..], addr)
-            .map_err(io_err_into_net_error)
+            .map_err(io_err_into_net_error)?;
+        if amt == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }        
+        Ok(amt)
     }
 
     async fn send_to_async(&mut self, data: Bytes, addr: SocketAddr) -> Result<usize> {
-        self.socket
+        let amt = self.socket
             .as_async_mut()
             .map_err(io_err_into_net_error)?
             .send_to(&data[..], addr)
             .await
-            .map_err(io_err_into_net_error)
+            .map_err(io_err_into_net_error)?;
+        if amt == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
+        Ok(amt)
     }
 
     fn try_recv_from(&mut self) -> Result<Option<SocketReceiveFrom>> {
@@ -1142,6 +1240,9 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
         let _ = socket.set_nonblocking(self.nonblocking);
 
         let (read, peer) = match read {
+            Ok((0, _))=> {
+                return Ok(None);
+            }
             Ok((a, b)) => Ok((a, b)),
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut ||
                                err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1167,6 +1268,13 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
             .map_err(io_err_into_net_error)?
             .recv_from(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceiveFrom {
             data: buf,
@@ -1185,6 +1293,13 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
             .recv_from(&mut buf[..])
             .await
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceiveFrom {
             data: buf,
@@ -1202,6 +1317,13 @@ impl VirtualConnectionlessSocket for LocalUdpSocket {
             .map_err(io_err_into_net_error)?
             .peek_from(&mut buf[..])
             .map_err(io_err_into_net_error)?;
+        if read == 0 {
+            if self.nonblocking {
+                return Err(NetworkError::WouldBlock);
+            } else {
+                return Err(NetworkError::BrokenPipe);
+            }
+        }
         let buf = Bytes::from(buf).slice(..read);
         Ok(SocketReceiveFrom {
             data: buf,

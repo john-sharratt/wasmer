@@ -1155,6 +1155,9 @@ impl InodeSocket {
                 InodeSocketKind::Closed => return Err(__WASI_EIO),
                 _ => return Err(__WASI_ENOTSUP),
             };
+            if data.len() == 0 {
+                return Err(__WASI_EIO);
+            }
             inner.read_buffer.replace(data);
             inner.read_addr.take();
         }
