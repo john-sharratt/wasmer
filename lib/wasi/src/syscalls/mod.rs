@@ -8146,8 +8146,6 @@ pub fn sock_accept<M: MemorySize>(
     ro_fd: WasmPtr<__wasi_fd_t, M>,
     ro_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    let mut TODO_REMOVE_THIS = 1;
-    ctx.data().runtime.sleep_now(current_caller_id(), 5).unwrap();
     debug!("wasi[{}:{}]::sock_accept (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let mut env = ctx.data();

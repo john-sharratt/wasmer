@@ -835,7 +835,7 @@ impl VirtualSocket for LocalTcpStream {
             .map_err(io_err_into_net_error)?;
         stream
             .poll_write_ready(cx)
-            .map_ok(|a| 1usize)
+            .map_ok(|a| 8192usize)
             .map_err(io_err_into_net_error)
     }
 }
