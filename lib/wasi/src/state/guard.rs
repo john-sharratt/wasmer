@@ -4,11 +4,11 @@ use wasmer_vnet::net_error_into_io_err;
 use super::*;
 use std::{
     io::{Read, Seek},
-    sync::{RwLockReadGuard, RwLockWriteGuard}, future::Future, pin::Pin, task::Poll,
+    sync::RwLockReadGuard, future::Future, pin::Pin, task::Poll,
 };
 
-pub(crate) enum InodeValFilePollGuardMode<'a> {
-    Guard(RwLockReadGuard<'a, Kind>),
+pub(crate) enum InodeValFilePollGuardMode {
+    File(Arc<RwLock<Box<dyn VirtualFile + Send + Sync + 'static>>>),
     EventNotifications {
         immediate: bool,
         waker: Mutex<mpsc::Receiver<()>>,
@@ -18,13 +18,13 @@ pub(crate) enum InodeValFilePollGuardMode<'a> {
     Socket(InodeSocket)
 }
 
-pub(crate) struct InodeValFilePollGuard<'a> {
+pub(crate) struct InodeValFilePollGuard {
     pub(crate) fd: u32,
-    pub(crate) mode: InodeValFilePollGuardMode<'a>,
+    pub(crate) mode: InodeValFilePollGuardMode,
     pub(crate) subscriptions: HashMap<PollEventSet, WasiSubscription>,
 }
-impl<'a> InodeValFilePollGuard<'a> {
-    pub(crate) fn new(fd: u32, guard: RwLockReadGuard<'a, Kind>, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> Self {
+impl<'a> InodeValFilePollGuard {
+    pub(crate) fn new(fd: u32, guard: &Kind, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> Option<Self> {
         let mode = match guard.deref() {
             Kind::EventNotifications { counter, wakers, immediate, .. } => {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -41,27 +41,33 @@ impl<'a> InodeValFilePollGuard<'a> {
                 }
             },
             Kind::Socket { socket } => InodeValFilePollGuardMode::Socket(socket.clone()),
-            _ => InodeValFilePollGuardMode::Guard(guard),
+            Kind::File { handle, .. } => {
+                if let Some(handle) = handle {
+                    InodeValFilePollGuardMode::File(handle.clone())
+                } else {
+                    return None;
+                }
+            },
+            _ => {
+                return None;
+            }
         };
-        Self {
-            fd,
-            mode,
-            subscriptions
-        }
+        Some(
+            Self {
+                fd,
+                mode,
+                subscriptions
+            }
+        )
     }
 }
 
-impl<'a> std::fmt::Debug
-for InodeValFilePollGuard<'a>
+impl std::fmt::Debug
+for InodeValFilePollGuard
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.mode {
-            InodeValFilePollGuardMode::Guard(guard) => {
-                match guard.deref() {
-                    Kind::File { .. } => write!(f, "guard-file"),
-                    _ => write!(f, "guard-unknown"),
-                }
-            },
+            InodeValFilePollGuardMode::File(..) => write!(f, "guard-file"),
             InodeValFilePollGuardMode::EventNotifications { .. } => write!(f, "guard-notifications"),
             InodeValFilePollGuardMode::Socket(socket) => {
                 let socket = socket.inner.read().unwrap();
@@ -79,20 +85,12 @@ for InodeValFilePollGuard<'a>
     }
 }
 
-impl<'a> InodeValFilePollGuard<'a> {
+impl InodeValFilePollGuard {
     pub fn bytes_available_read(&self) -> wasmer_vfs::Result<Option<usize>> {
         match &self.mode {
-            InodeValFilePollGuardMode::Guard(guard) => {
-                match guard.deref() {
-                    Kind::File { handle, .. } => {
-                        if let Some(handle) = handle {
-                            handle.bytes_available_read()
-                        } else {
-                            Ok(None)
-                        }
-                    },
-                    _ => Ok(None)
-                }
+            InodeValFilePollGuardMode::File(file) => {
+                let guard = file.read().unwrap();
+                guard.bytes_available_read()
             },
             InodeValFilePollGuardMode::EventNotifications { counter, .. } => {
                 Ok(
@@ -109,23 +107,9 @@ impl<'a> InodeValFilePollGuard<'a> {
 
     pub fn bytes_available_write(&self) -> wasmer_vfs::Result<Option<usize>> {
         match &self.mode {
-            InodeValFilePollGuardMode::Guard(guard) => {
-                match guard.deref() {
-                    Kind::File { handle, .. } => {
-                        if let Some(handle) = handle {
-                            handle.bytes_available_write()
-                        } else {
-                            Ok(None)
-                        }
-                    },
-                    Kind::EventNotifications { wakers, .. } => {
-                        let wakers = wakers.lock().unwrap();
-                        Ok(
-                            Some(wakers.len())
-                        )
-                    },
-                    _ => Ok(None)
-                }
+            InodeValFilePollGuardMode::File(file) => {
+                let guard = file.read().unwrap();
+                guard.bytes_available_write()
             },
             InodeValFilePollGuardMode::EventNotifications { wakers, .. } => {
                 let wakers = wakers.lock().unwrap();
@@ -145,17 +129,9 @@ impl<'a> InodeValFilePollGuard<'a> {
 
     pub fn is_open(&self) -> bool{
         match &self.mode {
-            InodeValFilePollGuardMode::Guard(guard) => {
-                match guard.deref() {
-                    Kind::File { handle, .. } => {
-                        if let Some(handle) = handle {
-                            handle.is_open()
-                        } else {
-                            false
-                        }
-                    },
-                    _ => false
-                }
+            InodeValFilePollGuardMode::File(file) => {
+                let guard = file.read().unwrap();
+                guard.is_open()
             },
             InodeValFilePollGuardMode::EventNotifications { .. } |
             InodeValFilePollGuardMode::Socket(..) => {
@@ -164,17 +140,17 @@ impl<'a> InodeValFilePollGuard<'a> {
         }
     }
 
-    pub async fn wait(&'a self) -> __wasi_event_t {
+    pub async fn wait(&self) -> __wasi_event_t {
         InodeValFilePollGuardJoin::new(self).await
     }
 }
 
 struct InodeValFilePollGuardJoin<'a> {
-    mode: &'a InodeValFilePollGuardMode<'a>,
+    mode: &'a InodeValFilePollGuardMode,
     subscriptions: HashMap<PollEventSet, WasiSubscription>,
 }
 impl<'a> InodeValFilePollGuardJoin<'a> {
-    fn new(guard: &'a InodeValFilePollGuard<'a>) -> Self {
+    fn new(guard: &'a InodeValFilePollGuard) -> Self {
         Self {
             mode: &guard.mode,
             subscriptions: guard.subscriptions.clone(),
@@ -192,17 +168,9 @@ for InodeValFilePollGuardJoin<'a>
                 match in_event {
                     PollEvent::PollIn => {
                         let poll_result = match &self.mode {
-                            InodeValFilePollGuardMode::Guard(guard) => {
-                                match guard.deref().deref() {
-                                    Kind::File { handle, .. } => {
-                                        if let Some(handle) = handle {
-                                            handle.poll_read_ready(cx)
-                                        } else {
-                                            Poll::Ready(Err(FsError::WouldBlock))
-                                        }
-                                    },
-                                    _ => Poll::Ready(Err(FsError::WouldBlock))
-                                }
+                            InodeValFilePollGuardMode::File(file) => {
+                                let guard = file.read().unwrap();
+                                guard.poll_read_ready(cx)
                             },
                             InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
                                 if *immediate {
@@ -242,17 +210,9 @@ for InodeValFilePollGuardJoin<'a>
                     },
                     PollEvent::PollOut => {
                         let poll_result = match self.mode {
-                            InodeValFilePollGuardMode::Guard(guard) => {
-                                match guard.deref().deref() {
-                                    Kind::File { handle, .. } => {
-                                        if let Some(handle) = handle {
-                                            handle.poll_write_ready(cx)
-                                        } else {
-                                            Poll::Ready(Err(FsError::WouldBlock))
-                                        }
-                                    },
-                                    _ => Poll::Ready(Err(FsError::WouldBlock))
-                                }
+                            InodeValFilePollGuardMode::File(file) => {
+                                let guard = file.read().unwrap();
+                                guard.poll_write_ready(cx)
                             },
                             InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
                                 if *immediate {
@@ -294,17 +254,9 @@ for InodeValFilePollGuardJoin<'a>
                     PollEvent::PollHangUp |
                     PollEvent::PollInvalid => {
                         let poll_result = match self.mode {
-                            InodeValFilePollGuardMode::Guard(guard) => {
-                                match guard.deref().deref() {
-                                    Kind::File { handle, .. } => {
-                                        if let Some(handle) = handle {
-                                            handle.poll_close_ready(cx).map(|_| Ok(()))
-                                        } else {
-                                            Poll::Ready(Err(FsError::WouldBlock))
-                                        }
-                                    },
-                                    _ => Poll::Ready(Err(FsError::WouldBlock))
-                                }
+                            InodeValFilePollGuardMode::File(file) => {
+                                let guard = file.read().unwrap();
+                                guard.poll_close_ready(cx).map(|_| Ok(()))
                             },
                             InodeValFilePollGuardMode::EventNotifications { .. } => {
                                 Poll::Ready(Err(FsError::WouldBlock))
@@ -339,47 +291,70 @@ for InodeValFilePollGuardJoin<'a>
 }
 
 #[derive(Debug)]
-pub(crate) struct InodeValFileReadGuard<'a> {
-    pub(crate) guard: RwLockReadGuard<'a, Kind>,
+pub(crate) struct InodeValFileReadGuard {
+    #[allow(dead_code)]
+    file: Arc<RwLock<Box<dyn VirtualFile + Send + Sync + 'static>>>,
+    guard: RwLockReadGuard<'static, Box<dyn VirtualFile + Send + Sync + 'static>>,
 }
 
-impl<'a> InodeValFileReadGuard<'a> {
-    pub fn into_poll_guard(self, fd: u32, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> InodeValFilePollGuard::<'a> {
-        InodeValFilePollGuard::new(fd, self.guard, subscriptions)
+impl InodeValFileReadGuard {
+    pub(crate) fn new(file: &Arc<RwLock<Box<dyn VirtualFile + Send + Sync + 'static>>>) -> Self {
+        let guard = file.read().unwrap();
+        Self {
+            file: file.clone(),
+            guard: unsafe { std::mem::transmute(guard) }
+        }
     }
 }
 
-impl<'a> Deref for InodeValFileReadGuard<'a> {
-    type Target = Option<Box<dyn VirtualFile + Send + Sync + 'static>>;
-    fn deref(&self) -> &Self::Target {
-        if let Kind::File { handle, .. } = self.guard.deref() {
-            return handle;
+impl InodeValFileReadGuard {
+    pub fn into_poll_guard(self, fd: u32, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> InodeValFilePollGuard {
+        InodeValFilePollGuard {
+            fd,
+            subscriptions,
+            mode: InodeValFilePollGuardMode::File(self.file)
         }
-        unreachable!()
+    }
+}
+
+impl Deref for InodeValFileReadGuard {
+    type Target = dyn VirtualFile + Send + Sync + 'static;
+    fn deref(&self) -> &Self::Target {
+        self.guard.deref().deref()
     }
 }
 
 #[derive(Debug)]
-pub struct InodeValFileWriteGuard<'a> {
-    pub(crate) guard: RwLockWriteGuard<'a, Kind>,
+pub struct InodeValFileWriteGuard {
+    #[allow(dead_code)]
+    file: Arc<RwLock<Box<dyn VirtualFile + Send + Sync + 'static>>>,
+    guard: RwLockWriteGuard<'static, Box<dyn VirtualFile + Send + Sync + 'static>>,
 }
 
-impl<'a> Deref for InodeValFileWriteGuard<'a> {
-    type Target = Option<Box<dyn VirtualFile + Send + Sync + 'static>>;
-    fn deref(&self) -> &Self::Target {
-        if let Kind::File { handle, .. } = self.guard.deref() {
-            return handle;
+impl InodeValFileWriteGuard {
+    pub(crate) fn new(file: &Arc<RwLock<Box<dyn VirtualFile + Send + Sync + 'static>>>) -> Self {
+        let guard = file.write().unwrap();
+        Self {
+            file: file.clone(),
+            guard: unsafe { std::mem::transmute(guard) }
         }
-        unreachable!()
+    }
+    pub(crate) fn swap(&mut self, mut file: Box<dyn VirtualFile + Send + Sync + 'static>) -> Box<dyn VirtualFile + Send + Sync + 'static> {
+        std::mem::swap(self.guard.deref_mut(), &mut file);
+        file
     }
 }
 
-impl<'a> DerefMut for InodeValFileWriteGuard<'a> {
+impl<'a> Deref for InodeValFileWriteGuard {
+    type Target = dyn VirtualFile + Send + Sync + 'static;
+    fn deref(&self) -> &Self::Target {
+        self.guard.deref().deref()
+    }
+}
+
+impl DerefMut for InodeValFileWriteGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if let Kind::File { handle, .. } = self.guard.deref_mut() {
-            return handle;
-        }
-        unreachable!()
+        self.guard.deref_mut().deref_mut()
     }
 }
 
@@ -409,26 +384,34 @@ impl WasiStateFileGuard {
         }
     }
 
-    pub fn lock_read<'a>(
+    pub fn lock_read(
         &self,
-        inodes: &'a RwLockReadGuard<WasiInodes>,
-    ) -> InodeValFileReadGuard<'a> {
+        inodes: &RwLockReadGuard<WasiInodes>,
+    ) -> Option<InodeValFileReadGuard> {
         let guard = inodes.arena[self.inode].read();
-        if let Kind::File { .. } = guard.deref() {
-            InodeValFileReadGuard { guard }
+        if let Kind::File { handle, .. } = guard.deref() {
+            if let Some(handle) = handle.as_ref() {
+                Some(InodeValFileReadGuard::new(handle))
+            } else {
+                None
+            }
         } else {
             // Our public API should ensure that this is not possible
             unreachable!("Non-file found in standard device location")
         }
     }
 
-    pub fn lock_write<'a>(
+    pub fn lock_write(
         &self,
-        inodes: &'a RwLockReadGuard<WasiInodes>,
-    ) -> InodeValFileWriteGuard<'a> {
-        let guard = inodes.arena[self.inode].write();
-        if let Kind::File { .. } = guard.deref() {
-            InodeValFileWriteGuard { guard }
+        inodes: &RwLockReadGuard<WasiInodes>,
+    ) -> Option<InodeValFileWriteGuard> {
+        let guard = inodes.arena[self.inode].read();
+        if let Kind::File { handle, .. } = guard.deref() {
+            if let Some(handle) = handle.as_ref() {
+                Some(InodeValFileWriteGuard::new(handle))
+            } else {
+                None
+            }
         } else {
             // Our public API should ensure that this is not possible
             unreachable!("Non-file found in standard device location")
@@ -440,7 +423,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn last_accessed(&self) -> u64 {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.last_accessed()
         } else {
             0
@@ -450,7 +433,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn last_modified(&self) -> u64 {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.last_modified()
         } else {
             0
@@ -460,7 +443,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn created_time(&self) -> u64 {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.created_time()
         } else {
             0
@@ -470,7 +453,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn size(&self) -> u64 {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.size()
         } else {
             0
@@ -480,7 +463,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn set_len(&mut self, new_size: u64) -> Result<(), FsError> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut() {
             file.set_len(new_size)
         } else {
             Err(FsError::IOError)
@@ -490,7 +473,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn unlink(&mut self) -> Result<(), FsError> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut() {
             file.unlink()
         } else {
             Err(FsError::IOError)
@@ -500,7 +483,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn sync_to_disk(&self) -> Result<(), FsError> {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.sync_to_disk()
         } else {
             Err(FsError::IOError)
@@ -510,7 +493,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn bytes_available(&self) -> Result<usize, FsError> {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.bytes_available()
         } else {
             Err(FsError::IOError)
@@ -520,7 +503,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn bytes_available_read(&self) -> Result<Option<usize>, FsError> {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.bytes_available_read()
         } else {
             Err(FsError::IOError)
@@ -530,7 +513,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn bytes_available_write(&self) -> Result<Option<usize>, FsError> {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.bytes_available_write()
         } else {
             Err(FsError::IOError)
@@ -540,7 +523,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn is_open(&self) -> bool {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.is_open()
         } else {
             false
@@ -550,7 +533,7 @@ impl VirtualFile for WasiStateFileGuard {
     fn get_fd(&self) -> Option<wasmer_vfs::FileDescriptor> {
         let inodes = self.inodes.read().unwrap();
         let guard = self.lock_read(&inodes);
-        if let Some(file) = guard.deref() {
+        if let Some(file) = guard.as_ref() {
             file.get_fd()
         } else {
             None
@@ -562,7 +545,7 @@ impl Write for WasiStateFileGuard {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut () {
             file.write(buf)
         } else {
             Err(std::io::ErrorKind::Unsupported.into())
@@ -572,7 +555,7 @@ impl Write for WasiStateFileGuard {
     fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut() {
             file.write_vectored(bufs)
         } else {
             Err(std::io::ErrorKind::Unsupported.into())
@@ -582,7 +565,7 @@ impl Write for WasiStateFileGuard {
     fn flush(&mut self) -> std::io::Result<()> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut() {
             file.flush()
         } else {
             Err(std::io::ErrorKind::Unsupported.into())
@@ -594,7 +577,7 @@ impl Read for WasiStateFileGuard {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut() {
             file.read(buf)
         } else {
             Err(std::io::ErrorKind::Unsupported.into())
@@ -604,7 +587,7 @@ impl Read for WasiStateFileGuard {
     fn read_vectored(&mut self, bufs: &mut [std::io::IoSliceMut<'_>]) -> std::io::Result<usize> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut() {
             file.read_vectored(bufs)
         } else {
             Err(std::io::ErrorKind::Unsupported.into())
@@ -616,7 +599,7 @@ impl Seek for WasiStateFileGuard {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         let inodes = self.inodes.read().unwrap();
         let mut guard = self.lock_write(&inodes);
-        if let Some(file) = guard.deref_mut() {
+        if let Some(file) = guard.as_mut() {
             file.seek(pos)
         } else {
             Err(std::io::ErrorKind::Unsupported.into())

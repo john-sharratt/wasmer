@@ -124,7 +124,7 @@ pub enum Kind {
     File {
         /// The open file, if it's open
         #[cfg_attr(feature = "enable-serde", serde(skip))]
-        handle: Option<Box<dyn VirtualFile + Send + Sync + 'static>>,
+        handle: Option<Arc<RwLock<Box<dyn VirtualFile + Send + Sync + 'static>>>>,
         /// The path on the host system where the file is located
         /// This is deprecated and will be removed soon
         path: PathBuf,
@@ -311,11 +311,15 @@ impl WasiInodes {
         &'a self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
         fd: __wasi_fd_t,
-    ) -> Result<InodeValFileReadGuard<'a>, FsError> {
+    ) -> Result<InodeValFileReadGuard, FsError> {
         if let Some(fd) = fd_map.read().unwrap().get(&fd) {
             let guard = self.arena[fd.inode].read();
-            if let Kind::File { .. } = guard.deref() {
-                Ok(InodeValFileReadGuard { guard })
+            if let Kind::File { handle, .. } = guard.deref() {
+                if let Some(handle) = handle {
+                    Ok(InodeValFileReadGuard::new(handle))
+                } else {
+                    Err(FsError::NotAFile)    
+                }
             } else {
                 // Our public API should ensure that this is not possible
                 Err(FsError::NotAFile)
@@ -331,11 +335,15 @@ impl WasiInodes {
         &'a self,
         fd_map: &RwLock<HashMap<u32, Fd>>,
         fd: __wasi_fd_t,
-    ) -> Result<InodeValFileWriteGuard<'a>, FsError> {
+    ) -> Result<InodeValFileWriteGuard, FsError> {
         if let Some(fd) = fd_map.read().unwrap().get(&fd) {
-            let guard = self.arena[fd.inode].write();
-            if let Kind::File { .. } = guard.deref() {
-                Ok(InodeValFileWriteGuard { guard })
+            let guard = self.arena[fd.inode].read();
+            if let Kind::File { handle, .. } = guard.deref() {
+                if let Some(handle) = handle {
+                    Ok(InodeValFileWriteGuard::new(handle))
+                } else {
+                    Err(FsError::NotAFile)    
+                }
             } else {
                 // Our public API should ensure that this is not possible
                 Err(FsError::NotAFile)
@@ -892,7 +900,7 @@ impl WasiFs {
                 }
 
                 let kind = Kind::File {
-                    handle: Some(file),
+                    handle: Some(Arc::new(RwLock::new(file))),
                     path: PathBuf::from(""),
                     fd: Some(self.next_fd.load(Ordering::Acquire)),
                 };
@@ -930,35 +938,54 @@ impl WasiFs {
         &self,
         inodes: &WasiInodes,
         fd: __wasi_fd_t,
-        file: Box<dyn VirtualFile + Send + Sync + 'static>,
+        mut file: Box<dyn VirtualFile + Send + Sync + 'static>,
     ) -> Result<Option<Box<dyn VirtualFile + Send + Sync + 'static>>, FsError> {
-        let mut ret = Some(file);
         match fd {
             __WASI_STDIN_FILENO => {
                 let mut target = inodes.stdin_mut(&self.fd_map)?;
-                std::mem::swap(target.deref_mut(), &mut ret);
+                Ok(Some(target.swap(file)))
             }
             __WASI_STDOUT_FILENO => {
                 let mut target = inodes.stdout_mut(&self.fd_map)?;
-                std::mem::swap(target.deref_mut(), &mut ret);
+                Ok(Some(target.swap(file)))
             }
             __WASI_STDERR_FILENO => {
                 let mut target = inodes.stderr_mut(&self.fd_map)?;
-                std::mem::swap(target.deref_mut(), &mut ret);
+                Ok(Some(target.swap(file)))
             }
             _ => {
                 let base_inode = self.get_fd_inode(fd).map_err(fs_error_from_wasi_err)?;
+                {
+                    // happy path
+                    let guard = inodes.arena[base_inode].read();
+                    match guard.deref() {
+                        Kind::File { ref handle, .. } => {
+                            if let Some(handle) = handle {
+                                let mut handle = handle.write().unwrap();
+                                std::mem::swap(handle.deref_mut(), &mut file);
+                                return Ok(Some(file));
+                            }
+                        }
+                        _ => return Err(FsError::NotAFile),
+                    }
+                }
+                // slow path
                 let mut guard = inodes.arena[base_inode].write();
                 match guard.deref_mut() {
                     Kind::File { ref mut handle, .. } => {
-                        std::mem::swap(handle, &mut ret);
+                        if let Some(handle) = handle {
+                            let mut handle = handle.write().unwrap();
+                            std::mem::swap(handle.deref_mut(), &mut file);
+                            return Ok(Some(file));
+                        } else {
+                            handle.replace(Arc::new(RwLock::new(file)));
+                            Ok(None)
+                        }
                     }
                     _ => return Err(FsError::NotAFile),
                 }
             }
         }
-
-        Ok(ret)
     }
 
     /// refresh size from filesystem
@@ -972,14 +999,15 @@ impl WasiFs {
         match guard.deref_mut() {
             Kind::File { handle, .. } => {
                 if let Some(h) = handle {
-                    let new_size = h.size();
+                    let h = h.read().unwrap();
+                    let new_size = h.size().clone();
+                    drop(h);
                     drop(guard);
 
                     inodes.arena[inode].stat.write().unwrap().st_size = new_size;
-                    Ok(new_size as __wasi_filesize_t)
-                } else {
-                    Err(__WASI_EBADF)
+                    return Ok(new_size as __wasi_filesize_t);
                 }
+                Err(__WASI_EBADF)
             }
             Kind::Dir { .. } | Kind::Root { .. } => Err(__WASI_EISDIR),
             _ => Err(__WASI_EINVAL),
@@ -1550,26 +1578,27 @@ impl WasiFs {
             __WASI_STDOUT_FILENO => inodes
                 .stdout_mut(&self.fd_map)
                 .map_err(fs_error_into_wasi_err)?
-                .as_mut()
-                .map(|f| f.flush().map_err(map_io_err))
-                .unwrap_or_else(|| Err(__WASI_EIO))?,
+                .flush()
+                .map_err(map_io_err)?,
             __WASI_STDERR_FILENO => inodes
                 .stderr_mut(&self.fd_map)
                 .map_err(fs_error_into_wasi_err)?
-                .as_mut()
-                .and_then(|f| f.flush().ok())
-                .ok_or(__WASI_EIO)?,
+                .flush()
+                .map_err(map_io_err)?,
             _ => {
                 let fd = self.get_fd(fd)?;
                 if fd.rights & __WASI_RIGHT_FD_DATASYNC == 0 {
                     return Err(__WASI_EACCES);
                 }
 
-                let mut guard = inodes.arena[fd.inode].write();
-                match guard.deref_mut() {
+                let guard = inodes.arena[fd.inode].read();
+                match guard.deref() {
                     Kind::File {
                         handle: Some(file), ..
-                    } => file.flush().map_err(|_| __WASI_EIO)?,
+                    } => {
+                        let mut file = file.write().unwrap();
+                        file.flush().map_err(|_| __WASI_EIO)?
+                    },
                     // TODO: verify this behavior
                     Kind::Dir { .. } => return Err(__WASI_EISDIR),
                     Kind::Symlink { .. } => unimplemented!("WasiFs::flush Kind::Symlink"),
@@ -1757,7 +1786,7 @@ impl WasiFs {
         };
         let kind = Kind::File {
             fd: Some(raw_fd),
-            handle: Some(handle),
+            handle: Some(Arc::new(RwLock::new(handle))),
             path: "".into(),
         };
         let inode = {
@@ -1791,6 +1820,7 @@ impl WasiFs {
         let md = match kind {
             Kind::File { handle, path, .. } => match handle {
                 Some(wf) => {
+                    let wf = wf.read().unwrap();
                     return Ok(__wasi_filestat_t {
                         st_filetype: __WASI_FILETYPE_REGULAR_FILE,
                         st_size: wf.size(),

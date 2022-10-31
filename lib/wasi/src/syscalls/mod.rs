@@ -179,13 +179,7 @@ pub fn stderr_write(
         .stderr_mut(&state.fs.fd_map)
         .map_err(fs_error_into_wasi_err)?;
 
-    if let Some(ref mut stderr) = stderr.deref_mut() {
-        stderr.write_all(buf).map_err(map_io_err)?;
-    } else {
-        return Err(__WASI_EBADF);
-    }
-    
-    Ok(())
+    stderr.write_all(buf).map_err(map_io_err)
 }
 
 fn __sock_actor<T, F>(
@@ -613,6 +607,7 @@ pub fn fd_allocate(
         match guard.deref_mut() {
             Kind::File { handle, .. } => {
                 if let Some(handle) = handle {
+                    let mut handle = handle.write().unwrap();
                     wasi_try!(handle.set_len(new_size).map_err(fs_error_into_wasi_err));
                 } else {
                     return __WASI_EBADF;
@@ -851,6 +846,7 @@ pub fn fd_filestat_set_size(
         match guard.deref_mut() {
             Kind::File { handle, .. } => {
                 if let Some(handle) = handle {
+                    let mut handle = handle.write().unwrap();
                     wasi_try!(handle.set_len(st_size).map_err(fs_error_into_wasi_err));
                 } else {
                     return __WASI_EBADF;
@@ -960,17 +956,13 @@ pub fn fd_pread<M: MemorySize>(
     let fd_entry = wasi_try_ok!(state.fs.get_fd(fd));
     let bytes_read = match fd {
         __WASI_STDIN_FILENO => {
-            let mut guard = wasi_try_ok!(
+            let mut stdin = wasi_try_ok!(
                 inodes
                     .stdin_mut(&state.fs.fd_map)
                     .map_err(fs_error_into_wasi_err),
                 env
             );
-            if let Some(ref mut stdin) = guard.deref_mut() {
-                wasi_try_ok!(read_bytes(stdin, &memory, iovs), env)
-            } else {
-                return Ok(__WASI_EBADF);
-            }
+            wasi_try_ok!(read_bytes(stdin.deref_mut(), &memory, iovs), env)
         }
         __WASI_STDOUT_FILENO => return Ok(__WASI_EINVAL),
         __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
@@ -990,12 +982,13 @@ pub fn fd_pread<M: MemorySize>(
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(h) = handle {
+                        let mut h = h.write().unwrap();
                         wasi_try_ok!(
                             h.seek(std::io::SeekFrom::Start(offset as u64))
                                 .map_err(map_io_err),
                             env
                         );
-                        wasi_try_ok!(read_bytes(h, &memory, iovs), env)
+                        wasi_try_ok!(read_bytes(h.deref_mut(), &memory, iovs), env)
                     } else {
                         return Ok(__WASI_EINVAL);
                     }
@@ -1146,30 +1139,22 @@ pub fn fd_pwrite<M: MemorySize>(
     let bytes_written = match fd {
         __WASI_STDIN_FILENO => return Ok(__WASI_EINVAL),
         __WASI_STDOUT_FILENO => {
-            let mut guard = wasi_try_ok!(
+            let mut stdout = wasi_try_ok!(
                 inodes
                     .stdout_mut(&state.fs.fd_map)
                     .map_err(fs_error_into_wasi_err),
                 env
             );
-            if let Some(ref mut stdout) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stdout, &memory, iovs_arr), env)
-            } else {
-                return Ok(__WASI_EBADF);
-            }
+            wasi_try_ok!(write_bytes(stdout.deref_mut(), &memory, iovs_arr), env)
         }
         __WASI_STDERR_FILENO => {
-            let mut guard = wasi_try_ok!(
+            let mut stderr = wasi_try_ok!(
                 inodes
                     .stderr_mut(&state.fs.fd_map)
                     .map_err(fs_error_into_wasi_err),
                 env
             );
-            if let Some(ref mut stderr) = guard.deref_mut() {
-                wasi_try_ok!(write_bytes(stderr, &memory, iovs_arr), env)
-            } else {
-                return Ok(__WASI_EBADF);
-            }
+            wasi_try_ok!(write_bytes(stderr.deref_mut(), &memory, iovs_arr), env)
         }
         _ => {
             if !(has_rights(fd_entry.rights, __WASI_RIGHT_FD_WRITE)
@@ -1185,13 +1170,14 @@ pub fn fd_pwrite<M: MemorySize>(
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(handle) = handle {
+                        let mut handle = handle.write().unwrap();
                         wasi_try_ok!(
                             handle
                                 .seek(std::io::SeekFrom::Start(offset as u64))
                                 .map_err(map_io_err),
                             env
                         );
-                        wasi_try_ok!(write_bytes(handle, &memory, iovs_arr), env)
+                        wasi_try_ok!(write_bytes(handle.deref_mut(), &memory, iovs_arr), env)
                     } else {
                         return Ok(__WASI_EINVAL);
                     }
@@ -1281,6 +1267,7 @@ pub fn fd_read<M: MemorySize>(
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(handle) = handle {
+                        let mut handle = handle.write().unwrap();
                         if is_stdio == false {
                             wasi_try_ok!(
                                 handle
@@ -1300,7 +1287,7 @@ pub fn fd_read<M: MemorySize>(
 
                         let memory = env.memory_view(&ctx);
                         let iovs_arr = wasi_try_mem_ok!(iovs.slice(&memory, iovs_len));
-                        wasi_try_ok!(read_bytes(handle, &memory, iovs_arr), env)
+                        wasi_try_ok!(read_bytes(handle.deref_mut(), &memory, iovs_arr), env)
                     } else {
                         return Ok(__WASI_EINVAL);
                     }
@@ -1714,10 +1701,12 @@ pub fn fd_seek<M: MemorySize>(
             match guard.deref_mut() {
                 Kind::File { ref mut handle, .. } => {
                     if let Some(handle) = handle {
+                        let mut handle = handle.write().unwrap();
                         let end =
                             wasi_try_ok!(handle.seek(SeekFrom::End(0)).map_err(map_io_err), env);
 
                         // TODO: handle case if fd_entry.offset uses 64 bits of a u64
+                        drop(handle);
                         drop(guard);
                         let mut fd_map = state.fs.fd_map.write().unwrap();
                         let fd_entry = wasi_try_ok!(fd_map.get_mut(&fd).ok_or(__WASI_EBADF));
@@ -1782,10 +1771,11 @@ pub fn fd_sync(ctx: FunctionEnvMut<'_, WasiEnv>, fd: __wasi_fd_t) -> __wasi_errn
 
     // TODO: implement this for more than files
     {
-        let mut guard = inodes.arena[inode].write();
-        match guard.deref_mut() {
+        let mut guard = inodes.arena[inode].read();
+        match guard.deref() {
             Kind::File { handle, .. } => {
                 if let Some(h) = handle {
+                    let mut h = h.read().unwrap();
                     wasi_try!(h.sync_to_disk().map_err(fs_error_into_wasi_err));
                 } else {
                     return __WASI_EINVAL;
@@ -1884,6 +1874,7 @@ pub fn fd_write<M: MemorySize>(
             match guard.deref_mut() {
                 Kind::File { handle, .. } => {
                     if let Some(handle) = handle {
+                        let mut handle = handle.write().unwrap();
                         if is_stdio == false {
                             wasi_try_ok!(
                                 handle
@@ -1892,7 +1883,7 @@ pub fn fd_write<M: MemorySize>(
                                 env
                             );
                         }
-                        wasi_try_ok!(write_bytes(handle, &memory, iovs_arr), env)
+                        wasi_try_ok!(write_bytes(handle.deref_mut(), &memory, iovs_arr), env)
                     } else {
                         return Ok(__WASI_EINVAL);
                     }
@@ -2547,11 +2538,14 @@ pub fn path_open<M: MemorySize>(
                 if o_flags & __WASI_O_TRUNC != 0 {
                     open_flags |= Fd::TRUNCATE;
                 }
-                *handle = Some(wasi_try!(open_options
-                    .open(&path)
-                    .map_err(fs_error_into_wasi_err)));
+                *handle = Some(
+                    Arc::new(std::sync::RwLock::new(
+                    wasi_try!(open_options.open(&path).map_err(fs_error_into_wasi_err))
+                    ))
+                );
                 
                 if let Some(handle) = handle {
+                    let handle = handle.read().unwrap();
                     if let Some(special_fd) = handle.get_special_fd() {
                         // We close the file descriptor so that when its closed
                         // nothing bad happens
@@ -2631,7 +2625,7 @@ pub fn path_open<M: MemorySize>(
 
             let new_inode = {
                 let kind = Kind::File {
-                    handle,
+                    handle: handle.map(|a| Arc::new(std::sync::RwLock::new(a))),
                     path: new_file_host_path,
                     fd: None,
                 };
@@ -3186,16 +3180,18 @@ pub fn path_unlink_file<M: MemorySize>(
     };
     if st_nlink == 0 {
         {
-            let mut guard = inodes.arena[removed_inode].write();
-            match guard.deref_mut() {
+            let mut guard = inodes.arena[removed_inode].read();
+            match guard.deref() {
                 Kind::File { handle, path, .. } => {
                     if let Some(h) = handle {
+                        let mut h = h.write().unwrap();
                         wasi_try!(h.unlink().map_err(fs_error_into_wasi_err));
                     } else {
                         // File is closed
                         // problem with the abstraction, we can't call unlink because there's no handle
                         // drop mutable borrow on `path`
                         let path = path.clone();
+                        drop(guard);
                         wasi_try!(state.fs_remove_file(path));
                     }
                 }
@@ -3389,29 +3385,10 @@ pub fn poll_oneoff<M: MemorySize>(
 
                             {
                                 let guard = inodes.arena[inode].read();
-                                match guard.deref() {
-                                    Kind::File { handle, .. } => {
-                                        if handle.is_some() {
-                                            crate::state::InodeValFilePollGuard::new(fd, guard, in_events)
-                                        } else {
-                                            return Ok(__WASI_EBADF);
-                                        }
-                                    }
-                                    Kind::EventNotifications { .. } => {
-                                        crate::state::InodeValFilePollGuard::new(fd, guard, in_events)
-                                    }
-                                    Kind::Socket { .. } => {
-                                        crate::state::InodeValFilePollGuard::new(fd, guard, in_events)
-                                    }
-                                    Kind::Pipe { .. } => {
-                                        return Ok(__WASI_EBADF);
-                                    }
-                                    Kind::Dir { .. }
-                                    | Kind::Root { .. }
-                                    | Kind::Buffer { .. }
-                                    | Kind::Symlink { .. } => {
-                                        unimplemented!("polling read on non-files not yet supported")
-                                    }
+                                if let Some(guard) = crate::state::InodeValFilePollGuard::new(fd, guard.deref(), in_events) {
+                                    guard
+                                } else {
+                                    return Ok(__WASI_EBADF);
                                 }
                             }
                         }
@@ -3495,6 +3472,12 @@ pub fn poll_oneoff<M: MemorySize>(
                 },
                 None => None
             };
+
+            // We have to drop the lock on inodes otherwise it will freeze up the
+            // IO subsystem
+            drop(inodes);
+
+            // This is the part that actually does the waiting
             if polls.is_empty() == false {
                 if let Some(timeout) = timeout {
                     tokio::select! {
@@ -7585,7 +7568,7 @@ pub fn sock_shutdown(
     sock: __wasi_fd_t,
     how: __wasi_sdflags_t,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_shutdown", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_shutdown (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let both = __WASI_SHUT_RD | __WASI_SHUT_WR;
     let how = match how {
@@ -7612,7 +7595,7 @@ pub fn sock_status<M: MemorySize>(
     sock: __wasi_fd_t,
     ret_status: WasmPtr<__wasi_sockstatus_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_status", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_status (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let status = wasi_try!(__sock_actor(&ctx, sock, 0, |socket| { socket.status() }));
 
@@ -7647,7 +7630,7 @@ pub fn sock_addr_local<M: MemorySize>(
     sock: __wasi_fd_t,
     ret_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_addr_local", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_addr_local (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let addr = wasi_try!(__sock_actor(&ctx, sock, 0, |socket| {
         socket.addr_local()
@@ -7678,7 +7661,7 @@ pub fn sock_addr_peer<M: MemorySize>(
     sock: __wasi_fd_t,
     ro_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_addr_peer", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_addr_peer (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let addr = wasi_try!(__sock_actor(&ctx, sock, 0, |socket| { socket.addr_peer() }));
@@ -7774,7 +7757,7 @@ pub fn sock_set_opt_flag(
     opt: __wasi_sockoption_t,
     flag: __wasi_bool_t,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_set_opt_flag(ty={})", ctx.data().pid(), ctx.data().tid(), opt);
+    debug!("wasi[{}:{}]::sock_set_opt_flag(fd={}, ty={}, flag={})", ctx.data().pid(), ctx.data().tid(), sock, opt, flag);
 
     let flag = match flag {
         __WASI_BOOL_FALSE => false,
@@ -7803,7 +7786,7 @@ pub fn sock_get_opt_flag<M: MemorySize>(
     opt: __wasi_sockoption_t,
     ret_flag: WasmPtr<__wasi_bool_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_get_opt_flag(ty={})", ctx.data().pid(), ctx.data().tid(), opt);
+    debug!("wasi[{}:{}]::sock_get_opt_flag(fd={}, ty={})", ctx.data().pid(), ctx.data().tid(), sock, opt);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
@@ -7835,7 +7818,7 @@ pub fn sock_set_opt_time<M: MemorySize>(
     opt: __wasi_sockoption_t,
     time: WasmPtr<__wasi_option_timestamp_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_set_opt_time(ty={})", ctx.data().pid(), ctx.data().tid(), opt);
+    debug!("wasi[{}:{}]::sock_set_opt_time(fd={}, ty={})", ctx.data().pid(), ctx.data().tid(), sock, opt);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -7875,7 +7858,7 @@ pub fn sock_get_opt_time<M: MemorySize>(
     opt: __wasi_sockoption_t,
     ret_time: WasmPtr<__wasi_option_timestamp_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_get_opt_time(ty={})", ctx.data().pid(), ctx.data().tid(), opt);
+    debug!("wasi[{}:{}]::sock_get_opt_time(fd={}, ty={})", ctx.data().pid(), ctx.data().tid(), sock, opt);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
@@ -7922,7 +7905,7 @@ pub fn sock_set_opt_size(
     opt: __wasi_sockoption_t,
     size: __wasi_filesize_t,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_set_opt_size(ty={})", ctx.data().pid(), ctx.data().tid(), opt);
+    debug!("wasi[{}:{}]::sock_set_opt_size(fd={}, ty={})", ctx.data().pid(), ctx.data().tid(), sock, opt);
 
     let ty = match opt {
         __WASI_SOCK_OPTION_RECV_TIMEOUT => wasmer_vnet::TimeType::ReadTimeout,
@@ -7960,7 +7943,7 @@ pub fn sock_get_opt_size<M: MemorySize>(
     opt: __wasi_sockoption_t,
     ret_size: WasmPtr<__wasi_filesize_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_get_opt_size(ty={})", ctx.data().pid(), ctx.data().tid(), opt);
+    debug!("wasi[{}:{}]::sock_get_opt_size(fd={}, ty={})", ctx.data().pid(), ctx.data().tid(), sock, opt);
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
 
@@ -7998,7 +7981,7 @@ pub fn sock_join_multicast_v4<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip4_t, M>,
     iface: WasmPtr<__wasi_addr_ip4_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_join_multicast_v4", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_join_multicast_v4 (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -8024,7 +8007,7 @@ pub fn sock_leave_multicast_v4<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip4_t, M>,
     iface: WasmPtr<__wasi_addr_ip4_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_leave_multicast_v4", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_leave_multicast_v4 (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -8050,7 +8033,7 @@ pub fn sock_join_multicast_v6<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip6_t, M>,
     iface: u32,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_join_multicast_v6", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_join_multicast_v6 (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -8075,7 +8058,7 @@ pub fn sock_leave_multicast_v6<M: MemorySize>(
     multiaddr: WasmPtr<__wasi_addr_ip6_t, M>,
     iface: u32,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_leave_multicast_v6", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_leave_multicast_v6 (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -8099,7 +8082,7 @@ pub fn sock_bind<M: MemorySize>(
     sock: __wasi_fd_t,
     addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_bind", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_bind (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -8131,7 +8114,7 @@ pub fn sock_listen<M: MemorySize>(
     sock: __wasi_fd_t,
     backlog: M::Offset,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::sock_listen", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_listen (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let backlog: usize = wasi_try!(backlog.try_into().map_err(|_| __WASI_EINVAL));
@@ -8163,6 +8146,7 @@ pub fn sock_accept<M: MemorySize>(
     ro_fd: WasmPtr<__wasi_fd_t, M>,
     ro_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
+    ctx.data().runtime.sleep_now(current_caller_id(), 5).unwrap();
     debug!("wasi[{}:{}]::sock_accept (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let mut env = ctx.data();
@@ -8185,6 +8169,7 @@ pub fn sock_accept<M: MemorySize>(
                     }
                     Err(__WASI_ETIMEDOUT) => {
                         if nonblocking {
+                            trace!("wasi[{}:{}]::sock_accept - (ret=EAGAIN)", ctx.data().pid(), ctx.data().tid());
                             return Ok(__WASI_EAGAIN);
                         }
                         env.yield_now()?;
@@ -8192,6 +8177,7 @@ pub fn sock_accept<M: MemorySize>(
                     }
                     Err(__WASI_EAGAIN) => {
                         if nonblocking {
+                            trace!("wasi[{}:{}]::sock_accept - (ret=EAGAIN)", ctx.data().pid(), ctx.data().tid());
                             return Ok(__WASI_EAGAIN);
                         }
                         env.clone().sleep(&mut ctx, Duration::from_millis(5))?;
@@ -8220,7 +8206,7 @@ pub fn sock_accept<M: MemorySize>(
     let rights = super::state::all_socket_rights();
     let fd = wasi_try_ok!(state.fs.create_fd(rights, rights, 0, 0, inode));
 
-    debug!("wasi[{}:{}]::socket connected (listener={}, fd={})", ctx.data().pid(), ctx.data().tid(), sock, fd);
+    debug!("wasi[{}:{}]::sock_accept (ret=ESUCCESS, peer={})", ctx.data().pid(), ctx.data().tid(), fd);
 
     wasi_try_mem_ok!(ro_fd.write(&memory, fd));
     wasi_try_ok!(super::state::write_ip_port(
@@ -8250,6 +8236,8 @@ pub fn sock_connect<M: MemorySize>(
     sock: __wasi_fd_t,
     addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> __wasi_errno_t {
+    debug!("wasi[{}:{}]::sock_connect (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
+
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let addr = wasi_try!(super::state::read_ip_port(&memory, addr));
@@ -8285,7 +8273,7 @@ pub fn sock_recv<M: MemorySize>(
     ro_data_len: WasmPtr<M::Offset, M>,
     ro_flags: WasmPtr<__wasi_roflags_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi[{}:{}]::sock_recv", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_recv (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -8328,7 +8316,7 @@ pub fn sock_recv_from<M: MemorySize>(
     ro_flags: WasmPtr<__wasi_roflags_t, M>,
     ro_addr: WasmPtr<__wasi_addr_port_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi[{}:{}]::sock_recv_from", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_recv_from (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
 
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
@@ -8369,7 +8357,8 @@ pub fn sock_send<M: MemorySize>(
     _si_flags: __wasi_siflags_t,
     ret_data_len: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi[{}:{}]::sock_send", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_send (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
+
     let env = ctx.data();
 
     let memory = env.memory_view(&ctx);
@@ -8412,7 +8401,7 @@ pub fn sock_send_to<M: MemorySize>(
     addr: WasmPtr<__wasi_addr_port_t, M>,
     ret_data_len: WasmPtr<M::Offset, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi[{}:{}]::sock_send_to", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::sock_send_to (fd={})", ctx.data().pid(), ctx.data().tid(), sock);
     let env = ctx.data();
 
     let memory = env.memory_view(&ctx);
@@ -8452,7 +8441,7 @@ pub fn sock_send_file<M: MemorySize>(
     mut count: __wasi_filesize_t,
     ret_sent: WasmPtr<__wasi_filesize_t, M>,
 ) -> Result<__wasi_errno_t, WasiError> {
-    debug!("wasi[{}:{}]::send_file", ctx.data().pid(), ctx.data().tid());
+    debug!("wasi[{}:{}]::send_file (fd={}, file_fd={})", ctx.data().pid(), ctx.data().tid(), sock, in_fd);
     let env = ctx.data();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
 
@@ -8473,17 +8462,13 @@ pub fn sock_send_file<M: MemorySize>(
         let fd_entry = wasi_try_ok!(state.fs.get_fd(in_fd));
         let bytes_read = match in_fd {
             __WASI_STDIN_FILENO => {
-                let mut guard = wasi_try_ok!(
+                let mut stdin = wasi_try_ok!(
                     inodes
                         .stdin_mut(&state.fs.fd_map)
                         .map_err(fs_error_into_wasi_err),
                     env
                 );
-                if let Some(ref mut stdin) = guard.deref_mut() {
-                    wasi_try_ok!(stdin.read(&mut buf).map_err(map_io_err))
-                } else {
-                    return Ok(__WASI_EBADF);
-                }
+                wasi_try_ok!(stdin.read(&mut buf).map_err(map_io_err))
             }
             __WASI_STDOUT_FILENO | __WASI_STDERR_FILENO => return Ok(__WASI_EINVAL),
             _ => {
@@ -8501,6 +8486,7 @@ pub fn sock_send_file<M: MemorySize>(
                     match guard.deref_mut() {
                         Kind::File { handle, .. } => {
                             if let Some(handle) = handle {
+                                let mut handle = handle.write().unwrap();
                                 wasi_try_ok!(
                                     handle
                                         .seek(std::io::SeekFrom::Start(offset as u64))
@@ -8586,13 +8572,13 @@ pub fn resolve<M: MemorySize>(
     naddrs: M::Offset,
     ret_naddrs: WasmPtr<M::Offset, M>,
 ) -> __wasi_errno_t {
-    debug!("wasi[{}:{}]::resolve", ctx.data().pid(), ctx.data().tid());
-
     let naddrs: usize = wasi_try!(naddrs.try_into().map_err(|_| __WASI_EINVAL));
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let host_str = unsafe { get_input_str!(&memory, host, host_len) };
     let addrs = wasi_try_mem!(addrs.slice(&memory, wasi_try!(to_offset::<M>(naddrs))));
+
+    debug!("wasi[{}:{}]::resolve (host={})", ctx.data().pid(), ctx.data().tid(), host_str);
 
     let port = if port > 0 { Some(port) } else { None };
 
