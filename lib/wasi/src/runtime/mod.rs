@@ -29,7 +29,6 @@ pub mod term;
 #[cfg(feature = "termios")]
 pub use term::*;
 
-#[cfg(feature = "sys-thread")]
 use tokio::runtime::{
     Builder, Runtime
 };
@@ -320,6 +319,7 @@ where Self: fmt::Debug + Sync,
     #[cfg(not(feature = "host-reqwest"))]
     fn reqwest(
         &self,
+        tasks: &dyn VirtualTaskManager,
         url: &str,
         method: &str,
         options: ReqwestOptions,
@@ -523,24 +523,33 @@ for PluggableRuntimeImplementation
 pub struct DefaultTaskManager {
     /// This is the tokio runtime used for ASYNC operations that is
     /// used for non-javascript environments
-    #[cfg(feature = "sys-thread")]
     runtime: std::sync::Arc<Runtime>,
     /// List of periodic wakers to wake (this is used by IO subsystems)
     /// that do not support async operations
     periodic_wakers: Arc<Mutex<(Vec<Waker>, tokio::sync::broadcast::Sender<()>)>>
 }
 
-#[cfg(not(feature = "sys-thread"))]
 impl Default
 for DefaultTaskManager {
     fn default() -> Self {
-        Self { }
+        let runtime: std::sync::Arc<Runtime>
+            = std::sync::Arc::new(Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+            );
+        let (tx, _) = tokio::sync::broadcast::channel(100);
+        Self {
+            runtime,
+            periodic_wakers: Arc::new(Mutex::new((Vec::new(), tx)))
+        }
     }
 }
 
+#[allow(unused_variables)]
 #[cfg(not(feature = "sys-thread"))]
-impl VirtualTaskManagement
-for DefaultTaskManagement
+impl VirtualTaskManager
+for DefaultTaskManager
 {
     /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
     /// execution environments) they will need to do asynchronous work whenever the main
@@ -569,10 +578,13 @@ for DefaultTaskManagement
     /// Starts an asynchronous task on the local thread (by running it in a runtime)
     fn block_on(
         &self,
-        _task: Pin<Box<dyn Future<Output = ()>>>,
-    ) -> Result<(), WasiThreadError>
+        task: Pin<Box<dyn Future<Output = ()>>>,
+    )
     {
-        Err(WasiThreadError::Unsupported)
+        let _guard = self.runtime.enter();
+        self.runtime.block_on(async move {
+            task.await;
+        });
     }
 
     /// Starts an asynchronous task will will run on a dedicated thread
@@ -616,25 +628,6 @@ for DefaultTaskManagement
     /// Returns a reference to the periodic wakers used by this task manager
     fn periodic_wakers(&self) -> Arc<Mutex<(Vec<Waker>, tokio::sync::broadcast::Sender<()>)>> {
         self.periodic_wakers.clone()
-    }
-}
-
-#[cfg(feature = "sys-thread")]
-impl Default
-for DefaultTaskManager {
-    fn default() -> Self {
-        let runtime: std::sync::Arc<Runtime>
-            = std::sync::Arc::new(Builder::new_current_thread()
-                .enable_io()
-                .enable_time()
-                .build()
-                .unwrap()
-            );
-        let (tx, _) = tokio::sync::broadcast::channel(100);
-        Self {
-            runtime,
-            periodic_wakers: Arc::new(Mutex::new((Vec::new(), tx)))
-        }
     }
 }
 
