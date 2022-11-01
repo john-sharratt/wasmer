@@ -104,7 +104,7 @@ use wasmer::{
 
 pub use runtime::{
     PluggableRuntimeImplementation, WasiRuntimeImplementation, WasiThreadError, WasiTtyState,
-    WebSocketAbi
+    WebSocketAbi, VirtualTaskManager, SpawnedMemory
 };
 use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
@@ -304,6 +304,8 @@ where
     pub owned_handles: Vec<WasiThreadHandle>,
     /// Implementation of the WASI runtime.
     pub runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
+    /// Task manager used to spawn threads and manage the ASYNC runtime
+    pub tasks: Arc<dyn VirtualTaskManager + Send + Sync + 'static>
 }
 
 impl WasiEnv {
@@ -337,7 +339,8 @@ impl WasiEnv {
                 state,
                 inner: None,
                 owned_handles: Vec::new(),
-                runtime: self.runtime.clone()
+                runtime: self.runtime.clone(),
+                tasks: self.tasks.clone(),
             },
             handle
         )
@@ -384,6 +387,7 @@ impl WasiEnv {
             compiled_modules,
             runtime.clone()
         );
+        let tasks = runtime.new_task_manager();
         let mut ret = Self {
             process,
             thread: thread.as_thread(),
@@ -394,6 +398,7 @@ impl WasiEnv {
             inner: None,
             owned_handles: Vec::new(),
             runtime,
+            tasks,
             #[cfg(feature = "os")]
             bin_factory
         };
@@ -404,6 +409,11 @@ impl WasiEnv {
     /// Returns a copy of the current runtime implementation for this environment
     pub fn runtime<'a>(&'a self) -> &'a (dyn WasiRuntimeImplementation) {
         self.runtime.deref()
+    }
+
+    /// Returns a copy of the current tasks implementation for this environment
+    pub fn tasks<'a>(&'a self) -> &'a (dyn VirtualTaskManager) {
+        self.tasks.deref()
     }
 
     /// Overrides the runtime implementation for this environment
@@ -504,34 +514,32 @@ impl WasiEnv {
         if let Some(forced_exit) = self.process.try_join() {
             return Err(WasiError::Exit(forced_exit));
         }
-        self.runtime.sleep_now(current_caller_id(), 0)?;
+        let tasks = self.tasks.clone();
+        self.tasks.block_on(Box::pin(async move {
+            tasks.sleep_now(current_caller_id(), 0);
+        }));        
         Ok(())
     }
     
     // Sleeps for a period of time
     pub fn sleep(&self, store: &mut impl AsStoreMut, duration: Duration) -> Result<(), WasiError> {
-        let duration = duration.as_nanos();
-        let start = syscalls::platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
-        self.yield_now_with_signals(store)?;
-        loop {
-            let now = syscalls::platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
-            let delta = match now.checked_sub(start) {
-                Some(a) => a,
-                None => {
-                    break;
+        let mut signaler = self.thread.signals.1.subscribe();
+        
+        let tasks = self.tasks.clone();
+        let (tx_signaller, mut rx_signaller) = tokio::sync::mpsc::unbounded_channel();
+        self.tasks.block_on(Box::pin(async move {
+            loop {
+                tokio::select! {
+                    _ = tasks.sleep_now(current_caller_id(), duration.as_millis()) => { },
+                    _ = signaler.recv() => {
+                        let _ = tx_signaller.send(true);
+                        break;
+                    }
                 }
-            };
-            if delta >= duration {
-                break;
             }
-            let remaining = match duration.checked_sub(delta) {
-                Some(a) => Duration::from_nanos(a as u64),
-                None => {
-                    break;
-                }
-            };
-            self.runtime.sleep_now(current_caller_id(), remaining.min(Duration::from_millis(10)).as_millis())?;
-            self.yield_now_with_signals(store)?;
+        }));
+        if let Ok(true) = rx_signaller.try_recv() {
+            self.process_signals(store)?;
         }
         Ok(())
     }
@@ -628,7 +636,7 @@ impl WasiEnv {
 
         let mut use_packages = uses.into_iter().collect::<VecDeque<_>>();
         while let Some(use_package) = use_packages.pop_back() {
-            if let Some(package) = self.bin_factory.builtins.cmd_wasmer.get(use_package.clone())
+            if let Some(package) = self.bin_factory.builtins.cmd_wasmer.get(use_package.clone(), self.tasks.deref())
             {
                 // If its already been added make sure the version is correct
                 let package_name = package.package_name.to_string();

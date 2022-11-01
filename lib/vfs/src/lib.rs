@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::task::Waker;
 use thiserror::Error;
 
@@ -224,12 +224,12 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable
     /// Polls for when read data is available again
     /// Defaults to `None` which means no asynchronous IO support - caller
     /// must poll `bytes_available_read` instead
-    fn poll_read_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>> {
+    fn poll_read_ready(&self, cx: &mut std::task::Context<'_>, register_root_waker: &Arc<dyn Fn(Waker) + Send + Sync + 'static>) -> std::task::Poll<Result<usize>> {
+        use std::ops::Deref;
         match self.bytes_available_read() {
             Ok(Some(0)) => {
                 let waker = cx.waker().clone();
-                let mut guard = PERIODIC_WAKERS.lock().unwrap();
-                guard.push(waker);
+                register_root_waker.deref()(waker);
                 std::task::Poll::Pending
             },
             Ok(Some(a)) => std::task::Poll::Ready(Ok(a)),
@@ -241,12 +241,12 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable
     /// Polls for when the file can be written to again
     /// Defaults to `None` which means no asynchronous IO support - caller
     /// must poll `bytes_available_write` instead
-    fn poll_write_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<usize>> {
+    fn poll_write_ready(&self, cx: &mut std::task::Context<'_>, register_root_waker: &Arc<dyn Fn(Waker) + Send + Sync + 'static>) -> std::task::Poll<Result<usize>> {
+        use std::ops::Deref;
         match self.bytes_available_write() {
             Ok(Some(0)) => {
                 let waker = cx.waker().clone();
-                let mut guard = PERIODIC_WAKERS.lock().unwrap();
-                guard.push(waker);
+                register_root_waker.deref()(waker);
                 std::task::Poll::Pending
             },
             Ok(Some(a)) => std::task::Poll::Ready(Ok(a)),
@@ -258,12 +258,12 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable
     /// Polls for when the file can be written to again
     /// Defaults to `None` which means no asynchronous IO support - caller
     /// must poll `bytes_available_write` instead
-    fn poll_close_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+    fn poll_close_ready(&self, cx: &mut std::task::Context<'_>, register_root_waker: &Arc<dyn Fn(Waker) + Send + Sync + 'static>) -> std::task::Poll<()> {
+        use std::ops::Deref;
         match self.is_open() {
             true => {
                 let waker = cx.waker().clone();
-                let mut guard = PERIODIC_WAKERS.lock().unwrap();
-                guard.push(waker);
+                register_root_waker.deref()(waker);
                 std::task::Poll::Pending
             },
             false => std::task::Poll::Ready(())
@@ -286,19 +286,6 @@ pub trait VirtualFile: fmt::Debug + Write + Read + Seek + Upcastable
     /// Returns the underlying host fd
     fn get_fd(&self) -> Option<FileDescriptor> {
         None
-    }
-}
-
-lazy_static::lazy_static! {
-    static ref PERIODIC_WAKERS: Mutex<Vec<Waker>> = {
-        Mutex::new(Vec::new())
-    };
-}
-
-pub fn wake_all_default_polls() {
-    let mut guard  = PERIODIC_WAKERS.lock().unwrap();
-    for waker in guard.drain(..) {
-        waker.wake();
     }
 }
 

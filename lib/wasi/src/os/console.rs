@@ -144,52 +144,53 @@ impl Console {
             }
         };
         let envs = self.env.clone();
+
+        // Display the welcome message
+        if self.whitelabel == false && self.no_welcome == false {
+            self.draw_welcome();
+        }
+
+        // Build a new store that will be passed to the thread
+        let store = self.compiled_modules.new_store();
+
+        // Create the control plane, process and thread
+        let control_plane = WasiControlPlane::default();
+        let process = control_plane.new_process();
+        let thread = process.new_thread();
+
+        // Create the state
+        let mut state = WasiState::new(prog);
+        if let Some(stdin) = self.stdin.take() {
+            state.stdin(Box::new(stdin));
+        }
+
+        // Open the root
+        state
+            .args(args.iter())
+            .envs(envs.iter())
+            .preopen_dir(Path::new("/"))
+            .unwrap()
+            .map_dir(".", "/")
+            .unwrap();
+
+        let state = state
+            .stdout(Box::new(RuntimeStdout::new(self.runtime.clone())))
+            .stderr(Box::new(RuntimeStderr::new(self.runtime.clone())))
+            .build()
+            .unwrap();
+
+        // Create the environment
+        let env = WasiEnv::new_ext(
+            Arc::new(state),
+            self.compiled_modules.clone(),
+            process,
+            thread,
+            self.runtime.clone()
+        );
         
         // Find the binary
-        if let Some(binary) = self.compiled_modules.get_webc(webc, self.runtime.deref())
+        if let Some(binary) = self.compiled_modules.get_webc(webc, self.runtime.deref(), env.tasks.deref())
         {
-            // Display the welcome message
-            if self.whitelabel == false && self.no_welcome == false {
-                self.draw_welcome();
-            }
-
-            // Build a new store that will be passed to the thread
-            let store = self.compiled_modules.new_store();
-
-            // Create the control plane, process and thread
-            let control_plane = WasiControlPlane::default();
-            let process = control_plane.new_process();
-            let thread = process.new_thread();
-
-            // Create the state
-            let mut state = WasiState::new(prog);
-            if let Some(stdin) = self.stdin.take() {
-                state.stdin(Box::new(stdin));
-            }
-
-            // Open the root
-            state
-                .args(args.iter())
-                .envs(envs.iter())
-                .preopen_dir(Path::new("/"))
-                .unwrap()
-                .map_dir(".", "/")
-                .unwrap();
-
-            let state = state
-                .stdout(Box::new(RuntimeStdout::new(self.runtime.clone())))
-                .stderr(Box::new(RuntimeStderr::new(self.runtime.clone())))
-                .build()
-                .unwrap();
-
-            // Create the environment
-            let env = WasiEnv::new_ext(
-                Arc::new(state),
-                self.compiled_modules.clone(),
-                process,
-                thread,
-                self.runtime.clone()
-            );
             if let Err(err) = env.uses(self.uses.clone()) {
                 let _ = self.runtime.stderr(
                     format!("{}\r\n", err).as_bytes()

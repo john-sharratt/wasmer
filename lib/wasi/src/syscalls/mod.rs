@@ -36,7 +36,7 @@ use crate::state::{
     WasiDummyWaker
 };
 use crate::utils::map_io_err;
-use crate::{WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE, WasiVFork, WasiRuntimeImplementation};
+use crate::{WasiEnvInner, import_object_for_all_wasi_versions, WasiFunctionEnv, current_caller_id, DEFAULT_STACK_SIZE, WasiVFork, WasiRuntimeImplementation, VirtualTaskManager, WasiThread};
 use crate::{
     mem_error_to_wasi,
     state::{
@@ -205,7 +205,7 @@ where
         let inode_idx = fd_entry.inode;
         let inode = &inodes.arena[inode_idx];
 
-        let runtime = env.runtime.clone();
+        let tasks = env.tasks.clone();
         let mut guard = inode.read();
         match guard.deref() {
             Kind::Socket { socket } => {
@@ -214,7 +214,7 @@ where
                 drop(guard);
 
                 // Block on the work and process process
-                __asyncify(runtime, move || async move {
+                __asyncify(tasks, &env.thread, None, async move {
                     actor(socket).await
                 })?
             },
@@ -227,27 +227,72 @@ where
     Ok(ret)
 }
 
-fn __asyncify<T, F, Fut>(
-    runtime: Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
-    actor: F,
+fn __asyncify<T, Fut>(
+    tasks: Arc<dyn VirtualTaskManager + Send + Sync + 'static>,
+    thread: &WasiThread,
+    timeout: Option<Duration>,
+    work: Fut,
 ) -> Result<T, __wasi_errno_t>
 where
     T: 'static,
-    F: FnOnce() -> Fut + 'static,
     Fut: std::future::Future<Output=Result<T, __wasi_errno_t>> + 'static
 {
-    // Expand the future outside of the shared task
-    let fut = actor();
+    let mut signaler = thread.signals.1.subscribe();
+
+    // Create the timeout
+    let timeout = {        
+        let tasks_inner= tasks.clone();
+        async move {
+            if let Some(timeout) = timeout {
+                tasks_inner.sleep_now(current_caller_id(), timeout.as_millis()).await
+            } else {
+                InfiniteSleep::default().await
+            }
+        }
+    };
 
     // Block on the work and process process
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    runtime.block_on(
+    let tasks_inner= tasks.clone();
+    let (tx_ret, mut rx_ret) = tokio::sync::mpsc::unbounded_channel();
+    tasks.block_on(
         Box::pin(async move {
-            let ret = fut.await;
-            let _ = tx.send(ret);
+            tokio::select! {
+                // The main work we are doing
+                ret = work => {
+                    let _ = tx_ret.send(ret);
+                },
+                // If a signaller is triggered then we interrupt the main process
+                _ = signaler.recv() => {
+                    let _ = tx_ret.send(Err(__WASI_EINTR));
+                },
+                // Optional timeout
+                _ = timeout => {
+                    let _ = tx_ret.send(Err(__WASI_ETIMEDOUT));
+                },                
+                // Periodically wake every 10 milliseconds for synchronously IO
+                // (but only if someone is currently registered for it)
+                _ = async move {
+                    loop {
+                        tasks_inner.wait_for_root_waker().await;
+                        tasks_inner.wake_root_wakers();
+                    }
+                } => { }
+            }
+            
         })
     );
-    rx.blocking_recv().unwrap_or(Err(__WASI_ENOEXEC))
+    rx_ret
+        .try_recv()
+        .unwrap_or(Err(__WASI_EINTR))
+}
+
+#[derive(Default)]
+struct InfiniteSleep { }
+impl std::future::Future for InfiniteSleep {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
 }
 
 fn __sock_actor_mut<T, F, Fut>(
@@ -272,7 +317,7 @@ where
     let inode_idx = fd_entry.inode;
     let inode = &inodes.arena[inode_idx];
 
-    let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
     let mut guard = inode.write();
     match guard.deref_mut() {
         Kind::Socket { socket } => {
@@ -280,7 +325,7 @@ where
             let socket = socket.clone();
             drop(guard);
 
-            __asyncify(runtime, move || async move {
+            __asyncify(tasks, &env.thread, None, async move {
                 actor(socket).await
             })
         },
@@ -313,7 +358,7 @@ where
     let inode_idx = fd_entry.inode;
     let inode = &inodes.arena[inode_idx];
 
-    let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
     let mut guard = inode.write();
     match guard.deref_mut() {
         Kind::Socket { socket } => {
@@ -322,7 +367,7 @@ where
                 
             let new_socket = {
                 // Block on the work and process process
-                __asyncify(runtime, move || async move {
+                __asyncify(tasks, &env.thread, None, async move {
                     actor(socket).await
                 })?
             };
@@ -1064,11 +1109,12 @@ pub fn fd_pread<M: MemorySize>(
                     }
 
                     let socket = socket.clone();
-                    let runtime = env.runtime.clone();
                     let data = wasi_try_ok!(
                         __asyncify(
-                            runtime,
-                            move || async move {
+                            env.tasks.clone(),
+                            &env.thread,
+                            None,
+                            async move {
                                 socket.recv(max_size).await
                             }
                         )
@@ -1278,11 +1324,12 @@ pub fn fd_pwrite<M: MemorySize>(
                     wasi_try_ok!(write_bytes(&mut buf, &memory, iovs_arr));
 
                     let socket = socket.clone();
-                    let runtime = env.runtime.clone();
                     wasi_try_ok!(
                         __asyncify(
-                            runtime,
-                            move || async move {
+                            env.tasks.clone(),
+                            &env.thread,
+                            None,
+                            async move {
                                 socket.send(buf).await
                             }
                         )
@@ -1407,11 +1454,12 @@ pub fn fd_read<M: MemorySize>(
                     }
 
                     let socket = socket.clone();
-                    let runtime = env.runtime.clone();
                     let data = wasi_try_ok!(
                         __asyncify(
-                            runtime,
-                            move || async move {
+                            env.tasks.clone(),
+                            &env.thread,
+                            None,
+                            async move {
                                 socket.recv(max_size).await
                             }
                         )
@@ -2026,11 +2074,12 @@ pub fn fd_write<M: MemorySize>(
                     wasi_try_ok!(write_bytes(&mut buf, &memory, iovs_arr));
 
                     let socket = socket.clone();
-                    let runtime = env.runtime.clone();
                     wasi_try_ok!(
                         __asyncify(
-                            runtime,
-                            move || async move {
+                            env.tasks.clone(),
+                            &env.thread,
+                            None,
+                            async move {
                                 socket.send(buf).await
                             }
                         )
@@ -3373,8 +3422,6 @@ pub fn path_unlink_file<M: MemorySize>(
     __WASI_ESUCCESS
 }
 
-const POLL_WAKER_SET: AtomicBool = AtomicBool::new(false);
-
 /// ### `poll_oneoff()`
 /// Concurrently poll for a set of events
 /// Inputs:
@@ -3399,26 +3446,10 @@ pub fn poll_oneoff<M: MemorySize>(
     let tid = ctx.data().tid();
     trace!("wasi[{}:{}]::poll_oneoff (nsubscriptions={})", pid, tid, nsubscriptions);
 
-    // If the poll waker is not set then start it up
-    // What this does is for anyone who has not actually implemented
-    // asynchronous on a VirtualFile then the IO system will instead
-    // check every 5 milliseconds in a future for new work
-    // (effectively its a crude spinning poll with high IO latency - 5ms)
-    if POLL_WAKER_SET.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-        let runtime = ctx.data().runtime.clone();
-        ctx.data().runtime.task_shared(Box::new(move || Box::pin(async move {
-            loop {
-                runtime.sleep_now(current_caller_id(), 5).unwrap();
-                wasmer_vfs::wake_all_default_polls();
-            }
-        })));
-    }
-
     // These are used when we capture what clocks (timeouts) are being
     // subscribed too
     let mut clock_subs = vec![];
     let mut time_to_sleep = None;
-    let mut signals = ctx.data().thread.subscribe_signals();
 
     // First we extract all the subscriptions into an array so that they
     // can be processed
@@ -3480,15 +3511,23 @@ pub fn poll_oneoff<M: MemorySize>(
         entry.extend(in_events.into_iter());
     }
     drop(env);
+
+    // If there is a timeout we need to use the runtime to measure this
+    // otherwise we just process all the events and wait on them indefinately
+    if let Some(time_to_sleep) = time_to_sleep.as_ref() {
+        tracing::trace!("wasi[{}:{}]::poll_oneoff wait_for_timeout={}", pid, tid, time_to_sleep.as_millis());
+    }
+    let time_to_sleep = time_to_sleep;
     
     let mut events_seen: u32 = 0;
 
     // Build the async function we will block on
     let state = ctx.data().state.clone();
     let (triggered_events_tx, mut triggered_events_rx) = std::sync::mpsc::channel();
-    let runtime = ctx.data().runtime.clone();
+    let tasks = ctx.data().tasks.clone();
     let work = {
-        let runtime = runtime.clone();
+        let tasks = tasks.clone();
+        let triggered_events_tx = triggered_events_tx.clone();
         async move {
             // We start by building a list of files we are going to poll
             // and open a read lock on them all
@@ -3504,7 +3543,7 @@ pub fn poll_oneoff<M: MemorySize>(
                             wasi_try_ok!(
                                 inodes
                                     .stderr(&state.fs.fd_map)
-                                    .map(|g| g.into_poll_guard(fd, in_events))
+                                    .map(|g| g.into_poll_guard(fd, in_events, tasks.clone()))
                                     .map_err(fs_error_into_wasi_err)
                             )
                         }
@@ -3512,7 +3551,7 @@ pub fn poll_oneoff<M: MemorySize>(
                             wasi_try_ok!(
                                 inodes
                                     .stdin(&state.fs.fd_map)
-                                    .map(|g| g.into_poll_guard(fd, in_events))
+                                    .map(|g| g.into_poll_guard(fd, in_events, tasks.clone()))
                                     .map_err(fs_error_into_wasi_err)
                             )
                         }
@@ -3520,7 +3559,7 @@ pub fn poll_oneoff<M: MemorySize>(
                             wasi_try_ok!(
                                 inodes
                                     .stdout(&state.fs.fd_map)
-                                    .map(|g| g.into_poll_guard(fd, in_events))
+                                    .map(|g| g.into_poll_guard(fd, in_events, tasks.clone()))
                                     .map_err(fs_error_into_wasi_err)
                             )
                         }
@@ -3533,7 +3572,7 @@ pub fn poll_oneoff<M: MemorySize>(
 
                             {
                                 let guard = inodes.arena[inode].read();
-                                if let Some(guard) = crate::state::InodeValFilePollGuard::new(fd, guard.deref(), in_events) {
+                                if let Some(guard) = crate::state::InodeValFilePollGuard::new(fd, guard.deref(), in_events, tasks.clone()) {
                                     guard
                                 } else {
                                     return Ok(__WASI_EBADF);
@@ -3580,102 +3619,76 @@ pub fn poll_oneoff<M: MemorySize>(
                 polls.push(poll);
             }
 
-            // If there is a timeout we need to use the runtime to measure this
-            // otherwise we just process all the events and wait on them indefinately
-            let timeout = match time_to_sleep {
-                Some(time_to_sleep) => {
-                    tracing::trace!("wasi[{}:{}]::poll_oneoff wait_for_timeout={}", pid, tid, time_to_sleep.as_millis());
-                    let work = wasi_try_ok!(
-                        runtime.sleep_now_async(current_caller_id(), time_to_sleep.as_millis())
-                            .map_err(|err| {
-                                tracing::debug!("failed to sleep asynchronously - {}", err);
-                                __WASI_ENOTSUP
-                            })
-                    );
-                    let triggered_events_tx = triggered_events_tx.clone();
-                    Some(
-                        async move {
-                            // Wait for the timeout
-                            work.await;
-                            tracing::trace!("wasi[{}:{}]::poll_oneoff triggered_timeout", pid, tid);
-                            // The timeout has triggerred so lets add that event
-                            for (clock_info, userdata) in clock_subs {
-                                triggered_events_tx.send(
-                                    __wasi_event_t {
-                                        userdata,
-                                        error: __WASI_ESUCCESS,
-                                        type_: __WASI_EVENTTYPE_CLOCK,
-                                        u: unsafe {
-                                            __wasi_event_u {
-                                                fd_readwrite: __wasi_event_fd_readwrite_t {
-                                                    nbytes: 0,
-                                                    flags: 0,
-                                                },
-                                            }
-                                        },
-                                    }
-                                ).unwrap();
-                            }
-                        }
-                    )
-                },
-                None => None
-            };
-
             // We have to drop the lock on inodes otherwise it will freeze up the
             // IO subsystem
             drop(inodes);
 
             // This is the part that actually does the waiting
             if polls.is_empty() == false {
-                if let Some(timeout) = timeout {
-                    tokio::select! {
-                        _ = timeout => { },
-                        s = signals.recv() => { return Ok(__WASI_ESTALE); }
-                        a = futures::future::select_all(polls.into_iter()) => {}
-                    }
-                } else {
-                    tokio::select! {
-                        s = signals.recv() => { return Ok(__WASI_ESTALE); }
-                        a = futures::future::select_all(polls.into_iter()) => {}
-                    }
-                }
-            } else if let Some(timeout) = timeout {                
-                tokio::select! {
-                    _ = timeout => { },
-                    s = signals.recv() => { return Ok(__WASI_ESTALE); }
-                }
+                futures::future::select_all(polls.into_iter()).await;
             } else {
-                return Ok(__WASI_EINVAL);
+                InfiniteSleep::default().await;
             }
             Ok(__WASI_ESUCCESS)
         }
     };
 
     // Block on the work and process process
-    let mut ret = wasi_try_ok!(__asyncify(runtime, move || async move {
-        work.await
-    }));
+    let env = ctx.data();
+    let mut ret = __asyncify(
+        env.tasks.clone(),
+        &env.thread,
+        time_to_sleep,
+        async move {
+            work.await
+        }
+    );
 
-    // If its a signal then process them
-    if __WASI_ESTALE == ret {
-        let env = ctx.data().clone();
-        env.process_signals(&mut ctx);
-        ret = __WASI_ESUCCESS;
+    // If its a timeout then return an event for it
+    if let Err(__WASI_ETIMEDOUT) = ret {
+        tracing::trace!("wasi[{}:{}]::poll_oneoff triggered_timeout", pid, tid);
+
+        // The timeout has triggerred so lets add that event
+        for (clock_info, userdata) in clock_subs {
+            triggered_events_tx.send(
+                __wasi_event_t {
+                    userdata,
+                    error: __WASI_ESUCCESS,
+                    type_: __WASI_EVENTTYPE_CLOCK,
+                    u: unsafe {
+                        __wasi_event_u {
+                            fd_readwrite: __wasi_event_fd_readwrite_t {
+                                nbytes: 0,
+                                flags: 0,
+                            },
+                        }
+                    },
+                }
+            ).unwrap();
+        }
+        ret = Ok(__WASI_ESUCCESS);
     }
 
+    // If its a signal then process them
+    if let Err(__WASI_EINTR) = ret {
+        let env = ctx.data().clone();
+        env.process_signals(&mut ctx)?;
+        ret = Ok(__WASI_ESUCCESS);
+    }
+    let ret = wasi_try_ok!(ret);
+    
     // Process all the events that were triggered
     let mut env = ctx.data();
     let memory = env.memory_view(&ctx);
     let event_array = wasi_try_mem_ok!(out_.slice(&memory, nsubscriptions));
-    while let Ok(event) = triggered_events_rx.recv() {
+    while let Ok(event) = triggered_events_rx.try_recv() {
         wasi_try_mem_ok!(event_array.index(events_seen as u64).write(event));
         events_seen += 1;
     }
-
     let events_seen: M::Offset = wasi_try_ok!(events_seen.try_into().map_err(|_| __WASI_EOVERFLOW));
     let out_ptr = nevents.deref(&memory);
     wasi_try_mem_ok!(out_ptr.write(events_seen));
+    tracing::trace!("wasi[{}:{}]::poll_oneoff ret={} seen={}", pid, tid, ret, events_seen);
     Ok(ret)
 }
 
@@ -4664,8 +4677,11 @@ pub fn callback_signal<M: MemorySize>(
         .get_typed_function(&ctx, &name).ok();
     trace!("wasi[{}:{}]::callback_signal (name={}, found={})", ctx.data().pid(), ctx.data().tid(), name, funct.is_some());
 
-    ctx.data_mut().inner_mut().signal = funct;
-    ctx.data_mut().inner_mut().signal_set = true;
+    {
+        let inner = ctx.data_mut().inner_mut();
+        inner.signal = funct;
+        inner.signal_set = true;
+    }
 
     let env = ctx.data();
     env.clone().yield_now_with_signals(&mut ctx)?;
@@ -4751,6 +4767,7 @@ pub fn thread_spawn<M: MemorySize>(
     let env = ctx.data();
     let memory = env.memory_view(&ctx);
     let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
 
     // Create the handle that represents this thread
     let mut thread_handle = env.process.new_thread();
@@ -4935,7 +4952,7 @@ pub fn thread_spawn<M: MemorySize>(
             // Now spawn a thread
             trace!("threading: spawning background thread");
             let thread_module = env.inner().module.clone();
-            wasi_try!(runtime
+            wasi_try!(tasks
                 .task_wasm(Box::new(move |store, module, thread_memory| {
                         let mut thread_memory = thread_memory;
                         let mut store = Some(store);
@@ -5147,7 +5164,7 @@ pub fn thread_parallelism<M: MemorySize>(
     debug!("wasi[{}:{}]::thread_parallelism", ctx.data().pid(), ctx.data().tid());
 
     let env = ctx.data();
-    let parallelism = wasi_try!(env.runtime().thread_parallelism().map_err(|err| {
+    let parallelism = wasi_try!(env.tasks().thread_parallelism().map_err(|err| {
         let err: __wasi_errno_t = err.into();
         err
     }));
@@ -5547,6 +5564,7 @@ pub fn proc_fork<M: MemorySize>(
         
         // Now we use the environment and memory references
         let runtime = child_env.runtime.clone();
+        let tasks = child_env.tasks.clone();
         let child_memory_stack = memory_stack.clone();
         let child_rewind_stack = rewind_stack.clone();
 
@@ -5558,13 +5576,15 @@ pub fn proc_fork<M: MemorySize>(
         {
             let store_data = store_data.clone();
             let runtime = runtime.clone();
-            let runtime_outer = runtime.clone();
-            runtime_outer.task_wasm(Box::new(move |mut store, module, memory| 
+            let tasks = tasks.clone();
+            let tasks_outer = tasks.clone();
+            tasks_outer.task_wasm(Box::new(move |mut store, module, memory| 
                 {
                     // Create the WasiFunctionEnv
                     let pid = child_env.pid();
                     let tid = child_env.tid();
                     child_env.runtime = runtime.clone();
+                    child_env.tasks = tasks.clone();
                     let mut ctx = WasiFunctionEnv::new(&mut store, child_env);
                     
                     // Let's instantiate the module with the imports.
@@ -6029,7 +6049,7 @@ pub fn proc_exec<M: MemorySize>(
             
             // Get a reference to the runtime
             let bin_factory = ctx.data().bin_factory.clone();
-            let runtime = wasi_env.runtime.clone();
+            let tasks = wasi_env.tasks.clone();
 
             // Create the process and drop the context
             let builder = ctx.data().bus()
@@ -6042,7 +6062,7 @@ pub fn proc_exec<M: MemorySize>(
                 Ok(mut process) => {
                     // Wait for the sub-process to exit itself - then we will exit
                     loop {
-                        runtime.sleep_now(current_caller_id(), 5).unwrap();
+                        tasks.sleep_now(current_caller_id(), 5);
                         if let Some(exit_code) = process.inst.exit_code() {
                             return OnCalledAction::Trap(Box::new(WasiError::Exit(exit_code as crate::syscalls::types::__wasi_exitcode_t)));
                         }
@@ -7242,11 +7262,13 @@ pub fn ws_connect<M: MemorySize>(
     let url = unsafe { get_input_str!(&memory, url, url_len) };
 
     let net = env.net();
-    let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
     let socket = wasi_try!(
         __asyncify(
-            runtime,
-            move || async move {
+            tasks,
+            &env.thread,
+            None,
+            async move {
                 net.ws_connect(url.as_str()).await.map_err(net_error_into_wasi_err)
             }
         )
@@ -7313,11 +7335,13 @@ pub fn http_request<M: MemorySize>(
     };
 
     let net = env.net();
-    let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
     let socket = wasi_try!(
         __asyncify(
-            runtime,
-            move || async move {
+            tasks,
+            &env.thread,
+            None,
+            async move {
                 net.http_request(url.as_str(), method.as_str(), headers.as_str(), gzip).await.map_err(net_error_into_wasi_err)
             }
         )
@@ -7483,11 +7507,13 @@ pub fn port_dhcp_acquire(ctx: FunctionEnvMut<'_, WasiEnv>) -> __wasi_errno_t {
     debug!("wasi[{}:{}]::port_dhcp_acquire", ctx.data().pid(), ctx.data().tid());
     let env = ctx.data();
     let net = env.net();
-    let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
     wasi_try!(
         __asyncify(
-            runtime,
-            move || async move {
+            tasks,
+            &env.thread,
+            None,
+            async move {
                 net.dhcp_acquire().await.map_err(net_error_into_wasi_err)
             }
         )
@@ -8674,7 +8700,7 @@ pub fn sock_send_file<M: MemorySize>(
     debug!("wasi[{}:{}]::send_file (fd={}, file_fd={})", ctx.data().pid(), ctx.data().tid(), sock, in_fd);
     let env = ctx.data();
     let net = env.net();
-    let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
     let (memory, mut state, inodes) = env.get_memory_and_wasi_state_and_inodes(&ctx, 0);
 
     // Set the offset of the file
@@ -8732,12 +8758,14 @@ pub fn sock_send_file<M: MemorySize>(
                         }
                         Kind::Socket { socket } => {
                             let socket = socket.clone();
-                            let runtime = runtime.clone();
+                            let tasks = tasks.clone();
                             let max_size = buf.len();
                             let data = wasi_try_ok!(
                                 __asyncify(
-                                    runtime,
-                                    move || async move {
+                                    tasks,
+                                    &env.thread,
+                                    None,
+                                    async move {
                                         socket.recv(max_size).await
                                     }
                                 )
@@ -8827,11 +8855,13 @@ pub fn resolve<M: MemorySize>(
     let port = if port > 0 { Some(port) } else { None };
 
     let net = env.net();
-    let runtime = env.runtime.clone();
+    let tasks = env.tasks.clone();
     let found_ips = wasi_try!(
         __asyncify(
-            runtime,
-            move || async move {
+            tasks,
+            &env.thread,
+            None,
+            async move {
                 net.resolve(host_str.as_str(), port, None).await.map_err(net_error_into_wasi_err)
             }
         )

@@ -38,7 +38,8 @@ pub struct IpRoute {
 /// An implementation of virtual networking
 #[async_trait::async_trait]
 #[allow(unused_variables)]
-pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static {
+pub trait VirtualNetworking: fmt::Debug + Send + Sync + 'static
+{
     /// Establishes a web socket connection
     /// (note: this does not use the virtual sockets and is standalone
     ///        functionality that works without the network being connected)

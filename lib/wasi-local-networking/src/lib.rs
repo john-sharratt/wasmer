@@ -128,9 +128,30 @@ impl VirtualTcpListener for LocalTcpListener {
         if nonblocking {
             let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
             let mut cx = Context::from_waker(&waker);
-            if self.stream.poll_accept(&mut cx).is_pending() == true {
-                return Err(NetworkError::WouldBlock);
-            }
+            return match self.stream
+                .poll_accept(&mut cx)
+                .map_err(io_err_into_net_error)
+            {
+                Poll::Ready(Ok((sock, addr))) => {
+                    Ok(
+                        (
+                            Box::new(LocalTcpStream {
+                                stream: sock,
+                                addr,
+                                connect_timeout: None,
+                                read_timeout: None,
+                                write_timeout: None,
+                                linger_timeout: None,
+                                nonblocking,
+                                shutdown: None
+                            }),
+                            addr,
+                        )
+                    )
+                },
+                Poll::Ready(Err(err)) => Err(err),
+                Poll::Pending => Err(NetworkError::WouldBlock)
+            };
         }
 
         let timeout = self.timeout.clone();

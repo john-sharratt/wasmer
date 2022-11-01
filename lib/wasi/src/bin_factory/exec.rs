@@ -16,11 +16,18 @@ use std::{
 use tokio::sync::mpsc;
 use tracing::*;
 
-use crate::{WasiEnv, WasiFunctionEnv, runtime::SpawnedMemory, import_object_for_all_wasi_versions, WasiError, WasiRuntimeImplementation};
+use crate::{WasiEnv, WasiFunctionEnv, import_object_for_all_wasi_versions, WasiError, WasiRuntimeImplementation, SpawnedMemory};
 use super::{BinFactory, BinaryPackage, CachedCompiledModules};
 use crate::runtime::SpawnType;
 
-pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>, compiled_modules: &CachedCompiledModules) -> wasmer_vbus::Result<BusSpawnedProcess>
+pub fn spawn_exec(
+    binary: BinaryPackage,
+    name: &str,
+    store: Store,
+    config: SpawnOptionsConfig<WasiEnv>,
+    runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>,
+    compiled_modules: &CachedCompiledModules
+) -> wasmer_vbus::Result<BusSpawnedProcess>
 {
     // Load the module
     #[cfg(feature = "sys")]
@@ -56,8 +63,16 @@ pub fn spawn_exec(binary: BinaryPackage, name: &str, store: Store, config: Spawn
     spawn_exec_module(module, store, config, runtime)
 }
 
-pub fn spawn_exec_module(module: Module, store: Store, config: SpawnOptionsConfig<WasiEnv>, runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>) -> wasmer_vbus::Result<BusSpawnedProcess>
+pub fn spawn_exec_module(
+    module: Module,
+    store: Store,
+    config: SpawnOptionsConfig<WasiEnv>,
+    runtime: &Arc<dyn WasiRuntimeImplementation + Send + Sync + 'static>
+) -> wasmer_vbus::Result<BusSpawnedProcess>
 {
+    // Create a new task manager
+    let tasks = runtime.new_task_manager();
+
     // Create the signaler
     let pid = config.env().pid();
     let signaler = Box::new(config.env().process.clone());
@@ -90,12 +105,13 @@ pub fn spawn_exec_module(module: Module, store: Store, config: SpawnOptionsConfi
 
         // Create a thread that will run this process
         let runtime = runtime.clone();
-        let runtime_outer = runtime.clone();
-        runtime_outer.task_wasm(Box::new(move |mut store, module, memory| 
+        let tasks_outer = tasks.clone();
+        tasks_outer.task_wasm(Box::new(move |mut store, module, memory| 
             {
                 // Create the WasiFunctionEnv
                 let mut wasi_env = config.env().clone();
-                wasi_env.runtime = runtime.clone();
+                wasi_env.runtime = runtime;
+                wasi_env.tasks = tasks;
                 let mut wasi_env = WasiFunctionEnv::new(&mut store, wasi_env);
 
                 // Let's instantiate the module with the imports.
@@ -198,7 +214,14 @@ pub fn spawn_exec_module(module: Module, store: Store, config: SpawnOptionsConfi
 impl VirtualBusSpawner<WasiEnv>
 for BinFactory
 {
-    fn spawn<'a>(&self, parent_ctx: Option<&FunctionEnvMut<'a, WasiEnv>>, name: &str, store: Store, config: SpawnOptionsConfig<WasiEnv>, _fallback: &dyn VirtualBusSpawner<WasiEnv>) -> wasmer_vbus::Result<BusSpawnedProcess> {
+    fn spawn<'a>(
+        &self,
+        parent_ctx: Option<&FunctionEnvMut<'a, WasiEnv>>,
+        name: &str,
+        store: Store,
+        config: SpawnOptionsConfig<WasiEnv>,
+        _fallback: &dyn VirtualBusSpawner<WasiEnv>
+    ) -> wasmer_vbus::Result<BusSpawnedProcess> {
         if config.remote_instance().is_some() {
             return Err(VirtualBusError::Unsupported);
         }

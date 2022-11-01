@@ -1,6 +1,8 @@
 use tokio::sync::mpsc;
 use wasmer_vnet::{net_error_into_io_err, NetworkError};
 
+use crate::VirtualTaskManager;
+
 use super::*;
 use std::{
     io::{Read, Seek},
@@ -22,9 +24,10 @@ pub(crate) struct InodeValFilePollGuard {
     pub(crate) fd: u32,
     pub(crate) mode: InodeValFilePollGuardMode,
     pub(crate) subscriptions: HashMap<PollEventSet, WasiSubscription>,
+    pub(crate) tasks: Arc<dyn VirtualTaskManager + Send + Sync + 'static>,
 }
 impl<'a> InodeValFilePollGuard {
-    pub(crate) fn new(fd: u32, guard: &Kind, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> Option<Self> {
+    pub(crate) fn new(fd: u32, guard: &Kind, subscriptions: HashMap<PollEventSet, WasiSubscription>, tasks: Arc<dyn VirtualTaskManager + Send + Sync + 'static>) -> Option<Self> {
         let mode = match guard.deref() {
             Kind::EventNotifications { counter, wakers, immediate, .. } => {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -56,7 +59,8 @@ impl<'a> InodeValFilePollGuard {
             Self {
                 fd,
                 mode,
-                subscriptions
+                subscriptions,
+                tasks
             }
         )
     }
@@ -148,12 +152,14 @@ impl InodeValFilePollGuard {
 struct InodeValFilePollGuardJoin<'a> {
     mode: &'a InodeValFilePollGuardMode,
     subscriptions: HashMap<PollEventSet, WasiSubscription>,
+    tasks: Arc<dyn VirtualTaskManager + Send + Sync + 'static>,
 }
 impl<'a> InodeValFilePollGuardJoin<'a> {
     fn new(guard: &'a InodeValFilePollGuard) -> Self {
         Self {
             mode: &guard.mode,
             subscriptions: guard.subscriptions.clone(),
+            tasks: guard.tasks.clone(),
         }
     }
 }
@@ -167,6 +173,9 @@ for InodeValFilePollGuardJoin<'a>
         let mut has_write = None;
         let mut has_close = None;
         let mut has_hangup = false;
+
+        let register_root_waker = self.tasks
+            .register_root_waker();
 
         let mut ret = Vec::new();
         for (set, s) in self.subscriptions.iter() {
@@ -191,7 +200,7 @@ for InodeValFilePollGuardJoin<'a>
             let is_closed = match self.mode {
                 InodeValFilePollGuardMode::File(file) => {
                     let guard = file.read().unwrap();
-                    guard.poll_close_ready(cx).is_ready()
+                    guard.poll_close_ready(cx, &register_root_waker).is_ready()
                 },
                 InodeValFilePollGuardMode::EventNotifications { .. } => {
                     false
@@ -246,7 +255,7 @@ for InodeValFilePollGuardJoin<'a>
             let mut poll_result = match &self.mode {
                 InodeValFilePollGuardMode::File(file) => {
                     let guard = file.read().unwrap();
-                    guard.poll_read_ready(cx)
+                    guard.poll_read_ready(cx, &register_root_waker)
                 },
                 InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
                     if *immediate {
@@ -316,7 +325,7 @@ for InodeValFilePollGuardJoin<'a>
             let mut poll_result = match self.mode {
                 InodeValFilePollGuardMode::File(file) => {
                     let guard = file.read().unwrap();
-                    guard.poll_write_ready(cx)
+                    guard.poll_write_ready(cx, &register_root_waker)
                 },
                 InodeValFilePollGuardMode::EventNotifications { waker, counter, immediate, .. } => {
                     if *immediate {
@@ -408,11 +417,12 @@ impl InodeValFileReadGuard {
 }
 
 impl InodeValFileReadGuard {
-    pub fn into_poll_guard(self, fd: u32, subscriptions: HashMap<PollEventSet, WasiSubscription>) -> InodeValFilePollGuard {
+    pub fn into_poll_guard(self, fd: u32, subscriptions: HashMap<PollEventSet, WasiSubscription>, tasks: Arc<dyn VirtualTaskManager + Send + Sync + 'static>) -> InodeValFilePollGuard {
         InodeValFilePollGuard {
             fd,
             subscriptions,
-            mode: InodeValFilePollGuardMode::File(self.file)
+            mode: InodeValFilePollGuardMode::File(self.file),
+            tasks,
         }
     }
 }

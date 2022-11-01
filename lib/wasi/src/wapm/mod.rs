@@ -14,7 +14,7 @@ use crate::{
     runtime::{
         ReqwestOptions
     },
-    bin_factory::{BinaryPackage, BinaryPackageCommand}, WasiRuntimeImplementation
+    bin_factory::{BinaryPackage, BinaryPackageCommand}, WasiRuntimeImplementation, VirtualTaskManager
 };
 
 mod pirita;
@@ -23,7 +23,7 @@ mod manifest;
 
 use pirita::*;
 
-pub(crate) fn fetch_webc(cache_dir: &str, webc: &str, runtime: &dyn WasiRuntimeImplementation) -> Option<BinaryPackage> {
+pub(crate) fn fetch_webc(cache_dir: &str, webc: &str, runtime: &dyn WasiRuntimeImplementation, tasks: &dyn VirtualTaskManager) -> Option<BinaryPackage> {
     let name = webc.split_once(":").map(|a| a.0).unwrap_or_else(|| webc);
     let (name, version) = match name.split_once("@") {
         Some((name, version)) => (name, Some(version)),
@@ -44,7 +44,7 @@ pub(crate) fn fetch_webc(cache_dir: &str, webc: &str, runtime: &dyn WasiRuntimeI
     let options = ReqwestOptions::default();
     let headers = Default::default();
     let data = None;
-    match runtime.reqwest(url.as_str(), "POST", options, headers, data) {
+    match runtime.reqwest(tasks, url.as_str(), "POST", options, headers, data) {
         Ok(wapm) => {
             if wapm.status == 200 {
                 if let Some(data) = wapm.data {
@@ -52,7 +52,7 @@ pub(crate) fn fetch_webc(cache_dir: &str, webc: &str, runtime: &dyn WasiRuntimeI
                         Ok(query) => {
                             if let Some(package) = query.data.get_package_version {
                                 if let Some(pirita_download_url) = package.distribution.pirita_download_url {
-                                    let mut ret = download_webc(cache_dir, name, pirita_download_url, runtime)?;
+                                    let mut ret = download_webc(cache_dir, name, pirita_download_url, runtime, tasks)?;
                                     ret.version = package.version.into();
                                     return Some(ret);
                                 } else {
@@ -60,7 +60,7 @@ pub(crate) fn fetch_webc(cache_dir: &str, webc: &str, runtime: &dyn WasiRuntimeI
                                 }
                             } else if let Some(package) = query.data.get_package {
                                 if let Some(pirita_download_url) = package.last_version.distribution.pirita_download_url {
-                                    let mut ret = download_webc(cache_dir, name, pirita_download_url, runtime)?;
+                                    let mut ret = download_webc(cache_dir, name, pirita_download_url, runtime, tasks)?;
                                     ret.version = package.last_version.version.into();
                                     return Some(ret);
                                 } else {
@@ -86,7 +86,7 @@ pub(crate) fn fetch_webc(cache_dir: &str, webc: &str, runtime: &dyn WasiRuntimeI
     None
 }
 
-fn download_webc(cache_dir: &str, name: &str, pirita_download_url: String, runtime: &dyn WasiRuntimeImplementation) -> Option<BinaryPackage>
+fn download_webc(cache_dir: &str, name: &str, pirita_download_url: String, runtime: &dyn WasiRuntimeImplementation, tasks: &dyn VirtualTaskManager) -> Option<BinaryPackage>
 {
     let mut name_comps = pirita_download_url.split("/").collect::<Vec<_>>().into_iter().rev();
     let mut name = name_comps.next().unwrap_or_else(|| name);
@@ -138,7 +138,7 @@ fn download_webc(cache_dir: &str, name: &str, pirita_download_url: String, runti
     // slow path
     let cache_dir = cache_dir.to_string();
     let name = name.to_string();
-    if let Some(data) = download_miss(pirita_download_url.as_str(), runtime) {
+    if let Some(data) = download_miss(pirita_download_url.as_str(), runtime, tasks) {
         let path = compute_path(cache_dir.as_str(), name.as_str());
         let _ = std::fs::create_dir_all(path.parent().unwrap().clone());
 
@@ -182,14 +182,14 @@ fn download_webc(cache_dir: &str, name: &str, pirita_download_url: String, runti
     None
 }
 
-fn download_miss(download_url: &str, runtime: &dyn WasiRuntimeImplementation) -> Option<Vec<u8>> {
+fn download_miss(download_url: &str, runtime: &dyn WasiRuntimeImplementation, tasks: &dyn VirtualTaskManager) -> Option<Vec<u8>> {
     let mut options = ReqwestOptions::default();
     options.gzip = true;
 
     let headers = Default::default();
     let data = None;
 
-    match runtime.reqwest(download_url, "GET", options, headers, data) {
+    match runtime.reqwest(tasks, download_url, "GET", options, headers, data) {
         Ok(wapm) => {
             if wapm.status == 200 {
                 return wapm.data;

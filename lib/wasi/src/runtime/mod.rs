@@ -1,5 +1,6 @@
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::Waker;
 use std::{fmt, io};
 use std::future::Future;
 use std::pin::Pin;
@@ -16,7 +17,6 @@ use tracing::*;
 use crate::{WasiCallingId, WasiEnv};
 
 use super::types::*;
-use super::WasiError;
 
 mod ws;
 pub use ws::*;
@@ -121,10 +121,106 @@ pub struct ReqwestResponse {
     pub headers: Vec<(String, String)>,
 }
 
-#[cfg(feature = "sys-thread")]
-lazy_static::lazy_static! {
-    static ref STATIC_RUNTIME: std::sync::Arc<Runtime>
-        = std::sync::Arc::new(Builder::new_multi_thread().enable_all().build().unwrap());
+/// An implementation of task management
+#[allow(unused_variables)]
+pub trait VirtualTaskManager: fmt::Debug + Send + Sync + 'static
+{
+    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
+    /// execution environments) they will need to do asynchronous work whenever the main
+    /// thread goes idle and this is the place to hook for that.
+    fn sleep_now(&self, _id: WasiCallingId, ms: u128) -> Pin<Box<dyn Future<Output=()> + Send + Sync + 'static>>;
+
+    /// Starts an asynchronous task that will run on a shared worker pool
+    /// This task must not block the execution or it could cause a deadlock
+    fn task_shared(
+        &self,
+        task: Box<
+            dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
+        >,
+    ) -> Result<(), WasiThreadError>;
+
+    /// Starts an asynchronous task on the local thread (by running it in a runtime)
+    fn block_on(
+        &self,
+        task: Pin<Box<dyn Future<Output = ()>>>,
+    );
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool that has a stateful thread local variable
+    /// It is ok for this task to block execution and any async futures within its scope
+    fn task_wasm(
+        &self,
+        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) + Send + 'static>,
+        store: Store,
+        module: Module,
+        spawn_type: SpawnType,
+    ) -> Result<(), WasiThreadError>;
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool. It is ok for this task to block execution
+    /// and any async futures within its scope
+    fn task_dedicated(
+        &self,
+        task: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<(), WasiThreadError>;
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool. It is ok for this task to block execution
+    /// and any async futures within its scope
+    fn task_dedicated_async(
+        &self,
+        task: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
+    ) -> Result<(), WasiThreadError>;
+
+    /// Returns the amount of parallelism that is possible on this platform
+    fn thread_parallelism(&self) -> Result<usize, WasiThreadError>;
+
+    /// Returns a list of periodic wakers that need to be woken on a regular basis
+    fn periodic_wakers(&self) -> Arc<Mutex<(Vec<Waker>, tokio::sync::broadcast::Sender<()>)>>;
+
+    /// Gets a function that will register a root periodic waker
+    fn register_root_waker(&self) -> Arc<dyn Fn(Waker) + Send + Sync + 'static> {
+        let periodic_wakers = self.periodic_wakers();
+        Arc::new(move |waker: Waker| {
+            let mut guard = periodic_wakers.lock().unwrap();
+            guard.0.push(waker);
+            let _ = guard.1.send(());
+        })
+    }
+
+    /// Wakes all the root wakers
+    fn wake_root_wakers(&self) {
+        let wakers = {
+            let periodic_wakers = self.periodic_wakers();
+            let mut guard = periodic_wakers.lock().unwrap();
+            guard.0.drain(..).collect::<Vec<_>>()
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// Waits for a periodic period (if there is anyone waiting on it)
+    fn wait_for_root_waker(&self) -> Pin<Box<dyn Future<Output=()> + Send + Sync + 'static>> {
+        let (has_wakers, mut new_wakers) = {
+            let periodic_wakers = self.periodic_wakers();
+            let guard = periodic_wakers.lock().unwrap();
+            let has_wakers = guard.0.is_empty() == false;
+            let new_wakers = guard.1.subscribe();
+            (has_wakers, new_wakers)
+        };
+        let sleep_now = self.sleep_now(crate::current_caller_id(), 5);
+        Box::pin(async move {
+            if has_wakers {
+                tokio::select! {
+                    _ = sleep_now => { },
+                    _ = new_wakers.recv() => { },
+                }
+            } else {
+                let _ = new_wakers.recv().await;
+            }
+        })
+    }
 }
 
 /// Represents an implementation of the WASI runtime - by default everything is
@@ -142,6 +238,11 @@ where Self: fmt::Debug + Sync,
     /// Provides access to all the networking related functions such as sockets.
     /// By default networking is not implemented.
     fn networking(&self) -> Arc<dyn VirtualNetworking + Send + Sync + 'static>;
+
+    /// Create a new task management runtime
+    fn new_task_manager(&self) -> Arc<dyn VirtualTaskManager + Send + Sync + 'static> {
+        Arc::new(DefaultTaskManager::default())
+    }
 
     /// Gets the TTY state
     #[cfg(not(feature = "host-termios"))]
@@ -215,193 +316,6 @@ where Self: fmt::Debug + Sync,
         }
     }
 
-    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
-    /// execution environments) they will need to do asynchronous work whenever the main
-    /// thread goes idle and this is the place to hook for that.
-    fn sleep_now(&self, _id: WasiCallingId, ms: u128) -> Result<(), WasiError> {
-        if ms == 0 {
-            std::thread::yield_now();
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(ms as u64));
-        }
-        Ok(())
-    }
-
-    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
-    /// execution environments) they will need to do asynchronous work whenever the main
-    /// thread goes idle and this is the place to hook for that.
-    #[cfg(not(feature = "sys-thread"))]
-    fn sleep_now_async(&self, _id: WasiCallingId, ms: u128) -> Result<Pin<Box<dyn Future<Output=()>>>, WasiThreadError> {
-        Err(WasiThreadError::Unsupported)
-    }
-
-    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
-    /// execution environments) they will need to do asynchronous work whenever the main
-    /// thread goes idle and this is the place to hook for that.
-    #[cfg(feature = "sys-thread")]
-    fn sleep_now_async(&self, _id: WasiCallingId, ms: u128) -> Result<Pin<Box<dyn Future<Output=()>>>, WasiThreadError> {
-        Ok(Box::pin(async move {
-            if ms == 0 {
-                tokio::task::yield_now().await;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
-            }
-        }))
-    }
-
-    /// Starts an asynchronous task that will run on a shared worker pool
-    /// This task must not block the execution or it could cause a deadlock
-    #[cfg(not(feature = "sys-thread"))]
-    fn task_shared(
-        &self,
-        task: Box<
-            dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
-        >,
-    ) -> Result<(), WasiThreadError> {
-        Err(WasiThreadError::Unsupported)
-    }
-
-    /// Starts an asynchronous task on the local thread (by running it in a runtime)
-    #[cfg(not(feature = "sys-thread"))]
-    fn block_on(
-        &self,
-        task: Pin<Box<dyn Future<Output = ()>>>,
-    ) -> Result<(), WasiThreadError>
-    {
-        Err(WasiThreadError::Unsupported)
-    }
-
-    /// Starts an asynchronous task will will run on a dedicated thread
-    /// pulled from the worker pool that has a stateful thread local variable
-    /// It is ok for this task to block execution and any async futures within its scope
-    #[cfg(not(feature = "sys-thread"))]
-    fn task_wasm(
-        &self,
-        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) + Send + 'static>,
-        store: Store,
-        module: Module,
-        spawn_type: SpawnType,
-    ) -> Result<(), WasiThreadError> {
-        Err(WasiThreadError::Unsupported)
-    }
-
-    /// Starts an asynchronous task will will run on a dedicated thread
-    /// pulled from the worker pool. It is ok for this task to block execution
-    /// and any async futures within its scope
-    #[cfg(not(feature = "sys-thread"))]
-    fn task_dedicated(
-        &self,
-        task: Box<dyn FnOnce() + Send + 'static>,
-    ) -> Result<(), WasiThreadError> {
-        Err(WasiThreadError::Unsupported)
-    }
-
-    /// Starts an asynchronous task will will run on a dedicated thread
-    /// pulled from the worker pool. It is ok for this task to block execution
-    /// and any async futures within its scope
-    #[cfg(not(feature = "sys-thread"))]
-    fn task_dedicated_async(
-        &self,
-        task: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
-    ) -> Result<(), WasiThreadError> {
-        Err(WasiThreadError::Unsupported)
-    }
-
-    #[cfg(feature = "sys-thread")]
-    fn task_shared(
-        &self,
-        task: Box<
-            dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
-        >,
-    ) -> Result<(), WasiThreadError> {
-        STATIC_RUNTIME.spawn(async move {
-            let fut = task();
-            fut.await
-        });
-        Ok(())
-    }
-
-    /// Starts an asynchronous task on the local thread (by running it in a runtime)
-    #[cfg(feature = "sys-thread")]
-    fn block_on(
-        &self,
-        task: Pin<Box<dyn Future<Output = ()>>>,
-    ) -> Result<(), WasiThreadError>
-    {
-        STATIC_RUNTIME.block_on(task);
-        Ok(())
-    }
-
-    #[cfg(feature = "sys-thread")]
-    fn task_wasm(
-        &self,
-        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) + Send + 'static>,
-        store: Store,
-        module: Module,
-        spawn_type: SpawnType,
-    ) -> Result<(), WasiThreadError> {
-        use wasmer::vm::VMSharedMemory;
-
-        let memory: Option<VMMemory> = match spawn_type {
-            SpawnType::CreateWithType(mem) => {
-                Some(
-                    VMSharedMemory::new(&mem.ty, &mem.style)
-                        .map_err(|err| {
-                            error!("failed to create memory - {}", err);
-                        })
-                        .unwrap()
-                        .into()
-                )
-            },
-            SpawnType::NewThread(mem) => Some(mem),
-            SpawnType::Create => None,
-        };
-        
-        STATIC_RUNTIME.spawn_blocking(move || {
-            // Invoke the callback
-            task(store, module, memory);
-        });
-        Ok(())
-    }
-
-    #[cfg(feature = "sys-thread")]
-    fn task_dedicated(
-        &self,
-        task: Box<dyn FnOnce() + Send + 'static>,
-    ) -> Result<(), WasiThreadError> {
-        STATIC_RUNTIME.spawn_blocking(move || {
-            task();
-        });
-        Ok(())
-    }
-
-    #[cfg(feature = "sys-thread")]
-    fn task_dedicated_async(
-        &self,
-        task: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
-    ) -> Result<(), WasiThreadError> {
-        STATIC_RUNTIME.spawn_blocking(move || {
-            let fut = task();
-            STATIC_RUNTIME.block_on(fut)
-        });
-        Ok(())
-    }
-
-    /// Returns the amount of parallelism that is possible on this platform
-    #[cfg(not(feature = "sys-thread"))]
-    fn thread_parallelism(&self) -> Result<usize, WasiThreadError> {
-        Err(WasiThreadError::Unsupported)
-    }
-
-    #[cfg(feature = "sys-thread")]
-    fn thread_parallelism(&self) -> Result<usize, WasiThreadError> {
-        Ok(
-            std::thread::available_parallelism()
-                .map(|a| usize::from(a))
-                .unwrap_or(8)
-        )
-    }
-
     /// Performs a HTTP or HTTPS request to a destination URL
     #[cfg(not(feature = "host-reqwest"))]
     fn reqwest(
@@ -419,6 +333,7 @@ where Self: fmt::Debug + Sync,
     #[cfg(feature = "host-reqwest")]
     fn reqwest(
         &self,
+        tasks: &dyn VirtualTaskManager,
         url: &str,
         method: &str,
         _options: ReqwestOptions,
@@ -489,21 +404,13 @@ where Self: fmt::Debug + Sync,
             }
         };
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        self.task_shared(Box::new(move || Box::pin(async move {
-            let result = work.await;
-            let _ = tx.send(result);
-        })))
-        .map_err(|err| {
-            debug!("failed to process reqwest request - {}", err);
-            __WASI_EIO as u32
-        })?;
-        
-        rx.blocking_recv()
-            .ok_or_else(|| {
-                debug!("failed to process reqwest request - none");
-                __WASI_EIO as u32
-            })?
+        let (tx, rx) = std::sync::mpsc::channel();
+        tasks
+            .block_on(Box::pin(async move {
+                let ret = work.await;
+                let _ = tx.send(ret);
+            }));
+        rx.try_recv().map_err(|_| __WASI_EIO)?
     }
 
     /// Make a web socket connection to a particular URL
@@ -609,6 +516,249 @@ for PluggableRuntimeImplementation
             networking: Arc::new(wasmer_wasi_local_networking::LocalNetworking::default()),
             bus: Arc::new(DefaultVirtualBus::default()),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct DefaultTaskManager {
+    /// This is the tokio runtime used for ASYNC operations that is
+    /// used for non-javascript environments
+    #[cfg(feature = "sys-thread")]
+    runtime: std::sync::Arc<Runtime>,
+    /// List of periodic wakers to wake (this is used by IO subsystems)
+    /// that do not support async operations
+    periodic_wakers: Arc<Mutex<(Vec<Waker>, tokio::sync::broadcast::Sender<()>)>>
+}
+
+#[cfg(not(feature = "sys-thread"))]
+impl Default
+for DefaultTaskManager {
+    fn default() -> Self {
+        Self { }
+    }
+}
+
+#[cfg(not(feature = "sys-thread"))]
+impl VirtualTaskManagement
+for DefaultTaskManagement
+{
+    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
+    /// execution environments) they will need to do asynchronous work whenever the main
+    /// thread goes idle and this is the place to hook for that.
+    fn sleep_now(&self, id: WasiCallingId, ms: u128) -> Pin<Box<dyn Future<Output=()> + Send + Sync + 'static>> {
+        if ms == 0 {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+        }
+        Box::pin(async move {
+        })
+    }
+
+    /// Starts an asynchronous task that will run on a shared worker pool
+    /// This task must not block the execution or it could cause a deadlock
+    fn task_shared(
+        &self,
+        task: Box<
+            dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
+        >,
+    ) -> Result<(), WasiThreadError> {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Starts an asynchronous task on the local thread (by running it in a runtime)
+    fn block_on(
+        &self,
+        _task: Pin<Box<dyn Future<Output = ()>>>,
+    ) -> Result<(), WasiThreadError>
+    {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool that has a stateful thread local variable
+    /// It is ok for this task to block execution and any async futures within its scope
+    fn task_wasm(
+        &self,
+        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) + Send + 'static>,
+        store: Store,
+        module: Module,
+        spawn_type: SpawnType,
+    ) -> Result<(), WasiThreadError> {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool. It is ok for this task to block execution
+    /// and any async futures within its scope
+    fn task_dedicated(
+        &self,
+        task: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<(), WasiThreadError> {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool. It is ok for this task to block execution
+    /// and any async futures within its scope
+    fn task_dedicated_async(
+        &self,
+        task: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
+    ) -> Result<(), WasiThreadError> {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Returns the amount of parallelism that is possible on this platform
+    fn thread_parallelism(&self) -> Result<usize, WasiThreadError> {
+        Err(WasiThreadError::Unsupported)
+    }
+
+    /// Returns a reference to the periodic wakers used by this task manager
+    fn periodic_wakers(&self) -> Arc<Mutex<(Vec<Waker>, tokio::sync::broadcast::Sender<()>)>> {
+        self.periodic_wakers.clone()
+    }
+}
+
+#[cfg(feature = "sys-thread")]
+impl Default
+for DefaultTaskManager {
+    fn default() -> Self {
+        let runtime: std::sync::Arc<Runtime>
+            = std::sync::Arc::new(Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .unwrap()
+            );
+        let (tx, _) = tokio::sync::broadcast::channel(100);
+        Self {
+            runtime,
+            periodic_wakers: Arc::new(Mutex::new((Vec::new(), tx)))
+        }
+    }
+}
+
+#[cfg(feature = "sys-thread")]
+impl VirtualTaskManager
+for DefaultTaskManager
+{
+    /// Invokes whenever a WASM thread goes idle. In some runtimes (like singlethreaded
+    /// execution environments) they will need to do asynchronous work whenever the main
+    /// thread goes idle and this is the place to hook for that.
+    fn sleep_now(&self, _id: WasiCallingId, ms: u128) -> Pin<Box<dyn Future<Output=()> + Send + Sync + 'static>> {
+        Box::pin(async move {
+            if ms == 0 {
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            }
+        })
+    }
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool that has a stateful thread local variable
+    /// It is ok for this task to block execution and any async futures within its scope
+    fn task_shared(
+        &self,
+        task: Box<
+            dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
+        >,
+    ) -> Result<(), WasiThreadError> {
+        self.runtime.spawn(async move {
+            let fut = task();
+            fut.await
+        });
+        Ok(())
+    }
+
+    /// Starts an asynchronous task on the local thread (by running it in a runtime)
+    fn block_on(
+        &self,
+        task: Pin<Box<dyn Future<Output = ()>>>,
+    )
+    {
+        let _guard = self.runtime.enter();
+        self.runtime.block_on(async move {
+            task.await;
+        });
+    }
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool that has a stateful thread local variable
+    /// It is ok for this task to block execution and any async futures within its scope
+    fn task_wasm(
+        &self,
+        task: Box<dyn FnOnce(Store, Module, Option<VMMemory>) + Send + 'static>,
+        store: Store,
+        module: Module,
+        spawn_type: SpawnType,
+    ) -> Result<(), WasiThreadError> {
+        use wasmer::vm::VMSharedMemory;
+
+        let memory: Option<VMMemory> = match spawn_type {
+            SpawnType::CreateWithType(mem) => {
+                Some(
+                    VMSharedMemory::new(&mem.ty, &mem.style)
+                        .map_err(|err| {
+                            error!("failed to create memory - {}", err);
+                        })
+                        .unwrap()
+                        .into()
+                )
+            },
+            SpawnType::NewThread(mem) => Some(mem),
+            SpawnType::Create => None,
+        };
+        
+        std::thread::spawn(move || {
+            // Invoke the callback
+            task(store, module, memory);
+        });
+        Ok(())
+    }
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool. It is ok for this task to block execution
+    /// and any async futures within its scope
+    fn task_dedicated(
+        &self,
+        task: Box<dyn FnOnce() + Send + 'static>,
+    ) -> Result<(), WasiThreadError> {
+        std::thread::spawn(move || {
+            task();
+        });
+        Ok(())
+    }
+
+    /// Starts an asynchronous task will will run on a dedicated thread
+    /// pulled from the worker pool. It is ok for this task to block execution
+    /// and any async futures within its scope
+    fn task_dedicated_async(
+        &self,
+        task: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>,
+    ) -> Result<(), WasiThreadError> {
+        let runtime = self.runtime.clone();
+        std::thread::spawn(move || {
+            let fut = task();
+            runtime.block_on(fut);
+        });
+        Ok(())
+    }
+
+    /// Number of concurrent threads supported on this machine
+    /// in a stable way (ideally we should aim for this number
+    /// of background threads)
+    fn thread_parallelism(&self) -> Result<usize, WasiThreadError> {
+        Ok(
+            std::thread::available_parallelism()
+                .map(|a| usize::from(a))
+                .unwrap_or(8)
+        )
+    }
+
+    /// Returns a reference to the periodic wakers used by this task manager
+    fn periodic_wakers(&self) -> Arc<Mutex<(Vec<Waker>, tokio::sync::broadcast::Sender<()>)>> {
+        self.periodic_wakers.clone()
     }
 }
 

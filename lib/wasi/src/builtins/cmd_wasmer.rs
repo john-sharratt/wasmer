@@ -19,7 +19,7 @@ use crate::{
         BinaryPackage,
         CachedCompiledModules,
         spawn_exec
-    },
+    }, VirtualTaskManager,
 };
 
 const HELP: &'static str = r#"USAGE:
@@ -67,7 +67,8 @@ impl CmdWasmer{
             config.env_mut().state = Arc::new(state);
 
             // Get the binary
-            if let Some(binary) = self.get(what.clone())
+            let tasks = parent_ctx.data().tasks();
+            if let Some(binary) = self.get(what.clone(), tasks)
             {
                 // Now run the module
                 spawn_exec(binary, name, store, config, &self.runtime, &self.cache)
@@ -81,11 +82,12 @@ impl CmdWasmer{
         }
     }
 
-    pub fn get(&self, name: String) -> Option<BinaryPackage>
+    pub fn get(&self, name: String, tasks: &dyn VirtualTaskManager) -> Option<BinaryPackage>
     {
         self.cache.get_webc(
             name.as_str(),
-            self.runtime.deref()
+            self.runtime.deref(),
+            tasks,
         )
     }
 }

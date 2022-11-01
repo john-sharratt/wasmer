@@ -13,7 +13,7 @@ use wasmer::{Module, AsStoreRef};
 use wasmer::Engine;
 use wasmer_wasi_types::__WASI_CLOCK_MONOTONIC;
 
-use crate::WasiRuntimeImplementation;
+use crate::{WasiRuntimeImplementation, VirtualTaskManager};
 use crate::syscalls::platform_clock_time_get;
 
 use super::BinaryPackage;
@@ -128,7 +128,7 @@ impl CachedCompiledModules
         wasmer::Store::default()
     }
 
-    pub fn get_webc(&self, webc: &str, runtime: &dyn WasiRuntimeImplementation) -> Option<BinaryPackage> {
+    pub fn get_webc(&self, webc: &str, runtime: &dyn WasiRuntimeImplementation, tasks: &dyn VirtualTaskManager) -> Option<BinaryPackage> {
         let name = webc.to_string();
         let now = platform_clock_time_get(__WASI_CLOCK_MONOTONIC, 1_000_000).unwrap() as u128;
         
@@ -157,7 +157,7 @@ impl CachedCompiledModules
         // Now try for the WebC
         let wapm_name = name.split_once(":").map(|a| a.0).unwrap_or_else(|| name.as_str());
         let cache_webc_dir = self.cache_webc_dir.as_str();
-        if let Some(data) = crate::wapm::fetch_webc(cache_webc_dir, wapm_name, runtime)
+        if let Some(data) = crate::wapm::fetch_webc(cache_webc_dir, wapm_name, runtime, tasks)
         {
             // If the package is the same then don't replace it
             // as we don't want to duplicate the memory usage
