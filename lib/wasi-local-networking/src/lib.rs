@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 use bytes::Bytes;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
 use std::pin::Pin;
@@ -359,7 +359,8 @@ impl VirtualTcpSocket for LocalTcpStream {
         Ok(())
     }
 
-    fn shutdown(&mut self, how: Shutdown) -> Result<()> {
+    async fn shutdown(&mut self, how: Shutdown) -> Result<()> {
+        self.stream.flush().await.map_err(io_err_into_net_error)?;
         self.shutdown = Some(how);
         Ok(())
     }

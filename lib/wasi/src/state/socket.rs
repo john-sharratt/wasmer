@@ -1209,7 +1209,7 @@ impl InodeSocket {
         inner.silence_write_ready = false;
         match &mut inner.kind {
             InodeSocketKind::TcpStream(sock) => {
-                sock.shutdown(how).map_err(net_error_into_wasi_err)?;
+                sock.shutdown(how).await.map_err(net_error_into_wasi_err)?;
             }
             InodeSocketKind::HttpRequest(http, ..) => {
                 let http = http.get_mut().unwrap();

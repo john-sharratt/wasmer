@@ -2106,13 +2106,9 @@ pub fn fd_write<M: MemorySize>(
                     counter.fetch_add(val, Ordering::AcqRel);
                     {
                         let mut guard = wakers.lock().unwrap();
-                        if guard.is_empty() {
-                            immediate.store(true, Ordering::Release);
-                        }
+                        immediate.store(true, Ordering::Release);
                         while let Some(wake) = guard.pop_back() {
-                            // we just drop the sender which will terminate the receiver
-                            // asynchronously without the need for a blocking operation
-                            drop(wake);
+                            let _ = wake.send(());
                         }
                     }
 
