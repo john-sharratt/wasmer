@@ -1325,7 +1325,7 @@ impl InodeSocket {
         };
         if ret.is_ready() {
             // TODO - This will suppress the write ready notifications
-            //inner.silence_write_ready = true;
+            inner.silence_write_ready = true;
         }
         ret
     }
